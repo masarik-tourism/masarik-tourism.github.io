@@ -55,6 +55,30 @@ export interface TravelerDocument {
   uploadedAt: string;
 }
 
+export type FamilyRelationship =
+  | 'spouse'
+  | 'child'
+  | 'parent'
+  | 'sibling'
+  | 'other';
+
+export interface FamilyMember {
+  id: string;
+  relationship: FamilyRelationship;
+  firstName: string;
+  lastName: string;
+  passportFullName?: string;
+  passportNumber: string;
+  passportExpiryDate?: string;
+  nationality?: string;
+  passportPhotoUrl: string;
+  passportStoragePath?: string;
+  personalPhotoUrl: string;
+  personalPhotoStoragePath?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface TravelerProfile {
   phone: string;
   phoneNormalized?: string;
@@ -75,6 +99,7 @@ export interface TravelerProfile {
   passportExpiryDate?: string;
   nationality?: string;
   documents: TravelerDocument[];
+  familyMembers?: FamilyMember[];
 }
 
 export interface PassportAiCheckResult {

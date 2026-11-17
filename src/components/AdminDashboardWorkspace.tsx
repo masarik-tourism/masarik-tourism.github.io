@@ -44,11 +44,13 @@ import {
   exportAllDataBackupJson,
   formatPhoneForDisplay,
   getAllTravelers,
+  getRelationshipLabel,
   getTravelerDisplayNames,
   normalizePhone,
   updateAdminPin,
   updateTravelerProfileDetails,
 } from '../utils/travelerStore';
+import { buildDescriptiveFilename, downloadCloudFile } from '../utils/firebaseStorageHelper';
 import {
   ALL_ADMIN_PERMISSIONS,
   ADMIN_AUTH_UPDATED_EVENT,
@@ -118,9 +120,11 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const [editAdminNotes, setEditAdminNotes] = useState('');
   const [folderSavedMsg, setFolderSavedMsg] = useState('');
   const [confirmDeletePhone, setConfirmDeletePhone] = useState<string | null>(null);
-  const [previewDocImage, setPreviewDocImage] = useState<{ label: string; dataUrl: string } | null>(
-    null
-  );
+  const [previewDocImage, setPreviewDocImage] = useState<{
+    label: string;
+    dataUrl: string;
+    downloadName?: string;
+  } | null>(null);
 
   // Tab 2: Announcements & Site Content
   const [siteDraft, setSiteDraft] = useState<SiteConfig>(() => getSiteConfig());
@@ -637,6 +641,17 @@ export const AdminDashboardWorkspace: React.FC = () => {
                                       {t('المستندات:', 'Docs:')}{' '}
                                       <strong className="text-[#0284C7]">{docsCount}</strong>
                                     </span>
+                                    {(client.familyMembers?.length || 0) > 0 && (
+                                      <>
+                                        <span>·</span>
+                                        <span className="px-2 py-0.5 rounded-full bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#0F2438] text-[10.5px] font-black">
+                                          {t(
+                                            `أفراد العائلة: ${client.familyMembers?.length}`,
+                                            `Family: ${client.familyMembers?.length}`
+                                          )}
+                                        </span>
+                                      </>
+                                    )}
                                   </>
                                 )}
                               </div>
@@ -1062,64 +1077,125 @@ export const AdminDashboardWorkspace: React.FC = () => {
 
               {/* Right/End: Documents Gallery */}
               <div className="lg:col-span-6 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
-                <h4 className="text-sm font-black text-[#0F2438]">
-                  {t(
-                    `صور الجواز والمستندات المرفوعة (${selectedClient.documents?.length || 0})`,
-                    `Uploaded Passport Scans & Documents (${selectedClient.documents?.length || 0})`
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-black text-[#0F2438]">
+                    {t(
+                      `صور الجواز والمستندات المرفوعة (${selectedClient.documents?.length || 0})`,
+                      `Uploaded Passport Scans & Documents (${selectedClient.documents?.length || 0})`
+                    )}
+                  </h4>
+
+                  {selectedClient.avatarUrl && (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewDocImage({
+                            label: `${getTravelerDisplayNames(selectedClient).fullDisplayName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                            dataUrl: selectedClient.avatarUrl || '',
+                            downloadName: buildDescriptiveFilename(
+                              'Photo',
+                              getTravelerDisplayNames(selectedClient).firstName,
+                              getTravelerDisplayNames(selectedClient).lastName
+                            ),
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3 h-3" />
+                        <span>{t('الصورة الشخصية', 'Avatar')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void downloadCloudFile(
+                            selectedClient.avatarUrl || '',
+                            buildDescriptiveFilename(
+                              'Photo',
+                              getTravelerDisplayNames(selectedClient).firstName,
+                              getTravelerDisplayNames(selectedClient).lastName
+                            )
+                          )
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>{t('تحميل الشخصية', 'Download Photo')}</span>
+                      </button>
+                    </div>
                   )}
-                </h4>
+                </div>
 
                 {selectedClient.documents && selectedClient.documents.length > 0 ? (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {selectedClient.documents.map((doc) => (
-                      <div
-                        key={doc.id}
-                        className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5"
-                      >
-                        <div className="flex items-center gap-3">
-                          <img
-                            src={doc.dataUrl}
-                            alt={doc.label}
-                            className="w-16 h-16 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
-                          />
-                          <div className="min-w-0 flex-1">
-                            <span className="text-xs font-black text-[#0F2438] block truncate">
-                              {doc.label}
-                            </span>
-                            <span className="text-[11px] text-slate-500 block truncate">
-                              {doc.fileName}
-                            </span>
-                            <span className="text-[10px] text-slate-400 block tabular-nums">
-                              {doc.uploadedAt?.slice(0, 10)}
-                            </span>
+                    {selectedClient.documents.map((docItem) => {
+                      const clientNames = getTravelerDisplayNames(selectedClient);
+                      const dlFilename =
+                        docItem.docType === 'passport'
+                          ? buildDescriptiveFilename(
+                              'Passport',
+                              clientNames.firstName,
+                              clientNames.lastName
+                            )
+                          : docItem.docType === 'photo'
+                          ? buildDescriptiveFilename(
+                              'Photo',
+                              clientNames.firstName,
+                              clientNames.lastName
+                            )
+                          : docItem.fileName || `${selectedClient.phone}-${docItem.docType}.jpg`;
+                      return (
+                        <div
+                          key={docItem.id}
+                          className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5"
+                        >
+                          <div className="flex items-center gap-3">
+                            <img
+                              src={docItem.dataUrl}
+                              alt={docItem.label}
+                              className="w-16 h-16 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <span className="text-xs font-black text-[#0F2438] block truncate">
+                                {docItem.label}
+                              </span>
+                              <span className="text-[11px] text-slate-500 block truncate">
+                                {docItem.fileName}
+                              </span>
+                              <span className="text-[10px] text-slate-400 block tabular-nums">
+                                {docItem.uploadedAt?.slice(0, 10)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewDocImage({
+                                  label: docItem.label,
+                                  dataUrl: docItem.dataUrl,
+                                  downloadName: dlFilename,
+                                })
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>{t('معاينة', 'Inspect')}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => void downloadCloudFile(docItem.dataUrl, dlFilename)}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>{t('تحميل', 'Download')}</span>
+                            </button>
                           </div>
                         </div>
-
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPreviewDocImage({ label: doc.label, dataUrl: doc.dataUrl })
-                            }
-                            className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>{t('معاينة', 'Inspect')}</span>
-                          </button>
-
-                          <a
-                            href={doc.dataUrl}
-                            download={doc.fileName || `${selectedClient.phone}-${doc.docType}.jpg`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center justify-center gap-1"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>{t('تحميل', 'Download')}</span>
-                          </a>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="bg-white border border-dashed border-slate-300 rounded-xl p-6 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
@@ -1133,6 +1209,149 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Dedicated Family Members & Companions Cloud Section */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                <div className="flex items-center gap-2">
+                  <Users className="w-5 h-5 text-[#C6A052]" />
+                  <h4 className="text-sm font-black text-[#0F2438]">
+                    {t(
+                      `أفراد العائلة والمرافقون (${selectedClient.familyMembers?.length || 0})`,
+                      `Family Members & Companions (${selectedClient.familyMembers?.length || 0})`
+                    )}
+                  </h4>
+                </div>
+              </div>
+
+              {selectedClient.familyMembers && selectedClient.familyMembers.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  {selectedClient.familyMembers.map((member) => {
+                    const memberName = `${member.firstName} ${member.lastName}`.trim();
+                    const passportFilename = buildDescriptiveFilename(
+                      'Passport',
+                      member.firstName,
+                      member.lastName
+                    );
+                    const photoFilename = buildDescriptiveFilename(
+                      'Photo',
+                      member.firstName,
+                      member.lastName
+                    );
+                    return (
+                      <div
+                        key={member.id}
+                        className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          {member.personalPhotoUrl ? (
+                            <img
+                              src={member.personalPhotoUrl}
+                              alt={memberName}
+                              onClick={() =>
+                                setPreviewDocImage({
+                                  label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                                  dataUrl: member.personalPhotoUrl,
+                                  downloadName: photoFilename,
+                                })
+                              }
+                              className="w-12 h-12 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100 cursor-pointer"
+                            />
+                          ) : (
+                            <div className="w-12 h-12 rounded-full bg-[#0F2438] text-[#E5C887] flex items-center justify-center text-sm font-black shrink-0">
+                              {memberName.slice(0, 1) || 'ع'}
+                            </div>
+                          )}
+
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs sm:text-sm font-black text-[#0F2438] truncate">
+                                {memberName}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-[#C6A052]/20 border border-[#C6A052]/50 text-[10px] font-black text-[#0F2438]">
+                                {getRelationshipLabel(member.relationship, lang)}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-600 tabular-nums uppercase">
+                              {t('رقم الجواز:', 'Passport No:')}{' '}
+                              <strong className="text-[#0F2438]">{member.passportNumber}</strong>
+                              {member.passportExpiryDate && ` · ${member.passportExpiryDate}`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-2 border-t border-slate-100">
+                          {member.passportPhotoUrl && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewDocImage({
+                                    label: `${memberName} — ${t('صورة جواز السفر', 'Passport Photo')}`,
+                                    dataUrl: member.passportPhotoUrl,
+                                    downloadName: passportFilename,
+                                  })
+                                }
+                                className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>{t('معاينة الجواز', 'Passport')}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void downloadCloudFile(member.passportPhotoUrl, passportFilename)
+                                }
+                                className="px-2 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>{t('تحميل الجواز', 'DL Passport')}</span>
+                              </button>
+                            </>
+                          )}
+
+                          {member.personalPhotoUrl && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewDocImage({
+                                    label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                                    dataUrl: member.personalPhotoUrl,
+                                    downloadName: photoFilename,
+                                  })
+                                }
+                                className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>{t('معاينة الصورة', 'Photo')}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void downloadCloudFile(member.personalPhotoUrl, photoFilename)
+                                }
+                                className="px-2 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>{t('تحميل الشخصية', 'DL Photo')}</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="bg-white border border-dashed border-slate-300 rounded-xl p-5 text-center text-xs text-slate-500">
+                  {t(
+                    'لم يقم العميل بإضافة أفراد عائلة أو مرافقين حتى الآن.',
+                    'No family members or companions added by this client yet.'
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1869,15 +2088,30 @@ export const AdminDashboardWorkspace: React.FC = () => {
             className="bg-white rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="bg-[#0F2438] text-white px-4 py-3 flex items-center justify-between">
+            <div className="bg-[#0F2438] text-white px-4 py-3 flex items-center justify-between gap-2">
               <span className="text-xs font-bold truncate">{previewDocImage.label}</span>
-              <button
-                type="button"
-                onClick={() => setPreviewDocImage(null)}
-                className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void downloadCloudFile(
+                      previewDocImage.dataUrl,
+                      previewDocImage.downloadName || 'Masarik_Client_Document.jpg'
+                    )
+                  }
+                  className="px-3 py-1.5 rounded-lg bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center gap-1 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{t('تحميل', 'Download')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewDocImage(null)}
+                  className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <div className="p-4 bg-slate-100 flex items-center justify-center max-h-[75vh] overflow-auto">
               <img

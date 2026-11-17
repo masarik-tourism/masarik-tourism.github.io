@@ -114,6 +114,10 @@
         "documents": {
           "type": "array",
           "description": "Bounded list (max 30) of uploaded document metadata with Firebase Storage download URLs."
+        },
+        "familyMembers": {
+          "type": "array",
+          "description": "Bounded list (max 25) of family members and companions with passport details and permanent Firebase Storage URLs for passport and personal photos."
         }
       },
       "required": [

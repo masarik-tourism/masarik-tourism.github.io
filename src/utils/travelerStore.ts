@@ -9,11 +9,18 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
-import { TravelerDocument, TravelerProfile, VisaOrderStatus } from '../types/travel';
+import {
+  FamilyMember,
+  FamilyRelationship,
+  TravelerDocument,
+  TravelerProfile,
+  VisaOrderStatus,
+} from '../types/travel';
 import { TravelRepository } from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
   deleteTravelerDocumentFromStorage,
+  uploadFamilyMemberFileToStorage,
   uploadTravelerAvatarToStorage,
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
@@ -37,6 +44,99 @@ export const VISA_ORDER_STATUSES: VisaOrderStatus[] = [
 ];
 
 export const TRAVELERS_UPDATED_EVENT = 'masarik-travelers-updated';
+
+export const FAMILY_RELATIONSHIPS: FamilyRelationship[] = [
+  'spouse',
+  'child',
+  'parent',
+  'sibling',
+  'other',
+];
+
+export const RELATIONSHIP_LABELS: Record<FamilyRelationship, { ar: string; en: string }> = {
+  spouse: { ar: 'زوج / زوجة', en: 'Spouse' },
+  child: { ar: 'ابن / ابنة', en: 'Son / Daughter' },
+  parent: { ar: 'أب / أم', en: 'Father / Mother' },
+  sibling: { ar: 'أخ / أخت', en: 'Brother / Sister' },
+  other: { ar: 'قريب / مرافق آخر', en: 'Other Relative / Companion' },
+};
+
+export function getRelationshipLabel(rel: FamilyRelationship, lang: 'ar' | 'en' = 'ar'): string {
+  const entry = RELATIONSHIP_LABELS[rel] || RELATIONSHIP_LABELS.other;
+  return lang === 'en' ? entry.en : entry.ar;
+}
+
+export function formatTravelersOrderSummary(
+  traveler: TravelerProfile | null,
+  selectedIds: string[],
+  lang: 'ar' | 'en' = 'ar'
+): string {
+  if (!traveler || selectedIds.length === 0) return '';
+
+  const lines: string[] = [];
+  const selectedSet = new Set(selectedIds);
+  const ownerNames = getTravelerDisplayNames(traveler);
+  const ownerPassportDoc = (traveler.documents || []).find((d) => d.docType === 'passport');
+
+  if (selectedSet.has('owner')) {
+    const ownerRole = lang === 'en' ? 'Account Holder' : 'صاحب الحساب';
+    const passportNo = traveler.passportNumber || (lang === 'en' ? 'Not set' : 'غير مسجل');
+    const passportUrl =
+      ownerPassportDoc?.dataUrl && ownerPassportDoc.dataUrl.startsWith('http')
+        ? ownerPassportDoc.dataUrl
+        : '';
+    const photoUrl =
+      traveler.avatarUrl && traveler.avatarUrl.startsWith('http') ? traveler.avatarUrl : '';
+
+    lines.push(
+      lang === 'en'
+        ? `• Traveler (${ownerRole}): ${ownerNames.fullDisplayName} | Passport: ${passportNo}`
+        : `• المسافر (${ownerRole}): ${ownerNames.fullDisplayName} | جواز: ${passportNo}`
+    );
+    if (passportUrl) {
+      lines.push(
+        lang === 'en' ? `  Passport Link: ${passportUrl}` : `  رابط الجواز: ${passportUrl}`
+      );
+    }
+    if (photoUrl) {
+      lines.push(
+        lang === 'en' ? `  Photo Link: ${photoUrl}` : `  رابط الصورة الشخصية: ${photoUrl}`
+      );
+    }
+  }
+
+  for (const member of traveler.familyMembers || []) {
+    if (!selectedSet.has(member.id)) continue;
+    const memberName = `${member.firstName} ${member.lastName}`.trim();
+    const relLabel = getRelationshipLabel(member.relationship, lang);
+    const passportUrl =
+      member.passportPhotoUrl && member.passportPhotoUrl.startsWith('http')
+        ? member.passportPhotoUrl
+        : '';
+    const photoUrl =
+      member.personalPhotoUrl && member.personalPhotoUrl.startsWith('http')
+        ? member.personalPhotoUrl
+        : '';
+
+    lines.push(
+      lang === 'en'
+        ? `• Traveler (${relLabel}): ${memberName} | Passport: ${member.passportNumber}`
+        : `• المسافر (${relLabel}): ${memberName} | جواز: ${member.passportNumber}`
+    );
+    if (passportUrl) {
+      lines.push(
+        lang === 'en' ? `  Passport Link: ${passportUrl}` : `  رابط الجواز: ${passportUrl}`
+      );
+    }
+    if (photoUrl) {
+      lines.push(
+        lang === 'en' ? `  Photo Link: ${photoUrl}` : `  رابط الصورة الشخصية: ${photoUrl}`
+      );
+    }
+  }
+
+  return lines.join('\n');
+}
 
 export interface StagedDraftDocument {
   id: string;
@@ -230,6 +330,41 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       }))
     : [];
 
+  const validRelations = new Set<FamilyRelationship>(FAMILY_RELATIONSHIPS);
+  const safeFamilyMembers: FamilyMember[] = Array.isArray(profile.familyMembers)
+    ? profile.familyMembers.slice(0, 25).map((m) => {
+        const rel: FamilyRelationship = validRelations.has(m.relationship)
+          ? m.relationship
+          : 'other';
+        return {
+          id: String(m.id || `fm-${Date.now()}`).slice(0, 80),
+          relationship: rel,
+          firstName: String(m.firstName || '').trim().slice(0, 80),
+          lastName: String(m.lastName || '').trim().slice(0, 80),
+          ...(m.passportFullName
+            ? { passportFullName: String(m.passportFullName).trim().slice(0, 200) }
+            : {}),
+          passportNumber: String(m.passportNumber || '').trim().toUpperCase().slice(0, 40),
+          ...(m.passportExpiryDate
+            ? { passportExpiryDate: String(m.passportExpiryDate).slice(0, 32) }
+            : {}),
+          ...(m.nationality ? { nationality: String(m.nationality).trim().slice(0, 100) } : {}),
+          passportPhotoUrl:
+            m.passportPhotoUrl && m.passportPhotoUrl.length <= 4096 ? m.passportPhotoUrl : '',
+          ...(m.passportStoragePath
+            ? { passportStoragePath: String(m.passportStoragePath).slice(0, 300) }
+            : {}),
+          personalPhotoUrl:
+            m.personalPhotoUrl && m.personalPhotoUrl.length <= 4096 ? m.personalPhotoUrl : '',
+          ...(m.personalPhotoStoragePath
+            ? { personalPhotoStoragePath: String(m.personalPhotoStoragePath).slice(0, 300) }
+            : {}),
+          createdAt: String(m.createdAt || new Date().toISOString()).slice(0, 64),
+          ...(m.updatedAt ? { updatedAt: String(m.updatedAt).slice(0, 64) } : {}),
+        };
+      })
+    : [];
+
   const payload: Record<string, unknown> = {
     phone: normalized,
     phoneNormalized: normalized,
@@ -242,6 +377,7 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     updatedAt: new Date().toISOString(),
     orderStatus: safeStatus,
     documents: safeDocs,
+    familyMembers: safeFamilyMembers,
   };
 
   if (profile.verifiedAt) payload.verifiedAt = String(profile.verifiedAt).slice(0, 64);
@@ -285,6 +421,22 @@ function mergeCloudClientWithLocal(
       })
     : localExisting?.documents || [];
 
+  const localFamilyById = new Map<string, FamilyMember>();
+  if (localExisting?.familyMembers) {
+    localExisting.familyMembers.forEach((m) => localFamilyById.set(m.id, m));
+  }
+
+  const mergedFamilyMembers: FamilyMember[] = Array.isArray(cloudData.familyMembers)
+    ? cloudData.familyMembers.map((m) => {
+        const localMember = localFamilyById.get(m.id);
+        return {
+          ...m,
+          passportPhotoUrl: m.passportPhotoUrl || localMember?.passportPhotoUrl || '',
+          personalPhotoUrl: m.personalPhotoUrl || localMember?.personalPhotoUrl || '',
+        };
+      })
+    : localExisting?.familyMembers || [];
+
   const split = splitPassportName(cloudData.name || '');
 
   return {
@@ -295,6 +447,7 @@ function mergeCloudClientWithLocal(
     avatarUrl: cloudData.avatarUrl || localExisting?.avatarUrl || undefined,
     avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
     documents: mergedDocs,
+    familyMembers: mergedFamilyMembers,
   };
 }
 
@@ -982,6 +1135,151 @@ export async function commitTravelerProfileDraftCloud(
   return updated;
 }
 
+export async function saveFamilyMemberCloud(
+  rawPhone: string,
+  memberInput: {
+    id?: string;
+    relationship: FamilyRelationship;
+    firstName: string;
+    lastName: string;
+    passportFullName?: string;
+    passportNumber: string;
+    passportExpiryDate?: string;
+    nationality?: string;
+    passportPhotoUrl: string;
+    personalPhotoUrl: string;
+  }
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existingProfile = all[phone];
+  if (!existingProfile) return null;
+
+  const memberId =
+    memberInput.id || `fm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const existingMember = (existingProfile.familyMembers || []).find((m) => m.id === memberId);
+
+  // Upload passport photo to Firebase Storage if a fresh dataUrl was provided
+  let finalPassportPhotoUrl = memberInput.passportPhotoUrl || existingMember?.passportPhotoUrl || '';
+  let finalPassportStoragePath = existingMember?.passportStoragePath;
+
+  if (finalPassportPhotoUrl.startsWith('data:')) {
+    const uploadedPassport = await uploadFamilyMemberFileToStorage(
+      phone,
+      memberId,
+      'passport',
+      finalPassportPhotoUrl
+    );
+    if (uploadedPassport) {
+      if (
+        existingMember?.passportStoragePath &&
+        existingMember.passportStoragePath !== uploadedPassport.storagePath
+      ) {
+        void deleteTravelerDocumentFromStorage(existingMember.passportStoragePath);
+      }
+      finalPassportPhotoUrl = uploadedPassport.downloadUrl;
+      finalPassportStoragePath = uploadedPassport.storagePath;
+    }
+  }
+
+  // Upload personal photo to Firebase Storage if a fresh dataUrl was provided
+  let finalPersonalPhotoUrl = memberInput.personalPhotoUrl || existingMember?.personalPhotoUrl || '';
+  let finalPersonalStoragePath = existingMember?.personalPhotoStoragePath;
+
+  if (finalPersonalPhotoUrl.startsWith('data:')) {
+    const uploadedPersonal = await uploadFamilyMemberFileToStorage(
+      phone,
+      memberId,
+      'photo',
+      finalPersonalPhotoUrl
+    );
+    if (uploadedPersonal) {
+      if (
+        existingMember?.personalPhotoStoragePath &&
+        existingMember.personalPhotoStoragePath !== uploadedPersonal.storagePath
+      ) {
+        void deleteTravelerDocumentFromStorage(existingMember.personalPhotoStoragePath);
+      }
+      finalPersonalPhotoUrl = uploadedPersonal.downloadUrl;
+      finalPersonalStoragePath = uploadedPersonal.storagePath;
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const cleanFirst = memberInput.firstName.trim();
+  const cleanLast = memberInput.lastName.trim();
+
+  const savedMember: FamilyMember = {
+    id: memberId,
+    relationship: memberInput.relationship,
+    firstName: cleanFirst,
+    lastName: cleanLast,
+    ...(memberInput.passportFullName?.trim()
+      ? { passportFullName: memberInput.passportFullName.trim() }
+      : {}),
+    passportNumber: memberInput.passportNumber.trim().toUpperCase(),
+    ...(memberInput.passportExpiryDate
+      ? { passportExpiryDate: memberInput.passportExpiryDate }
+      : {}),
+    ...(memberInput.nationality?.trim() ? { nationality: memberInput.nationality.trim() } : {}),
+    passportPhotoUrl: finalPassportPhotoUrl,
+    ...(finalPassportStoragePath ? { passportStoragePath: finalPassportStoragePath } : {}),
+    personalPhotoUrl: finalPersonalPhotoUrl,
+    ...(finalPersonalStoragePath ? { personalPhotoStoragePath: finalPersonalStoragePath } : {}),
+    createdAt: existingMember?.createdAt || nowIso,
+    updatedAt: nowIso,
+  };
+
+  // Re-read latest map in case snapshot arrived while uploading
+  const latestAll = getAllTravelers();
+  const latestProfile = latestAll[phone] || existingProfile;
+  const currentList = latestProfile.familyMembers || [];
+  const existingIdx = currentList.findIndex((m) => m.id === memberId);
+
+  const nextList =
+    existingIdx >= 0
+      ? currentList.map((m, idx) => (idx === existingIdx ? savedMember : m))
+      : [...currentList, savedMember];
+
+  const updated: TravelerProfile = {
+    ...latestProfile,
+    familyMembers: nextList,
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function deleteFamilyMemberCloud(
+  rawPhone: string,
+  memberId: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existingProfile = all[phone];
+  if (!existingProfile) return null;
+
+  const target = (existingProfile.familyMembers || []).find((m) => m.id === memberId);
+  if (target?.passportStoragePath) {
+    void deleteTravelerDocumentFromStorage(target.passportStoragePath);
+  }
+  if (target?.personalPhotoStoragePath) {
+    void deleteTravelerDocumentFromStorage(target.personalPhotoStoragePath);
+  }
+
+  const updated: TravelerProfile = {
+    ...existingProfile,
+    familyMembers: (existingProfile.familyMembers || []).filter((m) => m.id !== memberId),
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
 export function deleteTravelerProfile(rawPhone: string): boolean {
   const phone = normalizePhone(rawPhone);
   const all = getAllTravelers();
@@ -989,6 +1287,7 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
   if (!existing) return false;
 
   const docs = existing.documents || [];
+  const familyMembers = existing.familyMembers || [];
   const avatarPath = existing.avatarStoragePath;
   delete all[phone];
   saveAllTravelersLocalOnly(all);
@@ -1003,6 +1302,14 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
   docs.forEach((d) => {
     if (d.storagePath) {
       void deleteTravelerDocumentFromStorage(d.storagePath);
+    }
+  });
+  familyMembers.forEach((fm) => {
+    if (fm.passportStoragePath) {
+      void deleteTravelerDocumentFromStorage(fm.passportStoragePath);
+    }
+    if (fm.personalPhotoStoragePath) {
+      void deleteTravelerDocumentFromStorage(fm.personalPhotoStoragePath);
     }
   });
 

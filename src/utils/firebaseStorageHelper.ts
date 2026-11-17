@@ -50,6 +50,33 @@ export async function uploadTravelerAvatarToStorage(
   }
 }
 
+export async function uploadFamilyMemberFileToStorage(
+  phone: string,
+  memberId: string,
+  kind: 'passport' | 'photo',
+  dataUrl: string
+): Promise<{ downloadUrl: string; storagePath: string } | null> {
+  const cleanPhone = phone.replace(/\D/g, '');
+  const cleanMemberId = memberId.replace(/[^a-zA-Z0-9_-]/g, '') || `${Date.now()}`;
+  if (!cleanPhone || !dataUrl.startsWith('data:')) {
+    return null;
+  }
+
+  const storagePath = `travelers/${cleanPhone}/family/${cleanMemberId}/${kind}-${Date.now()}.jpg`;
+  try {
+    const storageRef = ref(storage, storagePath);
+    await uploadString(storageRef, dataUrl, 'data_url', {
+      contentType: 'image/jpeg',
+      cacheControl: 'public, max-age=31536000',
+    });
+    const downloadUrl = await getDownloadURL(storageRef);
+    return { downloadUrl, storagePath };
+  } catch (err) {
+    console.warn(`Firebase Storage family ${kind} upload failed; using local cache:`, err);
+    return null;
+  }
+}
+
 export async function deleteTravelerDocumentFromStorage(storagePath?: string): Promise<void> {
   if (!storagePath) return;
   try {
@@ -57,6 +84,102 @@ export async function deleteTravelerDocumentFromStorage(storagePath?: string): P
     await deleteObject(storageRef);
   } catch {
     // Ignore missing object or permission errors on delete cleanup
+  }
+}
+
+export function buildDescriptiveFilename(
+  kind: 'Passport' | 'Photo' | 'Doc',
+  firstName?: string,
+  lastName?: string,
+  ext = 'jpg'
+): string {
+  const cleanPart = (val?: string) =>
+    (val || '')
+      .trim()
+      .replace(/[/\\?%*:|"<>]/g, '')
+      .replace(/\s+/g, '_');
+
+  const first = cleanPart(firstName);
+  const last = cleanPart(lastName);
+  const nameSegment = [first, last].filter(Boolean).join('_') || 'Traveler';
+  return `${kind}_${nameSegment}.${ext}`;
+}
+
+function triggerAnchorDownload(href: string, filename: string, openInNewTab = false): void {
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  if (openInNewTab) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => {
+    if (link.parentNode) {
+      link.parentNode.removeChild(link);
+    }
+  }, 150);
+}
+
+export async function downloadCloudFile(urlOrDataUrl: string, filename: string): Promise<void> {
+  if (!urlOrDataUrl) return;
+  const safeName = filename || 'Masarik_Document.jpg';
+
+  if (urlOrDataUrl.startsWith('data:') || urlOrDataUrl.startsWith('blob:')) {
+    triggerAnchorDownload(urlOrDataUrl, safeName);
+    return;
+  }
+
+  try {
+    const response = await fetch(urlOrDataUrl, { mode: 'cors' });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    triggerAnchorDownload(blobUrl, safeName);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+    return;
+  } catch {
+    // Fallback via CORS image canvas conversion
+    try {
+      const blobUrl = await new Promise<string>((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('No canvas context'));
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          canvas.toBlob(
+            (b) => {
+              if (!b) {
+                reject(new Error('Blob failed'));
+                return;
+              }
+              resolve(URL.createObjectURL(b));
+            },
+            'image/jpeg',
+            0.92
+          );
+        };
+        img.onerror = () => reject(new Error('Image load failed'));
+        img.src = urlOrDataUrl;
+      });
+      triggerAnchorDownload(blobUrl, safeName);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+      return;
+    } catch {
+      // Final safe fallback
+      triggerAnchorDownload(urlOrDataUrl, safeName, true);
+    }
   }
 }
 

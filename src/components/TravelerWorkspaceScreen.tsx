@@ -22,24 +22,42 @@ import {
   ArrowLeft,
   FolderOpen,
   ClipboardList,
+  Download,
+  Users,
+  Plus,
+  Edit3,
 } from 'lucide-react';
-import { PassportAiCheckResult, TravelerDocument, TravelerProfile } from '../types/travel';
 import {
+  FamilyMember,
+  FamilyRelationship,
+  PassportAiCheckResult,
+  TravelerDocument,
+  TravelerProfile,
+} from '../types/travel';
+import {
+  FAMILY_RELATIONSHIPS,
   TravelerProfileDraft,
   VISA_ORDER_STATUSES,
   buildClientWhatsAppRequestMessage,
   commitTravelerProfileDraftCloud,
   compressImageToDataUrl,
+  deleteFamilyMemberCloud,
   formatPhoneForDisplay,
+  getRelationshipLabel,
   getTravelerDisplayNames,
   initiateTravelerOtpLoginCloud,
   normalizeArabicDigits,
   normalizePhone,
+  saveFamilyMemberCloud,
   setActiveTravelerPhone,
   splitPassportName,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
-import { imageUrlToBase64 } from '../utils/firebaseStorageHelper';
+import {
+  buildDescriptiveFilename,
+  downloadCloudFile,
+  imageUrlToBase64,
+} from '../utils/firebaseStorageHelper';
 import { translateOrderStatus } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
@@ -105,13 +123,238 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     type: 'success' | 'info';
     text: string;
   } | null>(null);
-  const [previewLightbox, setPreviewLightbox] = useState<{ label: string; dataUrl: string } | null>(
-    null
-  );
+  const [previewLightbox, setPreviewLightbox] = useState<{
+    label: string;
+    dataUrl: string;
+    downloadName?: string;
+  } | null>(null);
+
+  // Family Member & Companions Form Controls
+  const [showFamilyForm, setShowFamilyForm] = useState(false);
+  const [editingMemberId, setEditingMemberId] = useState<string | null>(null);
+  const [memberRelationship, setMemberRelationship] = useState<FamilyRelationship>('spouse');
+  const [memberFirstName, setMemberFirstName] = useState('');
+  const [memberLastName, setMemberLastName] = useState('');
+  const [memberPassportFullName, setMemberPassportFullName] = useState('');
+  const [memberPassportNumber, setMemberPassportNumber] = useState('');
+  const [memberPassportExpiry, setMemberPassportExpiry] = useState('');
+  const [memberNationality, setMemberNationality] = useState('');
+  const [memberPassportPhotoUrl, setMemberPassportPhotoUrl] = useState('');
+  const [memberPersonalPhotoUrl, setMemberPersonalPhotoUrl] = useState('');
+  const [isExtractingMemberPassport, setIsExtractingMemberPassport] = useState(false);
+  const [memberOcrFeedback, setMemberOcrFeedback] = useState<string | null>(null);
+  const [memberFormError, setMemberFormError] = useState<string | null>(null);
+  const [isSavingMember, setIsSavingMember] = useState(false);
+  const [familySectionFeedback, setFamilySectionFeedback] = useState<string | null>(null);
+  const [confirmDeleteMemberId, setConfirmDeleteMemberId] = useState<string | null>(null);
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const accountPassportInputRef = useRef<HTMLInputElement>(null);
   const walletFileInputRef = useRef<HTMLInputElement>(null);
+  const memberPassportInputRef = useRef<HTMLInputElement>(null);
+  const memberPersonalPhotoInputRef = useRef<HTMLInputElement>(null);
+
+  const handleDirectDownload = async (key: string, url: string, filename: string) => {
+    if (!url) return;
+    setDownloadingKey(key);
+    try {
+      await downloadCloudFile(url, filename);
+    } finally {
+      setDownloadingKey((curr) => (curr === key ? null : curr));
+    }
+  };
+
+  const resetFamilyForm = () => {
+    setShowFamilyForm(false);
+    setEditingMemberId(null);
+    setMemberRelationship('spouse');
+    setMemberFirstName('');
+    setMemberLastName('');
+    setMemberPassportFullName('');
+    setMemberPassportNumber('');
+    setMemberPassportExpiry('');
+    setMemberNationality('');
+    setMemberPassportPhotoUrl('');
+    setMemberPersonalPhotoUrl('');
+    setMemberOcrFeedback(null);
+    setMemberFormError(null);
+  };
+
+  const handleOpenAddFamilyMember = () => {
+    resetFamilyForm();
+    setShowFamilyForm(true);
+    setFamilySectionFeedback(null);
+  };
+
+  const handleOpenEditFamilyMember = (member: FamilyMember) => {
+    setEditingMemberId(member.id);
+    setMemberRelationship(member.relationship);
+    setMemberFirstName(member.firstName);
+    setMemberLastName(member.lastName);
+    setMemberPassportFullName(member.passportFullName || '');
+    setMemberPassportNumber(member.passportNumber);
+    setMemberPassportExpiry(member.passportExpiryDate || '');
+    setMemberNationality(member.nationality || '');
+    setMemberPassportPhotoUrl(member.passportPhotoUrl);
+    setMemberPersonalPhotoUrl(member.personalPhotoUrl);
+    setMemberOcrFeedback(null);
+    setMemberFormError(null);
+    setFamilySectionFeedback(null);
+    setShowFamilyForm(true);
+  };
+
+  const runMemberPassportOcr = async (base64: string, mimeType: string) => {
+    setIsExtractingMemberPassport(true);
+    setMemberOcrFeedback(null);
+    try {
+      const response = await fetch('/api/passport-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          visaType: draft.preferredVisaType,
+          lang,
+        }),
+      });
+      const contentType = response.headers.get('content-type') || '';
+      if (!response.ok || !contentType.includes('application/json')) return;
+      const data = (await response.json()) as { result?: PassportAiCheckResult };
+      const extracted = data.result;
+      if (!extracted) return;
+
+      const cleanNo = (extracted.passportNumber || '').trim().toUpperCase();
+      const extractedFull = (extracted.fullName || '').trim();
+      const parts = extractedFull ? splitPassportName(extractedFull) : null;
+
+      if (cleanNo) setMemberPassportNumber(cleanNo);
+      if (extractedFull) setMemberPassportFullName(extractedFull);
+      if (parts?.firstName) setMemberFirstName(parts.firstName);
+      if (parts?.lastName) setMemberLastName(parts.lastName);
+      if (extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)) {
+        setMemberPassportExpiry(extracted.expiryDate);
+      }
+      if (extracted.nationality && extracted.nationality.trim()) {
+        setMemberNationality(extracted.nationality.trim());
+      }
+
+      if (cleanNo || extractedFull) {
+        setMemberOcrFeedback(
+          t(
+            `تم قراءة بيانات الجواز وتعبئتها تلقائياً (${cleanNo || extractedFull}).`,
+            `Passport data auto-filled via AI OCR (${cleanNo || extractedFull}).`
+          )
+        );
+      }
+    } catch {
+      // Allow manual typing seamlessly
+    } finally {
+      setIsExtractingMemberPassport(false);
+    }
+  };
+
+  const handlePickMemberPassportPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMemberFormError(null);
+    try {
+      const compressed = await compressImageToDataUrl(file, 1100, 0.76);
+      setMemberPassportPhotoUrl(compressed.dataUrl);
+      void runMemberPassportOcr(compressed.base64, compressed.mimeType);
+    } catch {
+      setMemberFormError(
+        t('تعذر معالجة صورة جواز السفر المختارة.', 'Could not process selected passport photo.')
+      );
+    }
+    if (memberPassportInputRef.current) memberPassportInputRef.current.value = '';
+  };
+
+  const handlePickMemberPersonalPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMemberFormError(null);
+    try {
+      const compressed = await compressImageToDataUrl(file, 520, 0.8);
+      setMemberPersonalPhotoUrl(compressed.dataUrl);
+    } catch {
+      setMemberFormError(
+        t('تعذر معالجة الصورة الشخصية المختارة.', 'Could not process selected personal photo.')
+      );
+    }
+    if (memberPersonalPhotoInputRef.current) memberPersonalPhotoInputRef.current.value = '';
+  };
+
+  const handleSaveMemberSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!activeTraveler) return;
+    setMemberFormError(null);
+
+    const missing: string[] = [];
+    if (!memberFirstName.trim()) missing.push(t('الاسم الأول', 'First Name'));
+    if (!memberLastName.trim()) missing.push(t('الاسم الأخير', 'Last Name'));
+    if (!memberPassportNumber.trim()) missing.push(t('رقم جواز السفر', 'Passport Number'));
+    if (!memberPassportPhotoUrl) missing.push(t('صورة جواز السفر', 'Passport Photo'));
+    if (!memberPersonalPhotoUrl) missing.push(t('الصورة الشخصية', 'Personal Photo'));
+
+    if (missing.length > 0) {
+      setMemberFormError(
+        t(
+          `يرجى استكمال البيانات والصور الإلزامية: ${missing.join('، ')}.`,
+          `Please complete all required fields & photos: ${missing.join(', ')}.`
+        )
+      );
+      return;
+    }
+
+    setIsSavingMember(true);
+    try {
+      await saveFamilyMemberCloud(activeTraveler.phone, {
+        ...(editingMemberId ? { id: editingMemberId } : {}),
+        relationship: memberRelationship,
+        firstName: memberFirstName.trim(),
+        lastName: memberLastName.trim(),
+        passportFullName:
+          memberPassportFullName.trim() ||
+          `${memberFirstName.trim()} ${memberLastName.trim()}`.trim(),
+        passportNumber: memberPassportNumber.trim().toUpperCase(),
+        passportExpiryDate: memberPassportExpiry,
+        nationality: memberNationality.trim(),
+        passportPhotoUrl: memberPassportPhotoUrl,
+        personalPhotoUrl: memberPersonalPhotoUrl,
+      });
+      const wasEdit = Boolean(editingMemberId);
+      resetFamilyForm();
+      setFamilySectionFeedback(
+        wasEdit
+          ? t('تم تحديث بيانات المرافق ومزامنتها سحابياً بنجاح.', 'Family member updated & synced to cloud.')
+          : t('تمت إضافة المرافق وحفظ ملفاته في محفظتك السحابية.', 'Family member added & saved to cloud vault.')
+      );
+      setTimeout(() => setFamilySectionFeedback(null), 4000);
+    } catch {
+      setMemberFormError(
+        t(
+          'حدث خطأ أثناء رفع وحفظ بيانات المرافق. يرجى المحاولة مرة أخرى.',
+          'Failed to upload and save family member. Please try again.'
+        )
+      );
+    } finally {
+      setIsSavingMember(false);
+    }
+  };
+
+  const handleConfirmDeleteMember = async (memberId: string) => {
+    if (!activeTraveler) return;
+    await deleteFamilyMemberCloud(activeTraveler.phone, memberId);
+    setConfirmDeleteMemberId(null);
+    if (editingMemberId === memberId) {
+      resetFamilyForm();
+    }
+    setFamilySectionFeedback(
+      t('تم حذف ملف المرافق من محفظتك السحابية.', 'Family member removed from cloud vault.')
+    );
+    setTimeout(() => setFamilySectionFeedback(null), 3500);
+  };
 
   // Step 1: Initiate fresh 6-digit OTP in Firestore without displaying it
   const handleInitiateLogin = async (e: React.FormEvent) => {
@@ -696,6 +939,551 @@ Please advise on the next steps for my application.`
     activeTraveler.name;
   const currentStatusIdx = Math.max(0, VISA_ORDER_STATUSES.indexOf(activeTraveler.orderStatus));
 
+  const familyMembers = activeTraveler.familyMembers || [];
+
+  const renderFamilyVaultSection = () => (
+    <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+            <Users className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+              {t(
+                `محفظة أفراد العائلة والمرافقين (${familyMembers.length})`,
+                `Family Members & Companions Vault (${familyMembers.length})`
+              )}
+            </h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {t(
+                'احفظ جوازات السفر والصور الشخصية لعائلتك سحابياً للوصول والتحميل من أي جهاز واختيارهم بضغطة واحدة عند طلب الخدمات',
+                'Store family & companion passports and personal photos in your cloud vault for instant multi-device download and service booking'
+              )}
+            </p>
+          </div>
+        </div>
+
+        {!showFamilyForm && (
+          <button
+            type="button"
+            onClick={handleOpenAddFamilyMember}
+            className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{t('+ إضافة فرد عائلة / مرافق', '+ Add Family Member / Companion')}</span>
+          </button>
+        )}
+      </div>
+
+      {familySectionFeedback && (
+        <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{familySectionFeedback}</span>
+        </div>
+      )}
+
+      {/* Add / Edit Family Member Form */}
+      {showFamilyForm && (
+        <div className="bg-slate-50 border-2 border-[#C6A052]/60 rounded-2xl p-4 sm:p-5 space-y-4">
+          <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200">
+            <h3 className="text-xs sm:text-sm font-black text-[#0F2438]">
+              {editingMemberId
+                ? t('تعديل بيانات فرد العائلة / المرافق', 'Edit Family Member / Companion')
+                : t('إضافة فرد عائلة / مرافق جديد للمحفظة السحابية', 'Add Family Member / Companion')}
+            </h3>
+            <button
+              type="button"
+              onClick={resetFamilyForm}
+              className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200 cursor-pointer"
+              aria-label={t('إلغاء', 'Cancel')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <input
+            ref={memberPassportInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handlePickMemberPassportPhoto}
+            className="hidden"
+          />
+          <input
+            ref={memberPersonalPhotoInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handlePickMemberPersonalPhoto}
+            className="hidden"
+          />
+
+          {/* Photo Uploads (Passport + Personal Photo) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-black text-[#0F2438]">
+                  {t('صورة جواز السفر (مع قراءة OCR تلقائية)', 'Passport Photo (Auto OCR)')}{' '}
+                  <span className="text-red-500">*</span>
+                </span>
+                {memberPassportPhotoUrl && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPreviewLightbox({
+                        label: t('معاينة جواز المرافق', 'Companion Passport Preview'),
+                        dataUrl: memberPassportPhotoUrl,
+                        downloadName: buildDescriptiveFilename(
+                          'Passport',
+                          memberFirstName,
+                          memberLastName
+                        ),
+                      })
+                    }
+                    className="text-[11px] font-bold text-[#0284C7] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{t('معاينة', 'Preview')}</span>
+                  </button>
+                )}
+              </div>
+
+              {memberPassportPhotoUrl ? (
+                <div className="flex items-center gap-3">
+                  <img
+                    src={memberPassportPhotoUrl}
+                    alt="Passport"
+                    className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
+                    onClick={() =>
+                      setPreviewLightbox({
+                        label: t('معاينة جواز المرافق', 'Companion Passport Preview'),
+                        dataUrl: memberPassportPhotoUrl,
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    onClick={() => memberPassportInputRef.current?.click()}
+                    className="flex-1 min-h-[42px] px-3 py-2 rounded-xl bg-[#C6A052]/15 hover:bg-[#C6A052]/25 border border-[#C6A052] text-[#0F2438] text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>{t('تغيير صورة الجواز', 'Change Passport Photo')}</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => memberPassportInputRef.current?.click()}
+                  className="w-full min-h-[48px] px-3 py-3 rounded-xl border-2 border-dashed border-[#C6A052] bg-[#FAF8F2] hover:bg-[#F5EFE0] text-[#0F2438] text-xs font-black flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Upload className="w-4 h-4 text-[#9E7B33]" />
+                  <span>{t('رفع صورة جواز السفر (إلزامي)', 'Upload Passport Photo (Required)')}</span>
+                </button>
+              )}
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-black text-[#0F2438]">
+                  {t('الصورة الشخصية للمرافق', 'Personal Photo')} <span className="text-red-500">*</span>
+                </span>
+                {memberPersonalPhotoUrl && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPreviewLightbox({
+                        label: t('الصورة الشخصية للمرافق', 'Companion Personal Photo'),
+                        dataUrl: memberPersonalPhotoUrl,
+                        downloadName: buildDescriptiveFilename(
+                          'Photo',
+                          memberFirstName,
+                          memberLastName
+                        ),
+                      })
+                    }
+                    className="text-[11px] font-bold text-[#0284C7] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{t('معاينة', 'Preview')}</span>
+                  </button>
+                )}
+              </div>
+
+              {memberPersonalPhotoUrl ? (
+                <div className="flex items-center gap-3">
+                  <img
+                    src={memberPersonalPhotoUrl}
+                    alt="Avatar"
+                    className="w-16 h-16 rounded-full object-cover border-2 border-[#C6A052] shrink-0 cursor-pointer"
+                    onClick={() =>
+                      setPreviewLightbox({
+                        label: t('الصورة الشخصية للمرافق', 'Companion Personal Photo'),
+                        dataUrl: memberPersonalPhotoUrl,
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    onClick={() => memberPersonalPhotoInputRef.current?.click()}
+                    className="flex-1 min-h-[42px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>{t('تغيير الصورة الشخصية', 'Change Personal Photo')}</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => memberPersonalPhotoInputRef.current?.click()}
+                  className="w-full min-h-[48px] px-3 py-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 text-[#0F2438] text-xs font-black flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Camera className="w-4 h-4 text-slate-600" />
+                  <span>{t('رفع الصورة الشخصية (إلزامي)', 'Upload Personal Photo (Required)')}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {isExtractingMemberPassport && (
+            <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs font-bold text-sky-900 flex items-center gap-2">
+              <Loader2 className="w-4 h-4 text-[#0284C7] animate-spin shrink-0" />
+              <span>
+                {t(
+                  'جاري استخراج الاسم ورقم الجواز تلقائياً بالذكاء الاصطناعي...',
+                  'Extracting passport details via AI OCR...'
+                )}
+              </span>
+            </div>
+          )}
+
+          {memberOcrFeedback && !isExtractingMemberPassport && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{memberOcrFeedback}</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('صلة القرابة', 'Relationship')} <span className="text-red-500">*</span>
+              </label>
+              <select
+                value={memberRelationship}
+                onChange={(e) => setMemberRelationship(e.target.value as FamilyRelationship)}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold"
+              >
+                {FAMILY_RELATIONSHIPS.map((rel) => (
+                  <option key={rel} value={rel}>
+                    {getRelationshipLabel(rel, lang)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('الاسم الأول حسب الجواز', 'First Name (as on passport)')}{' '}
+                <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={memberFirstName}
+                onChange={(e) => setMemberFirstName(e.target.value)}
+                placeholder={t('مثال: سارة', 'e.g. Sara')}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('الاسم الأخير حسب الجواز', 'Last Name (as on passport)')}{' '}
+                <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={memberLastName}
+                onChange={(e) => setMemberLastName(e.target.value)}
+                placeholder={t('مثال: أحمد علي', 'e.g. Ahmed Ali')}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('رقم جواز السفر', 'Passport Number')} <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={memberPassportNumber}
+                onChange={(e) => setMemberPassportNumber(e.target.value.toUpperCase())}
+                placeholder="A12345678"
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('تاريخ انتهاء الجواز (اختياري)', 'Passport Expiry (Optional)')}
+              </label>
+              <input
+                type="date"
+                value={memberPassportExpiry}
+                onChange={(e) => setMemberPassportExpiry(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#0F2438] mb-1">
+                {t('الجنسية (اختياري)', 'Nationality (Optional)')}
+              </label>
+              <input
+                type="text"
+                value={memberNationality}
+                onChange={(e) => setMemberNationality(e.target.value)}
+                placeholder={t('مثال: مصري', 'e.g. Egyptian')}
+                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+              />
+            </div>
+          </div>
+
+          {memberFormError && (
+            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-red-900">
+              {memberFormError}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2.5 pt-2">
+            <button
+              type="button"
+              disabled={isSavingMember}
+              onClick={() => void handleSaveMemberSubmit()}
+              className="min-h-[44px] px-5 py-2.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-xs font-black flex items-center gap-2 transition cursor-pointer"
+            >
+              {isSavingMember ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Save className="w-4 h-4" />
+              )}
+              <span>
+                {isSavingMember
+                  ? t('جاري الرفع والحفظ السحابي...', 'Uploading & Saving...')
+                  : editingMemberId
+                  ? t('حفظ تعديلات المرافق', 'Save Changes')
+                  : t('حفظ المرافق في المحفظة السحابية', 'Save Companion to Cloud Vault')}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={resetFamilyForm}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition cursor-pointer"
+            >
+              {t('إلغاء', 'Cancel')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Family Members Cloud Vault Cards Grid */}
+      {familyMembers.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {familyMembers.map((member) => {
+            const fullName = `${member.firstName} ${member.lastName}`.trim();
+            const passportFilename = buildDescriptiveFilename(
+              'Passport',
+              member.firstName,
+              member.lastName
+            );
+            const photoFilename = buildDescriptiveFilename(
+              'Photo',
+              member.firstName,
+              member.lastName
+            );
+
+            return (
+              <div
+                key={member.id}
+                className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3.5"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    {member.personalPhotoUrl ? (
+                      <img
+                        src={member.personalPhotoUrl}
+                        alt={fullName}
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: `${fullName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                            dataUrl: member.personalPhotoUrl,
+                            downloadName: photoFilename,
+                          })
+                        }
+                        className="w-14 h-14 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-white cursor-pointer"
+                      />
+                    ) : (
+                      <div className="w-14 h-14 rounded-full bg-[#0F2438] text-[#E5C887] border-2 border-[#C6A052]/60 flex items-center justify-center text-base font-black shrink-0">
+                        {fullName.slice(0, 1) || 'م'}
+                      </div>
+                    )}
+
+                    <div className="min-w-0 space-y-1">
+                      <span className="inline-block px-2 py-0.5 rounded-md bg-[#C6A052]/20 border border-[#C6A052]/50 text-[10.5px] font-black text-[#0F2438]">
+                        {getRelationshipLabel(member.relationship, lang)}
+                      </span>
+                      <h3 className="text-sm font-black text-[#0F2438] truncate">{fullName}</h3>
+                      <div className="text-[11px] text-slate-600 tabular-nums flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span>
+                          {t('الجواز:', 'Passport:')}{' '}
+                          <strong className="text-[#0F2438] uppercase">
+                            {member.passportNumber}
+                          </strong>
+                        </span>
+                        {member.passportExpiryDate && (
+                          <span>· {member.passportExpiryDate}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Edit / Delete Buttons */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditFamilyMember(member)}
+                      className="p-2 rounded-lg text-slate-600 hover:text-[#0F2438] hover:bg-slate-200 transition cursor-pointer"
+                      title={t('تعديل', 'Edit')}
+                      aria-label={t('تعديل', 'Edit')}
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+
+                    {confirmDeleteMemberId === member.id ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleConfirmDeleteMember(member.id)}
+                          className="px-2 py-1 rounded-lg bg-red-600 text-white text-[10.5px] font-bold cursor-pointer"
+                        >
+                          {t('تأكيد', 'Confirm')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteMemberId(null)}
+                          className="px-2 py-1 rounded-lg bg-white border border-slate-300 text-slate-700 text-[10.5px] font-bold cursor-pointer"
+                        >
+                          {t('إلغاء', 'Cancel')}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteMemberId(member.id)}
+                        className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition cursor-pointer"
+                        title={t('حذف', 'Delete')}
+                        aria-label={t('حذف', 'Delete')}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Instant One-Click Download & Preview for Passport & Personal Photo */}
+                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/80">
+                  <div className="space-y-1.5">
+                    <button
+                      type="button"
+                      disabled={!member.passportPhotoUrl || downloadingKey === `fm-pass-${member.id}`}
+                      onClick={() =>
+                        void handleDirectDownload(
+                          `fm-pass-${member.id}`,
+                          member.passportPhotoUrl,
+                          passportFilename
+                        )
+                      }
+                      className="w-full min-h-[40px] px-2.5 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                    >
+                      {downloadingKey === `fm-pass-${member.id}` ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t('تحميل الجواز', 'Download Passport')}</span>
+                    </button>
+                    {member.passportPhotoUrl && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: `${fullName} — ${t('صورة جواز السفر', 'Passport Photo')}`,
+                            dataUrl: member.passportPhotoUrl,
+                            downloadName: passportFilename,
+                          })
+                        }
+                        className="w-full min-h-[34px] px-2 py-1 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{t('معاينة الجواز', 'Preview Passport')}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <button
+                      type="button"
+                      disabled={!member.personalPhotoUrl || downloadingKey === `fm-photo-${member.id}`}
+                      onClick={() =>
+                        void handleDirectDownload(
+                          `fm-photo-${member.id}`,
+                          member.personalPhotoUrl,
+                          photoFilename
+                        )
+                      }
+                      className="w-full min-h-[40px] px-2.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                    >
+                      {downloadingKey === `fm-photo-${member.id}` ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t('تحميل الصورة', 'Download Photo')}</span>
+                    </button>
+                    {member.personalPhotoUrl && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: `${fullName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                            dataUrl: member.personalPhotoUrl,
+                            downloadName: photoFilename,
+                          })
+                        }
+                        className="w-full min-h-[34px] px-2 py-1 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{t('معاينة الصورة', 'Preview Photo')}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        !showFamilyForm && (
+          <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-6 text-center text-xs text-slate-500">
+            {t(
+              'لا يوجد أفراد عائلة أو مرافقون مضافون بعد. اضغط على "+ إضافة فرد عائلة / مرافق" لحفظ جوازاتهم وصورهم في محفظتك السحابية.',
+              'No family members or companions added yet. Click "+ Add Family Member / Companion" to save their passports and photos in your cloud vault.'
+            )}
+          </div>
+        )
+      )}
+    </div>
+  );
+
   return (
     <div className="min-h-[80vh] bg-[#FAF9F6] pb-24 md:pb-16 pt-5 px-3 sm:px-4" dir={dir}>
       <div className="max-w-5xl mx-auto space-y-5">
@@ -907,6 +1695,53 @@ Please advise on the next steps for my application.`
                         : t('رفع الصورة الشخصية (إلزامي)', 'Upload Personal Photo (Required)')}
                     </span>
                   </button>
+
+                  {effectiveAvatarUrl && (
+                    <div className="w-full grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: t('الصورة الشخصية لصاحب الحساب', 'Account Holder Photo'),
+                            dataUrl: effectiveAvatarUrl,
+                            downloadName: buildDescriptiveFilename(
+                              'Photo',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            ),
+                          })
+                        }
+                        className="min-h-[40px] px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{t('معاينة', 'Preview')}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={downloadingKey === 'owner-photo'}
+                        onClick={() =>
+                          void handleDirectDownload(
+                            'owner-photo',
+                            effectiveAvatarUrl,
+                            buildDescriptiveFilename(
+                              'Photo',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            )
+                          )
+                        }
+                        className="min-h-[40px] px-2.5 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black flex items-center justify-center gap-1 transition cursor-pointer disabled:opacity-60"
+                      >
+                        {downloadingKey === 'owner-photo' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        <span>{t('تحميل الصورة', 'Download')}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Mandatory Passport Photo Quick-Upload Box */}
@@ -936,33 +1771,78 @@ Please advise on the next steps for my application.`
                   />
 
                   {latestPassportScan && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2 flex items-center gap-2.5">
-                      <img
-                        src={latestPassportScan.dataUrl}
-                        alt={latestPassportScan.label}
-                        className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <span className="text-xs font-bold text-[#0F2438] block truncate">
-                          {latestPassportScan.label}
-                        </span>
-                        <span className="text-[10px] text-slate-500 block truncate">
-                          {latestPassportScan.fileName}
-                        </span>
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
+                      <div className="flex items-center gap-2.5">
+                        <img
+                          src={latestPassportScan.dataUrl}
+                          alt={latestPassportScan.label}
+                          className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 cursor-pointer"
+                          onClick={() =>
+                            setPreviewLightbox({
+                              label: latestPassportScan.label,
+                              dataUrl: latestPassportScan.dataUrl,
+                              downloadName: buildDescriptiveFilename(
+                                'Passport',
+                                draft.firstName || names.firstName,
+                                draft.lastName || names.lastName
+                              ),
+                            })
+                          }
+                        />
+                        <div className="min-w-0 flex-1">
+                          <span className="text-xs font-bold text-[#0F2438] block truncate">
+                            {latestPassportScan.label}
+                          </span>
+                          <span className="text-[10px] text-slate-500 block truncate">
+                            {latestPassportScan.fileName}
+                          </span>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setPreviewLightbox({
-                            label: latestPassportScan.label,
-                            dataUrl: latestPassportScan.dataUrl,
-                          })
-                        }
-                        className="p-1.5 rounded-lg text-slate-500 hover:text-[#0F2438] hover:bg-slate-200 cursor-pointer"
-                        title={t('معاينة', 'Inspect')}
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setPreviewLightbox({
+                              label: latestPassportScan.label,
+                              dataUrl: latestPassportScan.dataUrl,
+                              downloadName: buildDescriptiveFilename(
+                                'Passport',
+                                draft.firstName || names.firstName,
+                                draft.lastName || names.lastName
+                              ),
+                            })
+                          }
+                          className="min-h-[38px] px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>{t('معاينة', 'Preview')}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={downloadingKey === 'owner-passport'}
+                          onClick={() =>
+                            void handleDirectDownload(
+                              'owner-passport',
+                              latestPassportScan.dataUrl,
+                              buildDescriptiveFilename(
+                                'Passport',
+                                draft.firstName || names.firstName,
+                                draft.lastName || names.lastName
+                              )
+                            )
+                          }
+                          className="min-h-[38px] px-2 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer disabled:opacity-60"
+                        >
+                          {downloadingKey === 'owner-passport' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Download className="w-3.5 h-3.5" />
+                          )}
+                          <span>{t('تحميل الجواز', 'Download')}</span>
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -1209,6 +2089,9 @@ Please advise on the next steps for my application.`
           </form>
         )}
 
+        {/* SUB-TAB 1 EXTRA: FAMILY MEMBERS & COMPANIONS CLOUD VAULT */}
+        {subTab === 'account' && renderFamilyVaultSection()}
+
         {/* SUB-TAB 2: MY ORDERS & VISA TRACKER */}
         {subTab === 'orders' && (
           <div className="space-y-5">
@@ -1311,12 +2194,157 @@ Please advise on the next steps for my application.`
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {t(
-                    'تبقى المستندات المرفقة محفوظة مؤقتاً أثناء تنقلك بين الأقسام حتى تضغط على "حفظ البيانات"',
-                    'Attached documents stay preserved across tab navigation until you click Save Data'
+                    'مستنداتك محفوظة سحابياً للوصول والتحميل من أي جهاز في أي وقت',
+                    'Your documents are cloud-synced for instant access & download from any device'
                   )}
                 </p>
               </div>
             </div>
+
+            {/* Account Holder Primary Cloud Vault Cards (Personal Photo + Passport Download) */}
+            {(effectiveAvatarUrl || latestPassportScan) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#FAF8F2] border border-[#E5C887] rounded-2xl p-3.5">
+                {effectiveAvatarUrl && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <img
+                        src={effectiveAvatarUrl}
+                        alt={headerDisplayName}
+                        className="w-12 h-12 rounded-full object-cover border-2 border-[#C6A052] shrink-0 cursor-pointer"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: t('الصورة الشخصية لصاحب الحساب', 'Account Holder Photo'),
+                            dataUrl: effectiveAvatarUrl,
+                            downloadName: buildDescriptiveFilename(
+                              'Photo',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            ),
+                          })
+                        }
+                      />
+                      <div className="min-w-0">
+                        <span className="text-xs font-black text-[#0F2438] block truncate">
+                          {t('الصورة الشخصية (صاحب الحساب)', 'Personal Photo (Owner)')}
+                        </span>
+                        <span className="text-[10.5px] text-slate-500 block truncate">
+                          {headerDisplayName}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: t('الصورة الشخصية لصاحب الحساب', 'Account Holder Photo'),
+                            dataUrl: effectiveAvatarUrl,
+                            downloadName: buildDescriptiveFilename(
+                              'Photo',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            ),
+                          })
+                        }
+                        className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] cursor-pointer"
+                        title={t('معاينة', 'Preview')}
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={downloadingKey === 'docs-owner-photo'}
+                        onClick={() =>
+                          void handleDirectDownload(
+                            'docs-owner-photo',
+                            effectiveAvatarUrl,
+                            buildDescriptiveFilename(
+                              'Photo',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            )
+                          )
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{t('تحميل', 'Download')}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {latestPassportScan && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <img
+                        src={latestPassportScan.dataUrl}
+                        alt={latestPassportScan.label}
+                        className="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: latestPassportScan.label,
+                            dataUrl: latestPassportScan.dataUrl,
+                            downloadName: buildDescriptiveFilename(
+                              'Passport',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            ),
+                          })
+                        }
+                      />
+                      <div className="min-w-0">
+                        <span className="text-xs font-black text-[#0F2438] block truncate">
+                          {t('صورة جواز السفر (صاحب الحساب)', 'Passport Photo (Owner)')}
+                        </span>
+                        <span className="text-[10.5px] text-slate-500 block truncate tabular-nums uppercase">
+                          {draft.passportNumber || activeTraveler.passportNumber || latestPassportScan.fileName}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: latestPassportScan.label,
+                            dataUrl: latestPassportScan.dataUrl,
+                            downloadName: buildDescriptiveFilename(
+                              'Passport',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            ),
+                          })
+                        }
+                        className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] cursor-pointer"
+                        title={t('معاينة', 'Preview')}
+                      >
+                        <Eye className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={downloadingKey === 'docs-owner-passport'}
+                        onClick={() =>
+                          void handleDirectDownload(
+                            'docs-owner-passport',
+                            latestPassportScan.dataUrl,
+                            buildDescriptiveFilename(
+                              'Passport',
+                              draft.firstName || names.firstName,
+                              draft.lastName || names.lastName
+                            )
+                          )
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{t('تحميل الجواز', 'Download')}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Attach New Document Controls */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 bg-slate-50 border border-slate-200 p-3.5 rounded-2xl">
@@ -1429,97 +2457,151 @@ Please advise on the next steps for my application.`
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPreviewLightbox({ label: doc.label, dataUrl: doc.dataUrl })
-                          }
-                          className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>{t('عرض', 'View')}</span>
-                        </button>
-
-                        {doc.docType === 'passport' && doc.dataUrl && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <button
                             type="button"
-                            disabled={isExtractingPassport}
-                            onClick={async () => {
-                              try {
-                                const b64 = await imageUrlToBase64(doc.dataUrl);
-                                void runAutoPassportExtractionIntoDraft(b64, 'image/jpeg');
-                              } catch {
-                                // Ignore unreadable image
-                              }
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-sky-50 border border-sky-200 hover:bg-sky-100 text-[11px] font-bold text-[#0284C7] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            onClick={() =>
+                              setPreviewLightbox({
+                                label: doc.label,
+                                dataUrl: doc.dataUrl,
+                                downloadName:
+                                  doc.docType === 'passport'
+                                    ? buildDescriptiveFilename(
+                                        'Passport',
+                                        draft.firstName || names.firstName,
+                                        draft.lastName || names.lastName
+                                      )
+                                    : doc.docType === 'photo'
+                                    ? buildDescriptiveFilename(
+                                        'Photo',
+                                        draft.firstName || names.firstName,
+                                        draft.lastName || names.lastName
+                                      )
+                                    : doc.fileName || `${doc.docType}.jpg`,
+                              })
+                            }
+                            className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer"
                           >
-                            <Sparkles className="w-3 h-3" />
-                            <span>{t('قراءة OCR', 'Extract OCR')}</span>
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>{t('عرض', 'View')}</span>
                           </button>
-                        )}
+
+                          {doc.dataUrl && (
+                            <button
+                              type="button"
+                              disabled={downloadingKey === `doc-${doc.id}`}
+                              onClick={() =>
+                                void handleDirectDownload(
+                                  `doc-${doc.id}`,
+                                  doc.dataUrl,
+                                  doc.docType === 'passport'
+                                    ? buildDescriptiveFilename(
+                                        'Passport',
+                                        draft.firstName || names.firstName,
+                                        draft.lastName || names.lastName
+                                      )
+                                    : doc.docType === 'photo'
+                                    ? buildDescriptiveFilename(
+                                        'Photo',
+                                        draft.firstName || names.firstName,
+                                        draft.lastName || names.lastName
+                                      )
+                                    : doc.fileName || `${doc.docType}.jpg`
+                                )
+                              }
+                              className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 text-[11px] font-black text-emerald-900 flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                            >
+                              {downloadingKey === `doc-${doc.id}` ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Download className="w-3.5 h-3.5" />
+                              )}
+                              <span>{t('تحميل', 'Download')}</span>
+                            </button>
+                          )}
+
+                          {doc.docType === 'passport' && doc.dataUrl && (
+                            <button
+                              type="button"
+                              disabled={isExtractingPassport}
+                              onClick={async () => {
+                                try {
+                                  const b64 = await imageUrlToBase64(doc.dataUrl);
+                                  void runAutoPassportExtractionIntoDraft(b64, 'image/jpeg');
+                                } catch {
+                                  // Ignore unreadable image
+                                }
+                              }}
+                              className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-sky-50 border border-sky-200 hover:bg-sky-100 text-[11px] font-bold text-[#0284C7] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <Sparkles className="w-3 h-3" />
+                              <span>{t('قراءة OCR', 'Extract OCR')}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDocument(doc.id, doc.isStaged)}
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition cursor-pointer"
+                          title={t('حذف المستند', 'Delete Document')}
+                          aria-label={t('حذف المستند', 'Delete Document')}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveDocument(doc.id, doc.isStaged)}
-                        className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition cursor-pointer"
-                        title={t('حذف المستند', 'Delete Document')}
-                        aria-label={t('حذف المستند', 'Delete Document')}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-8 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
-                <FileText className="w-6 h-6 text-slate-400" />
-                <span>
-                  {t('لا توجد مستندات مرفوعة حالياً في محفظتك.', 'No documents in your wallet yet.')}
-                </span>
-              </div>
-            )}
-
-            {/* Explicit Save / Cancel Bar when Draft has changes */}
-            {draft.isDirty && (
-              <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center gap-2.5">
-                <button
-                  type="button"
-                  disabled={isSavingAll}
-                  onClick={() => void handleCommitSaveAll()}
-                  className="min-h-[44px] px-5 py-2.5 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer shadow-xs"
-                >
-                  {isSavingAll ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Save className="w-4 h-4" />
-                  )}
+                  ))}
+                </div>
+              ) : (
+                <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-8 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
+                  <FileText className="w-6 h-6 text-slate-400" />
                   <span>
-                    {isSavingAll
-                      ? t('جاري رفع وحفظ المستندات...', 'Uploading & Saving...')
-                      : t('حفظ البيانات والمستندات', 'Save Data & Documents')}
+                    {t('لا توجد مستندات مرفوعة حالياً في محفظتك.', 'No documents in your wallet yet.')}
                   </span>
-                </button>
+                </div>
+              )}
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    onResetDraft();
-                    setSaveFeedback(null);
-                  }}
-                  className="min-h-[44px] px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  <span>{t('إلغاء التعديلات', 'Cancel Changes')}</span>
-                </button>
-              </div>
-            )}
+              {/* Explicit Save / Cancel Bar when Draft has changes */}
+              {draft.isDirty && (
+                <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    disabled={isSavingAll}
+                    onClick={() => void handleCommitSaveAll()}
+                    className="min-h-[44px] px-5 py-2.5 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer shadow-xs"
+                  >
+                    {isSavingAll ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Save className="w-4 h-4" />
+                    )}
+                    <span>
+                      {isSavingAll
+                        ? t('جاري رفع وحفظ المستندات...', 'Uploading & Saving...')
+                        : t('حفظ البيانات والمستندات', 'Save Data & Documents')}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onResetDraft();
+                      setSaveFeedback(null);
+                    }}
+                    className="min-h-[44px] px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>{t('إلغاء التعديلات', 'Cancel Changes')}</span>
+                  </button>
+                </div>
+              )}
           </div>
         )}
+
+        {/* SUB-TAB 3 EXTRA: FAMILY MEMBERS & COMPANIONS CLOUD VAULT */}
+        {subTab === 'documents' && renderFamilyVaultSection()}
       </div>
 
       {/* Document Lightbox Preview Modal */}
@@ -1533,16 +2615,32 @@ Please advise on the next steps for my application.`
             onClick={(e) => e.stopPropagation()}
             dir={dir}
           >
-            <div className="bg-[#0F2438] text-white px-4 py-3 flex items-center justify-between">
+            <div className="bg-[#0F2438] text-white px-4 py-3 flex items-center justify-between gap-2">
               <span className="text-xs sm:text-sm font-black truncate">{previewLightbox.label}</span>
-              <button
-                type="button"
-                onClick={() => setPreviewLightbox(null)}
-                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
-                aria-label={t('إغلاق', 'Close')}
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleDirectDownload(
+                      'lightbox',
+                      previewLightbox.dataUrl,
+                      previewLightbox.downloadName || 'Masarik_Document.jpg'
+                    )
+                  }
+                  className="px-3 py-1.5 rounded-lg bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center gap-1 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{t('تحميل', 'Download')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewLightbox(null)}
+                  className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
+                  aria-label={t('إغلاق', 'Close')}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
             <div className="p-4 bg-slate-100 flex items-center justify-center max-h-[75vh] overflow-auto">
               <img

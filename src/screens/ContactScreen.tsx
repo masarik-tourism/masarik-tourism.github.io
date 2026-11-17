@@ -10,6 +10,8 @@ import {
   MapPin,
   Clock,
   Loader2,
+  Users,
+  Check,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber, openWhatsApp, launchEmail } from '../utils/communication';
@@ -17,6 +19,15 @@ import { FacebookIcon } from '../components/FacebookIcon';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSiteConfig } from '../utils/siteConfigStore';
+import {
+  TRAVELERS_UPDATED_EVENT,
+  formatPhoneForDisplay,
+  formatTravelersOrderSummary,
+  getActiveTraveler,
+  getRelationshipLabel,
+  getTravelerDisplayNames,
+} from '../utils/travelerStore';
+import { TravelerProfile } from '../types/travel';
 
 interface ContactScreenProps {
   initialService?: string | null;
@@ -48,16 +59,34 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
           'استفسار عام أو متابعة معاملة سابقة',
         ];
 
+  const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
+    getActiveTraveler()
+  );
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [selectedService, setSelectedService] = useState(
     initialService || serviceOptions[0]
   );
+  const [selectedTravelerIds, setSelectedTravelerIds] = useState<string[]>(['owner']);
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sync = () => setActiveTraveler(getActiveTraveler());
+    window.addEventListener(TRAVELERS_UPDATED_EVENT, sync);
+    return () => window.removeEventListener(TRAVELERS_UPDATED_EVENT, sync);
+  }, []);
+
+  useEffect(() => {
+    if (activeTraveler) {
+      const names = getTravelerDisplayNames(activeTraveler);
+      setName((prev) => prev.trim() || names.fullDisplayName);
+      setPhone((prev) => prev.trim() || formatPhoneForDisplay(activeTraveler.phone));
+    }
+  }, [activeTraveler]);
 
   useEffect(() => {
     if (initialService) {
@@ -69,6 +98,12 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
       setSelectedService(serviceOptions[0]);
     }
   }, [initialService, lang]);
+
+  const toggleTravelerId = (id: string) => {
+    setSelectedTravelerIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -91,11 +126,16 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
       lang === 'en'
         ? `New Service Request from Masarik Tourism (CR: ${TravelRepository.COMMERCIAL_RECORD}): ${selectedService}`
         : `طلب جديد من مسارك للإنجاز السياحي (س.ت: ${TravelRepository.COMMERCIAL_RECORD}): ${selectedService}`;
+    const travelersBlock = activeTraveler
+      ? formatTravelersOrderSummary(activeTraveler, selectedTravelerIds, lang)
+      : '';
     const bodyText = `
 • Client Name: ${name}
 • Client Email: ${email}
 • Phone / WhatsApp: ${phone}
-• Requested Service: ${selectedService}
+• Requested Service: ${selectedService}${
+      travelersBlock ? `\n• Selected Traveler(s) & Documents:\n${travelersBlock}` : ''
+    }
 • Message / Notes:
 ${message.trim() ? message.trim() : 'No additional notes'}
 --------------------------------------------------
@@ -137,20 +177,25 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
   };
 
   const handleWhatsAppForward = () => {
+    const travelersBlock = activeTraveler
+      ? formatTravelersOrderSummary(activeTraveler, selectedTravelerIds, lang)
+      : '';
     const msg =
       lang === 'en'
         ? `Hello ${localized.companyName} (CR: ${TravelRepository.COMMERCIAL_RECORD}):\n• Name: ${
             name.trim() || 'Client'
           }\n• Email: ${email.trim() || 'N/A'}\n• Phone: ${
             phone.trim() || 'N/A'
-          }\n• Service: ${selectedService}\n• Details: ${message.trim() || 'None'}`
+          }\n• Service: ${selectedService}${
+            travelersBlock ? `\n\nSelected Traveler(s) & Cloud Documents:\n${travelersBlock}` : ''
+          }\n• Details: ${message.trim() || 'None'}`
         : `السلام عليكم، أود حجز خدمة من مكتب ${TravelRepository.COMPANY_NAME_AR} (س.ت: ${
             TravelRepository.COMMERCIAL_RECORD
           }):\n• الاسم: ${name.trim() || 'عميل'}\n• الإيميل: ${
             email.trim() || 'غير محدد'
-          }\n• الهاتف: ${phone.trim() || 'غير محدد'}\n• الخدمة: ${selectedService}\n• تفاصيل: ${
-            message.trim() || 'لا توجد'
-          }`;
+          }\n• الهاتف: ${phone.trim() || 'غير محدد'}\n• الخدمة: ${selectedService}${
+            travelersBlock ? `\n\nالمسافرون المشمولون بالطلب ومستنداتهم السحابية:\n${travelersBlock}` : ''
+          }\n• تفاصيل: ${message.trim() || 'لا توجد'}`;
     openWhatsApp(msg);
   };
 
@@ -301,6 +346,117 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
                 ))}
               </select>
             </div>
+
+            {activeTraveler && (
+              <div className="bg-[#FAF8F2] border border-[#E5C887] rounded-2xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-black text-[#0F2437]">
+                    <Users className="w-4 h-4 text-[#9E7B33]" />
+                    <span>
+                      {t('اختيار المسافرين المشمولين بالطلب', 'Select Traveler(s) for This Request')}
+                    </span>
+                  </div>
+                  <span className="text-[10.5px] font-bold text-[#9E7B33] tabular-nums">
+                    {t(`محدد: ${selectedTravelerIds.length}`, `Selected: ${selectedTravelerIds.length}`)}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {/* Account Holder */}
+                  <button
+                    type="button"
+                    onClick={() => toggleTravelerId('owner')}
+                    className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 transition cursor-pointer text-start ${
+                      selectedTravelerIds.includes('owner')
+                        ? 'bg-white border-[#0F2437] ring-1 ring-[#C6A052]'
+                        : 'bg-white/60 border-[#E2DAC8] hover:border-[#C6A052]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {activeTraveler.avatarUrl ? (
+                        <img
+                          src={activeTraveler.avatarUrl}
+                          alt={getTravelerDisplayNames(activeTraveler).fullDisplayName}
+                          className="w-9 h-9 rounded-full object-cover border border-[#C6A052] shrink-0"
+                        />
+                      ) : (
+                        <div className="w-9 h-9 rounded-full bg-[#17344F] text-[#E5C887] flex items-center justify-center text-xs font-black shrink-0">
+                          {getTravelerDisplayNames(activeTraveler).fullDisplayName.slice(0, 1) || 'م'}
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <span className="text-xs font-black text-[#0F2437] block truncate">
+                          {getTravelerDisplayNames(activeTraveler).fullDisplayName}
+                        </span>
+                        <span className="text-[10px] font-bold text-[#9E7B33] block">
+                          {t('صاحب الحساب نفسه', 'Account Holder')} ·{' '}
+                          {activeTraveler.passportNumber || t('بدون جواز', 'No Passport')}
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 ${
+                        selectedTravelerIds.includes('owner')
+                          ? 'bg-[#0F2437] border-[#0F2437] text-[#E5C887]'
+                          : 'bg-white border-slate-300'
+                      }`}
+                    >
+                      {selectedTravelerIds.includes('owner') && <Check className="w-3.5 h-3.5" />}
+                    </div>
+                  </button>
+
+                  {/* Family Members */}
+                  {(activeTraveler.familyMembers || []).map((member) => {
+                    const checked = selectedTravelerIds.includes(member.id);
+                    const mName = `${member.firstName} ${member.lastName}`.trim();
+                    return (
+                      <button
+                        key={member.id}
+                        type="button"
+                        onClick={() => toggleTravelerId(member.id)}
+                        className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 transition cursor-pointer text-start ${
+                          checked
+                            ? 'bg-white border-[#0F2437] ring-1 ring-[#C6A052]'
+                            : 'bg-white/60 border-[#E2DAC8] hover:border-[#C6A052]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {member.personalPhotoUrl ? (
+                            <img
+                              src={member.personalPhotoUrl}
+                              alt={mName}
+                              className="w-9 h-9 rounded-full object-cover border border-[#C6A052] shrink-0"
+                            />
+                          ) : (
+                            <div className="w-9 h-9 rounded-full bg-slate-200 text-[#0F2437] flex items-center justify-center text-xs font-black shrink-0">
+                              {mName.slice(0, 1) || 'ع'}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <span className="text-xs font-black text-[#0F2437] block truncate">
+                              {mName}
+                            </span>
+                            <span className="text-[10px] font-bold text-slate-600 block tabular-nums">
+                              {getRelationshipLabel(member.relationship, lang)} ·{' '}
+                              {member.passportNumber}
+                            </span>
+                          </div>
+                        </div>
+                        <div
+                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 ${
+                            checked
+                              ? 'bg-[#0F2437] border-[#0F2437] text-[#E5C887]'
+                              : 'bg-white border-slate-300'
+                          }`}
+                        >
+                          {checked && <Check className="w-3.5 h-3.5" />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">

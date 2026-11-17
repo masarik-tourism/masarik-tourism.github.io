@@ -59,7 +59,8 @@ service cloud.firestore {
         'passportFullName',
         'passportExpiryDate',
         'nationality',
-        'documents'
+        'documents',
+        'familyMembers'
       ])
       && data.phone is string
       && data.phone == phoneId
@@ -104,6 +105,34 @@ service cloud.firestore {
           && data.documents[0].id.size() <= 80
           && data.documents[0].dataUrl is string
           && data.documents[0].dataUrl.size() <= 4096
+        )
+      )
+      && (
+        !('familyMembers' in data)
+        || (
+          data.familyMembers is list
+          && data.familyMembers.size() <= 25
+          && (
+            data.familyMembers.size() == 0
+            || (
+              data.familyMembers[0] is map
+              && data.familyMembers[0].id is string
+              && data.familyMembers[0].id.size() >= 1
+              && data.familyMembers[0].id.size() <= 80
+              && data.familyMembers[0].relationship is string
+              && data.familyMembers[0].relationship in ['spouse', 'child', 'parent', 'sibling', 'other']
+              && data.familyMembers[0].firstName is string
+              && data.familyMembers[0].firstName.size() <= 80
+              && data.familyMembers[0].lastName is string
+              && data.familyMembers[0].lastName.size() <= 80
+              && data.familyMembers[0].passportNumber is string
+              && data.familyMembers[0].passportNumber.size() <= 40
+              && data.familyMembers[0].passportPhotoUrl is string
+              && data.familyMembers[0].passportPhotoUrl.size() <= 4096
+              && data.familyMembers[0].personalPhotoUrl is string
+              && data.familyMembers[0].personalPhotoUrl.size() <= 4096
+            )
+          )
         )
       );
     }
@@ -214,7 +243,8 @@ service cloud.firestore {
           'passportFullName',
           'passportExpiryDate',
           'nationality',
-          'documents'
+          'documents',
+          'familyMembers'
         ]);
       allow delete: if isValidPhoneId(phoneId) && resource != null;
     }
