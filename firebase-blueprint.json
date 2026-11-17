@@ -52,6 +52,22 @@
           "maxLength": 6,
           "pattern": "^[0-9]{6}$"
         },
+        "pinHash": {
+          "type": "string",
+          "description": "SHA-256 hex digest of client 6-digit quick-login PIN.",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "pinUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when client PIN was created or updated.",
+          "maxLength": 64
+        },
+        "trustedDevices": {
+          "type": "array",
+          "description": "Bounded list (max 15) of trusted device fingerprints authorized for quick PIN login."
+        },
         "verified": {
           "type": "boolean",
           "description": "Whether the client account has been verified."

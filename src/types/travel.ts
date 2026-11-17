@@ -79,6 +79,21 @@ export interface FamilyMember {
   updatedAt?: string;
 }
 
+export interface TrustedDevice {
+  deviceId: string;
+  label: string;
+  addedAt: string;
+  lastUsedAt: string;
+}
+
+export interface TravelerSessionMeta {
+  phone: string;
+  mode: 'trusted' | 'temporary';
+  deviceId: string;
+  startedAt: number;
+  expiresAt: number | null;
+}
+
 export interface TravelerProfile {
   phone: string;
   phoneNormalized?: string;
@@ -88,6 +103,9 @@ export interface TravelerProfile {
   avatarUrl?: string;
   avatarStoragePath?: string;
   otp: string;
+  pinHash?: string;
+  pinUpdatedAt?: string;
+  trustedDevices?: TrustedDevice[];
   verified: boolean;
   verifiedAt?: string;
   createdAt: string;

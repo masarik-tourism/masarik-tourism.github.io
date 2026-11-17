@@ -7,11 +7,12 @@ import { PaymentScreen } from './screens/PaymentScreen';
 import { ContactScreen } from './screens/ContactScreen';
 import { TravelRepository, getLocalizedTravelContent } from './data/travelData';
 import { dialPhoneNumber, openWhatsApp } from './utils/communication';
-import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight } from 'lucide-react';
+import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight, ShieldAlert, X } from 'lucide-react';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
 import { InAppVersionBanner } from './components/InAppVersionBanner';
 import {
+  PendingPostAuthFlow,
   TravelerSubTab,
   TravelerWorkspaceScreen,
 } from './components/TravelerWorkspaceScreen';
@@ -25,10 +26,13 @@ import {
   getActivePhone,
   getActiveTraveler,
   getTravelerDisplayNames,
+  getTravelerSessionMeta,
+  logoutTravelerSession,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
 } from './utils/travelerStore';
-import { TravelerProfile } from './types/travel';
+import { consumeSessionExpiredNotice } from './utils/deviceTrust';
+import { TravelerProfile, TravelerSessionMeta } from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
@@ -92,6 +96,11 @@ export const App: React.FC = () => {
     getActiveTraveler()
   );
   const [pendingOtpPhone, setPendingOtpPhone] = useState<string | null>(null);
+  const [pendingPostAuthFlow, setPendingPostAuthFlow] = useState<PendingPostAuthFlow | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<TravelerSessionMeta | null>(() =>
+    getTravelerSessionMeta()
+  );
+  const [sessionExpiredAlert, setSessionExpiredAlert] = useState<string | null>(null);
 
   // Lifted Draft State: preserved across full-page navigation until explicit Save or Cancel
   const [travelerDraft, setTravelerDraft] = useState<TravelerProfileDraft>(() =>
@@ -102,6 +111,17 @@ export const App: React.FC = () => {
   const adminTapCountRef = useRef<number>(0);
   const adminTapTimerRef = useRef<number | null>(null);
 
+  // Notify if an earlier temporary 1-hour session had expired before page load
+  useEffect(() => {
+    if (consumeSessionExpiredNotice()) {
+      setSessionExpiredAlert(
+        lang === 'en'
+          ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
+          : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+      );
+    }
+  }, [lang]);
+
   // Global real-time cloud subscriptions (site_config, cms, admins)
   useEffect(() => {
     const unsubConfig = subscribeSiteConfigCloud();
@@ -110,8 +130,18 @@ export const App: React.FC = () => {
     const syncTravelerState = () => {
       const nextPhone = getActivePhone();
       const nextTraveler = getActiveTraveler();
+      const nextMeta = getTravelerSessionMeta();
       setActiveTravelerPhoneState(nextPhone);
       setActiveTraveler(nextTraveler);
+      setSessionMeta(nextMeta);
+
+      if (consumeSessionExpiredNotice()) {
+        setSessionExpiredAlert(
+          lang === 'en'
+            ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
+            : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+        );
+      }
 
       // Re-sync draft only when active user changes or draft is clean (never overwrite unsaved edits)
       if (draftOwnerPhoneRef.current !== nextPhone) {
@@ -131,6 +161,43 @@ export const App: React.FC = () => {
       window.removeEventListener(TRAVELERS_UPDATED_EVENT, syncTravelerState);
     };
   }, [lang]);
+
+  // Active 60-minute Temporary Session Auto-Logout Guard (handles live countdown & sleep/wake)
+  useEffect(() => {
+    if (!sessionMeta || sessionMeta.mode !== 'temporary' || !sessionMeta.expiresAt) return;
+
+    const triggerExpiry = () => {
+      logoutTravelerSession('expired');
+      consumeSessionExpiredNotice();
+      setTravelerDraft(buildDraftFromTraveler(null, lang));
+      setPendingOtpPhone(null);
+      setPendingPostAuthFlow(null);
+      setSessionExpiredAlert(
+        lang === 'en'
+          ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
+          : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+      );
+      setTravelerSection('account');
+    };
+
+    const msRemaining = sessionMeta.expiresAt - Date.now();
+    if (msRemaining <= 0) {
+      triggerExpiry();
+      return;
+    }
+
+    const timeoutId = window.setTimeout(triggerExpiry, msRemaining + 50);
+    const intervalId = window.setInterval(() => {
+      if (sessionMeta.expiresAt && Date.now() >= sessionMeta.expiresAt) {
+        triggerExpiry();
+      }
+    }, 15000);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [sessionMeta, lang]);
 
   // Real-time cloud subscription for currently signed-in traveler
   useEffect(() => {
@@ -171,13 +238,33 @@ export const App: React.FC = () => {
 
           const res = await activateViaMagicLinkCloud(activatePhone, otp, nameParam);
           if (res.ok && res.profile) {
-            setPendingOtpPhone(null);
-            setMagicLinkFeedback(
-              t(
-                `تم تفعيل حسابك (${res.profile.name}) بنجاح والدخول المباشر عبر رابط الواتساب!`,
-                `Your account (${res.profile.name}) has been verified and unlocked via your WhatsApp link!`
-              )
-            );
+            if (res.needsPinSetup || !res.isDeviceTrusted) {
+              setPendingOtpPhone(res.profile.phone);
+              setPendingPostAuthFlow({
+                phone: res.profile.phone,
+                stage: res.needsPinSetup ? 'pin_setup' : 'device_trust_prompt',
+              });
+              setMagicLinkFeedback(
+                res.needsPinSetup
+                  ? t(
+                      `تم التحقق من رقمك (${res.profile.name}) عبر واتساب! يرجى الآن إنشاء رمز PIN شخصي من 6 أرقام لتأمين حسابك.`,
+                      `WhatsApp verified for (${res.profile.name})! Please create a personal 6-digit PIN to secure your account.`
+                    )
+                  : t(
+                      `تم التحقق من رقمك (${res.profile.name}) عبر واتساب! يرجى اختيار حفظ هذا الجهاز كجهاز موثوق أو المتابعة كجلسة مؤقتة.`,
+                      `WhatsApp verified for (${res.profile.name})! Please choose whether to trust this device or use a 1-hour temporary session.`
+                    )
+              );
+            } else {
+              setPendingOtpPhone(null);
+              setPendingPostAuthFlow(null);
+              setMagicLinkFeedback(
+                t(
+                  `تم تفعيل حسابك (${res.profile.name}) بنجاح والدخول المباشر عبر رابط الواتساب!`,
+                  `Your account (${res.profile.name}) has been verified and unlocked via your WhatsApp link!`
+                )
+              );
+            }
             setTravelerSection('account');
           } else {
             setMagicLinkFeedback(
@@ -192,7 +279,7 @@ export const App: React.FC = () => {
     };
 
     void handleUrlActions();
-  }, [lang, isAdminActive, openAdminLoginModal, setAdminMode]);
+  }, [lang, t, isAdminActive, openAdminLoginModal, setAdminMode]);
 
   const handleSecretAdminTap = () => {
     adminTapCountRef.current += 1;
@@ -272,6 +359,26 @@ export const App: React.FC = () => {
         hasUnsavedTravelerDraft={travelerDraft.isDirty}
       />
 
+      {/* Global Notice Banner if 1-hour Temporary Session Expired while on another page */}
+      {sessionExpiredAlert && !travelerSection && (
+        <div className="bg-red-50 border-b border-red-200 px-4 py-2.5 text-xs font-bold text-red-900">
+          <div className="max-w-5xl mx-auto flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{sessionExpiredAlert}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSessionExpiredAlert(null)}
+              className="text-red-700 hover:text-red-950 p-1 cursor-pointer"
+              aria-label={t('إغلاق', 'Close')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Full-Page Admin Workspace OR Full-Page Traveler Workspace OR Live Site Viewport */}
       {isDashboardMode ? (
         <main className="flex-1" data-no-admin-edit="true">
@@ -281,6 +388,7 @@ export const App: React.FC = () => {
         <main className="flex-1" data-no-admin-edit="true">
           <TravelerWorkspaceScreen
             activeTraveler={activeTraveler}
+            sessionMeta={sessionMeta}
             subTab={travelerSection}
             onChangeSubTab={handleSelectTravelerSection}
             draft={travelerDraft}
@@ -288,8 +396,12 @@ export const App: React.FC = () => {
             onResetDraft={handleResetDraft}
             pendingOtpPhone={pendingOtpPhone}
             onSetPendingOtpPhone={setPendingOtpPhone}
+            pendingPostAuthFlow={pendingPostAuthFlow}
+            onSetPendingPostAuthFlow={setPendingPostAuthFlow}
             magicLinkFeedback={magicLinkFeedback}
             onClearMagicLinkFeedback={() => setMagicLinkFeedback(null)}
+            sessionExpiredAlert={sessionExpiredAlert}
+            onClearSessionExpiredAlert={() => setSessionExpiredAlert(null)}
             onNavigateToAiScanner={handleNavigateToAiScanner}
             onNavigateToServices={() => handleSelectTab(1)}
             onGoHome={() => handleSelectTab(0)}

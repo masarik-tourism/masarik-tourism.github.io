@@ -14,10 +14,20 @@ import {
   FamilyRelationship,
   TravelerDocument,
   TravelerProfile,
+  TravelerSessionMeta,
+  TrustedDevice,
   VisaOrderStatus,
 } from '../types/travel';
 import { TravelRepository } from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
+import {
+  TEMPORARY_SESSION_DURATION_MS,
+  getDeviceFingerprint,
+  isDeviceInTrustedList,
+  markSessionExpiredNotice,
+  readStoredSessionMeta,
+  writeStoredSessionMeta,
+} from './deviceTrust';
 import {
   deleteTravelerDocumentFromStorage,
   uploadFamilyMemberFileToStorage,
@@ -366,6 +376,23 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       })
     : [];
 
+  const validDevices: TrustedDevice[] = Array.isArray(profile.trustedDevices)
+    ? profile.trustedDevices
+        .filter(
+          (d) =>
+            d &&
+            typeof d.deviceId === 'string' &&
+            /^[a-zA-Z0-9_\-]{8,64}$/.test(d.deviceId)
+        )
+        .slice(0, 15)
+        .map((d) => ({
+          deviceId: String(d.deviceId).slice(0, 64),
+          label: String(d.label || 'Web Device').trim().slice(0, 120) || 'Web Device',
+          addedAt: String(d.addedAt || new Date().toISOString()).slice(0, 64),
+          lastUsedAt: String(d.lastUsedAt || new Date().toISOString()).slice(0, 64),
+        }))
+    : [];
+
   const payload: Record<string, unknown> = {
     phone: normalized,
     phoneNormalized: normalized,
@@ -379,8 +406,15 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     orderStatus: safeStatus,
     documents: safeDocs,
     familyMembers: safeFamilyMembers,
+    trustedDevices: validDevices,
   };
 
+  if (profile.pinHash && /^[a-f0-9]{64}$/.test(profile.pinHash)) {
+    payload.pinHash = profile.pinHash;
+  }
+  if (profile.pinUpdatedAt) {
+    payload.pinUpdatedAt = String(profile.pinUpdatedAt).slice(0, 64);
+  }
   if (profile.verifiedAt) payload.verifiedAt = String(profile.verifiedAt).slice(0, 64);
   if (profile.adminNotes !== undefined) payload.adminNotes = String(profile.adminNotes).slice(0, 1000);
   if (profile.preferredVisaType !== undefined)
@@ -445,6 +479,11 @@ function mergeCloudClientWithLocal(
     phoneNormalized: cloudData.phoneNormalized || normalizePhone(cloudData.phone),
     firstName: cloudData.firstName || split.firstName,
     lastName: cloudData.lastName || split.lastName,
+    pinHash: cloudData.pinHash || localExisting?.pinHash || undefined,
+    pinUpdatedAt: cloudData.pinUpdatedAt || localExisting?.pinUpdatedAt || undefined,
+    trustedDevices: Array.isArray(cloudData.trustedDevices)
+      ? cloudData.trustedDevices
+      : localExisting?.trustedDevices || [],
     avatarUrl: cloudData.avatarUrl || localExisting?.avatarUrl || undefined,
     avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
     documents: mergedDocs,
@@ -530,9 +569,42 @@ export function subscribeAllClientsCloud(): () => void {
   );
 }
 
+export function hashClientPin(rawPhone: string, rawPin: string): string {
+  const phone = normalizePhone(rawPhone);
+  const cleanPin = normalizeArabicDigits(rawPin).replace(/\D/g, '');
+  return sha256Hex(`client_pin:${phone}:${cleanPin}`);
+}
+
+export function getTravelerSessionMeta(): TravelerSessionMeta | null {
+  if (typeof window === 'undefined') return null;
+  const activePhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+  if (!activePhone) return null;
+  const meta = readStoredSessionMeta();
+  if (!meta || meta.phone !== activePhone) return null;
+  if (meta.mode === 'temporary' && meta.expiresAt && Date.now() >= meta.expiresAt) {
+    window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    writeStoredSessionMeta(null);
+    markSessionExpiredNotice();
+    emitUpdateEvent();
+    return null;
+  }
+  return meta;
+}
+
 export function getActivePhone(): string | null {
   if (typeof window === 'undefined') return null;
-  return window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+  const rawPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+  if (!rawPhone) return null;
+  const meta = readStoredSessionMeta();
+  if (meta && meta.phone === rawPhone && meta.mode === 'temporary' && meta.expiresAt) {
+    if (Date.now() >= meta.expiresAt) {
+      window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+      writeStoredSessionMeta(null);
+      markSessionExpiredNotice();
+      return null;
+    }
+  }
+  return rawPhone;
 }
 
 export function getActiveTraveler(): TravelerProfile | null {
@@ -545,18 +617,194 @@ export function getActiveTraveler(): TravelerProfile | null {
 export function setActiveTravelerPhone(phone: string | null): void {
   if (typeof window === 'undefined') return;
   if (phone) {
-    window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, normalizePhone(phone));
+    const cleanPhone = normalizePhone(phone);
+    window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, cleanPhone);
   } else {
     window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    writeStoredSessionMeta(null);
   }
   emitUpdateEvent();
+}
+
+export function startTravelerSession(
+  rawPhone: string,
+  mode: 'trusted' | 'temporary'
+): TravelerSessionMeta {
+  const phone = normalizePhone(rawPhone);
+  const { deviceId } = getDeviceFingerprint();
+  const now = Date.now();
+  const meta: TravelerSessionMeta = {
+    phone,
+    mode,
+    deviceId,
+    startedAt: now,
+    expiresAt: mode === 'temporary' ? now + TEMPORARY_SESSION_DURATION_MS : null,
+  };
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
+    writeStoredSessionMeta(meta);
+    emitUpdateEvent();
+  }
+  return meta;
+}
+
+export function logoutTravelerSession(reason: 'manual' | 'expired' = 'manual'): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+  writeStoredSessionMeta(null);
+  if (reason === 'expired') {
+    markSessionExpiredNotice();
+  }
+  emitUpdateEvent();
+}
+
+export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promise<{
+  validPhone: boolean;
+  phone: string;
+  exists: boolean;
+  profile?: TravelerProfile;
+  hasPin: boolean;
+  isTrustedDevice: boolean;
+  currentDeviceId: string;
+  currentDeviceLabel: string;
+}> {
+  const phone = normalizePhone(rawPhone);
+  const { deviceId, label } = getDeviceFingerprint();
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return {
+      validPhone: false,
+      phone: '',
+      exists: false,
+      hasPin: false,
+      isTrustedDevice: false,
+      currentDeviceId: deviceId,
+      currentDeviceLabel: label,
+    };
+  }
+
+  const localAll = getAllTravelers();
+  let target: TravelerProfile | undefined = localAll[phone];
+  const path = `clients/${phone}`;
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, localAll[phone]);
+      localAll[phone] = target;
+      saveAllTravelersLocalOnly(localAll);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+    console.warn('Cloud device trust lookup deferred:', msg);
+  }
+
+  if (!target) {
+    return {
+      validPhone: true,
+      phone,
+      exists: false,
+      hasPin: false,
+      isTrustedDevice: false,
+      currentDeviceId: deviceId,
+      currentDeviceLabel: label,
+    };
+  }
+
+  return {
+    validPhone: true,
+    phone,
+    exists: true,
+    profile: target,
+    hasPin: Boolean(target.pinHash && /^[a-f0-9]{64}$/.test(target.pinHash)),
+    isTrustedDevice: isDeviceInTrustedList(target.trustedDevices, deviceId),
+    currentDeviceId: deviceId,
+    currentDeviceLabel: label,
+  };
+}
+
+export async function loginWithTrustedDevicePinCloud(
+  rawPhone: string,
+  enteredPin: string,
+  lang: 'ar' | 'en' = 'ar'
+): Promise<{
+  ok: boolean;
+  error?: string;
+  fallbackToOtp?: boolean;
+  profile?: TravelerProfile;
+}> {
+  const phone = normalizePhone(rawPhone);
+  const cleanPin = normalizeArabicDigits(enteredPin).replace(/\D/g, '');
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanPin.length !== 6) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Please enter your valid phone number and 6-digit PIN.'
+          : 'يرجى إدخال رقم الواتساب ورمز الـ PIN المكون من 6 أرقام.',
+    };
+  }
+
+  const check = await checkClientAccountAndDeviceCloud(phone);
+  if (!check.exists || !check.profile) {
+    return {
+      ok: false,
+      fallbackToOtp: true,
+      error:
+        lang === 'en'
+          ? 'Account not found. Please verify via WhatsApp OTP.'
+          : 'لم يتم العثور على الحساب. يرجى التحقق عبر كود الواتساب.',
+    };
+  }
+
+  if (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash) {
+    return {
+      ok: false,
+      fallbackToOtp: true,
+      error:
+        lang === 'en'
+          ? 'This device is not trusted or PIN is not set. Switching to WhatsApp OTP verification.'
+          : 'هذا الجهاز غير موثوق أو لم يتم تعيين رمز PIN بعد. سيتم التحقق عبر كود واتساب OTP.',
+    };
+  }
+
+  const enteredHash = hashClientPin(phone, cleanPin);
+  if (enteredHash !== check.profile.pinHash) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Incorrect 6-digit PIN. Please try again or tap Forgot PIN to verify via WhatsApp OTP.'
+          : 'رمز الـ PIN غير صحيح. يرجى المحاولة مرة أخرى أو استخدام خيار نسيت رمز الـ PIN.',
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const updatedDevices: TrustedDevice[] = (check.profile.trustedDevices || []).map((d) =>
+    d.deviceId === check.currentDeviceId
+      ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
+      : d
+  );
+
+  const updated: TravelerProfile = {
+    ...check.profile,
+    trustedDevices: updatedDevices,
+  };
+  const all = getAllTravelers();
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  startTravelerSession(phone, 'trusted');
+  await syncTravelerToCloud(updated);
+  return { ok: true, profile: updated };
 }
 
 /**
  * Step 1 of Zero-Leak Client Login:
  * Generates a brand-new random 6-digit OTP in Firestore (`clients/{phoneNormalized}`),
  * saves `firstName`, `lastName`, `name`, `phone`, and `phoneNormalized`,
- * and DOES NOT unlock the session until OTP or Magic Link verification succeeds.
+ * and DOES NOT unlock the session until OTP + PIN/Device Trust steps succeed.
  */
 export async function initiateTravelerOtpLoginCloud(
   firstNameInput: string,
@@ -619,6 +867,7 @@ export async function initiateTravelerOtpLoginCloud(
     lastName: cleanLast,
     name: combinedName || `مسافر (${formatPhoneForDisplay(phone)})`,
     otp: freshOtp,
+    trustedDevices: [],
     verified: false,
     createdAt: new Date().toISOString(),
     orderStatus: 'تم استلام الأوراق',
@@ -632,15 +881,111 @@ export async function initiateTravelerOtpLoginCloud(
 }
 
 /**
+ * Generates a fresh 6-digit OTP on an existing client account (used for Forgot PIN or Change PIN).
+ */
+export async function requestAccountSecurityOtpCloud(
+  rawPhone: string
+): Promise<{ ok: boolean; phone: string; error?: string }> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, phone: '', error: 'رقم الهاتف غير صالح.' };
+  }
+  const freshOtp = generateSixDigitOtp();
+  const path = `clients/${phone}`;
+  const localAll = getAllTravelers();
+  let existing: TravelerProfile | undefined = localAll[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, localAll[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!existing) {
+    return { ok: false, phone, error: 'الحساب غير موجود.' };
+  }
+
+  const updated: TravelerProfile = {
+    ...existing,
+    otp: freshOtp,
+  };
+  localAll[phone] = updated;
+  saveAllTravelersLocalOnly(localAll);
+  await syncTravelerToCloud(updated);
+  return { ok: true, phone };
+}
+
+/**
+ * Verifies a 6-digit security OTP against Firestore without creating/changing active session state.
+ */
+export async function verifyAccountSecurityOtpCloud(
+  rawPhone: string,
+  enteredOtp: string,
+  lang: 'ar' | 'en' = 'ar'
+): Promise<{ ok: boolean; error?: string; profile?: TravelerProfile }> {
+  const phone = normalizePhone(rawPhone);
+  const cleanOtp = normalizeArabicDigits(enteredOtp).replace(/\D/g, '');
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanOtp.length !== 6) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Please enter the 6-digit verification code.'
+          : 'يرجى إدخال كود التحقق المكون من 6 أرقام.',
+    };
+  }
+
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let target: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!target || String(target.otp || '').trim() !== cleanOtp) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Verification code is incorrect. Please check WhatsApp and try again.'
+          : 'كود التحقق غير صحيح. يرجى مراجعة رسالة الواتساب والمحاولة مجدداً.',
+    };
+  }
+
+  return { ok: true, profile: target };
+}
+
+/**
  * Step 2 of Zero-Leak Client Login:
  * Verifies the user-entered 6-digit OTP against Firestore `clients/{phoneNormalized}`
- * and unlocks the active traveler session only upon exact match.
+ * and returns PIN/device trust requirements before finalizing the session.
  */
 export async function verifyLoginOtpCloud(
   rawPhone: string,
   enteredOtp: string,
   lang: 'ar' | 'en' = 'ar'
-): Promise<{ ok: boolean; error?: string; profile?: TravelerProfile }> {
+): Promise<{
+  ok: boolean;
+  error?: string;
+  profile?: TravelerProfile;
+  needsPinSetup?: boolean;
+  isDeviceTrusted?: boolean;
+}> {
   const phone = normalizePhone(rawPhone);
   const cleanOtp = normalizeArabicDigits(enteredOtp).replace(/\D/g, '');
   if (!/^[0-9]{8,20}$/.test(phone) || cleanOtp.length !== 6) {
@@ -685,7 +1030,7 @@ export async function verifyLoginOtpCloud(
       ok: false,
       error:
         lang === 'en'
-          ? 'The entered login code is incorrect. Please check with Masarik support and try again.'
+          ? 'The entered login code is incorrect. Please check WhatsApp and try again.'
           : 'كود الدخول المدخل غير صحيح. يرجى التأكد من الكود المرسل لكم عبر واتساب.',
     };
   }
@@ -695,14 +1040,147 @@ export async function verifyLoginOtpCloud(
     phone,
     phoneNormalized: phone,
     verified: true,
-    verifiedAt: new Date().toISOString(),
+    verifiedAt: target.verifiedAt || new Date().toISOString(),
   };
 
   all[phone] = verifiedProfile;
   saveAllTravelersLocalOnly(all);
-  setActiveTravelerPhone(phone);
   await syncTravelerToCloud(verifiedProfile);
-  return { ok: true, profile: verifiedProfile };
+
+  const hasPin = Boolean(verifiedProfile.pinHash && /^[a-f0-9]{64}$/.test(verifiedProfile.pinHash));
+  const trusted = isDeviceInTrustedList(verifiedProfile.trustedDevices);
+
+  return {
+    ok: true,
+    profile: verifiedProfile,
+    needsPinSetup: !hasPin,
+    isDeviceTrusted: trusted,
+  };
+}
+
+export async function setClientPinCloud(
+  rawPhone: string,
+  newPin: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const cleanPin = normalizeArabicDigits(newPin).replace(/\D/g, '');
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanPin.length !== 6) return null;
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  const path = `clients/${phone}`;
+
+  if (!existing) {
+    try {
+      const snap = await getDoc(doc(db, 'clients', phone));
+      if (snap.exists()) {
+        existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
+    }
+  }
+
+  if (!existing) return null;
+
+  const updated: TravelerProfile = {
+    ...existing,
+    pinHash: hashClientPin(phone, cleanPin),
+    pinUpdatedAt: new Date().toISOString(),
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function trustCurrentDeviceCloud(
+  rawPhone: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  const path = `clients/${phone}`;
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!existing) return null;
+
+  const { deviceId, label } = getDeviceFingerprint();
+  const nowIso = new Date().toISOString();
+  const currentList = Array.isArray(existing.trustedDevices) ? existing.trustedDevices : [];
+  const existingEntry = currentList.find((d) => d.deviceId === deviceId);
+
+  const nextDevice: TrustedDevice = {
+    deviceId,
+    label,
+    addedAt: existingEntry?.addedAt || nowIso,
+    lastUsedAt: nowIso,
+  };
+
+  const filtered = currentList.filter((d) => d.deviceId !== deviceId);
+  const nextList = [nextDevice, ...filtered].slice(0, 15);
+
+  const updated: TravelerProfile = {
+    ...existing,
+    trustedDevices: nextList,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  startTravelerSession(phone, 'trusted');
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function revokeTrustedDeviceCloud(
+  rawPhone: string,
+  targetDeviceId: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  const nextDevices = (existing.trustedDevices || []).filter(
+    (d) => d.deviceId !== targetDeviceId
+  );
+
+  const updated: TravelerProfile = {
+    ...existing,
+    trustedDevices: nextDevices,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+
+  // If the client revoked trust from the current device while on a permanent session,
+  // convert the current session into a 60-minute temporary session so future logins require OTP.
+  const currentDeviceId = getDeviceFingerprint().deviceId;
+  const meta = getTravelerSessionMeta();
+  if (targetDeviceId === currentDeviceId && meta?.phone === phone && meta.mode === 'trusted') {
+    startTravelerSession(phone, 'temporary');
+  }
+
+  await syncTravelerToCloud(updated);
+  return updated;
 }
 
 /**
@@ -930,7 +1408,13 @@ export async function activateViaMagicLinkCloud(
   rawPhone: string,
   rawOtp: string,
   nameFromUrl?: string | null
-): Promise<{ ok: boolean; error?: string; profile?: TravelerProfile }> {
+): Promise<{
+  ok: boolean;
+  error?: string;
+  profile?: TravelerProfile;
+  needsPinSetup?: boolean;
+  isDeviceTrusted?: boolean;
+}> {
   const phone = normalizePhone(rawPhone);
   const cleanOtp = normalizeArabicDigits(rawOtp).replace(/\D/g, '');
 
@@ -959,12 +1443,34 @@ export async function activateViaMagicLinkCloud(
           verified: true,
           verifiedAt: cloud.verifiedAt || new Date().toISOString(),
         };
+
+        const hasPin = Boolean(updated.pinHash && /^[a-f0-9]{64}$/.test(updated.pinHash));
+        const { deviceId, label } = getDeviceFingerprint();
+        const trusted = isDeviceInTrustedList(updated.trustedDevices, deviceId);
+
+        if (hasPin && trusted) {
+          const nowIso = new Date().toISOString();
+          updated.trustedDevices = (updated.trustedDevices || []).map((d) =>
+            d.deviceId === deviceId ? { ...d, label, lastUsedAt: nowIso } : d
+          );
+          const all = getAllTravelers();
+          all[phone] = updated;
+          saveAllTravelersLocalOnly(all);
+          startTravelerSession(phone, 'trusted');
+          await syncTravelerToCloud(updated);
+          return { ok: true, profile: updated, needsPinSetup: false, isDeviceTrusted: true };
+        }
+
         const all = getAllTravelers();
         all[phone] = updated;
         saveAllTravelersLocalOnly(all);
-        setActiveTravelerPhone(phone);
         await syncTravelerToCloud(updated);
-        return { ok: true, profile: updated };
+        return {
+          ok: true,
+          profile: updated,
+          needsPinSetup: !hasPin,
+          isDeviceTrusted: trusted,
+        };
       }
     }
   } catch (error) {
@@ -975,7 +1481,25 @@ export async function activateViaMagicLinkCloud(
     console.warn('Cloud magic-link lookup deferred:', msg);
   }
 
-  return activateViaMagicLink(rawPhone, rawOtp, nameFromUrl);
+  const localRes = activateViaMagicLink(rawPhone, rawOtp, nameFromUrl);
+  if (!localRes.ok || !localRes.profile) return localRes;
+
+  const hasPin = Boolean(
+    localRes.profile.pinHash && /^[a-f0-9]{64}$/.test(localRes.profile.pinHash)
+  );
+  const trusted = isDeviceInTrustedList(localRes.profile.trustedDevices);
+  if (!hasPin || !trusted) {
+    // Undo direct session unlock from legacy offline helper so PIN & Trust prompt always execute
+    setActiveTravelerPhone(null);
+  } else {
+    startTravelerSession(localRes.profile.phone, 'trusted');
+  }
+  return {
+    ok: true,
+    profile: localRes.profile,
+    needsPinSetup: !hasPin,
+    isDeviceTrusted: trusted,
+  };
 }
 
 export function updateTravelerProfileDetails(

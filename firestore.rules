@@ -48,6 +48,9 @@ service cloud.firestore {
         'avatarUrl',
         'avatarStoragePath',
         'otp',
+        'pinHash',
+        'pinUpdatedAt',
+        'trustedDevices',
         'verified',
         'verifiedAt',
         'createdAt',
@@ -105,6 +108,31 @@ service cloud.firestore {
           && data.documents[0].id.size() <= 80
           && data.documents[0].dataUrl is string
           && data.documents[0].dataUrl.size() <= 4096
+        )
+      )
+      && (!('pinHash' in data) || (data.pinHash is string && data.pinHash.matches('^[a-f0-9]{64}$')))
+      && isOptionalString(data, 'pinUpdatedAt', 64)
+      && (
+        !('trustedDevices' in data)
+        || (
+          data.trustedDevices is list
+          && data.trustedDevices.size() <= 15
+          && (
+            data.trustedDevices.size() == 0
+            || (
+              data.trustedDevices[0] is map
+              && data.trustedDevices[0].deviceId is string
+              && data.trustedDevices[0].deviceId.size() >= 8
+              && data.trustedDevices[0].deviceId.size() <= 64
+              && data.trustedDevices[0].deviceId.matches('^[a-zA-Z0-9_\\-]+$')
+              && data.trustedDevices[0].label is string
+              && data.trustedDevices[0].label.size() <= 120
+              && data.trustedDevices[0].addedAt is string
+              && data.trustedDevices[0].addedAt.size() <= 64
+              && data.trustedDevices[0].lastUsedAt is string
+              && data.trustedDevices[0].lastUsedAt.size() <= 64
+            )
+          )
         )
       )
       && (
@@ -233,6 +261,9 @@ service cloud.firestore {
           'avatarUrl',
           'avatarStoragePath',
           'otp',
+          'pinHash',
+          'pinUpdatedAt',
+          'trustedDevices',
           'verified',
           'verifiedAt',
           'updatedAt',
