@@ -35,6 +35,7 @@ const DEFAULT_ADMIN_PIN = '202200';
 
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
 export const COMPANY_WHATSAPP_NUMBER = '201128440008';
+export const OTP_ACTIVATION_WHATSAPP_NUMBER = '201119227270';
 
 export const VISA_ORDER_STATUSES: VisaOrderStatus[] = [
   'تم استلام الأوراق',
@@ -248,29 +249,29 @@ export function buildAdminForwardActivationMessage(
 ): string {
   const magicLink = buildActivationMagicLink(phone, otp, name);
   if (lang === 'en') {
-    return `Hello ${name.trim()}, your Masarik Tourism login code is ready:
+    return `Hello ${name.trim()}, your Masarik Tourism activation code is: ${otp}
 
-• 6-Digit Login Code (OTP): ${otp}
-• Direct One-Tap Login Link:
-${magicLink}
-
-We are happy to assist you 24/7.`;
+Direct one-tap activation link:
+${magicLink}`;
   }
-  return `مرحباً ${name.trim()}، تم تجهيز كود الدخول لحسابك في منصة ${TravelRepository.COMPANY_NAME_AR}:
+  return `مرحباً ${name.trim()}، كود تفعيل حسابك في ${TravelRepository.COMPANY_NAME_AR}: ${otp}
 
-• كود الدخول (OTP): ${otp}
-• رابط الدخول المباشر بضغطة واحدة:
-${magicLink}
-
-نسعد بخدمتك على مدار الساعة.`;
+رابط التفعيل المباشر بضغطة واحدة:
+${magicLink}`;
 }
 
 // Anti-Spoofing & Zero-Leak Request: NEVER include OTP or user inputs in client WhatsApp request
 export function buildClientWhatsAppRequestMessage(lang: 'ar' | 'en' = 'ar'): string {
   if (lang === 'en') {
-    return 'Hello, please send me the login code for my Masarik Tourism account.';
+    return 'Masarik Activation Code';
   }
-  return 'السلام عليكم، أرجو إرسال كود الدخول لحسابي في منصة مسارك للإنجاز السياحي.';
+  return 'كود تفعيل مسارك';
+}
+
+export function buildClientOtpWhatsAppUrl(lang: 'ar' | 'en' = 'ar'): string {
+  return `https://wa.me/${OTP_ACTIVATION_WHATSAPP_NUMBER}?text=${encodeURIComponent(
+    buildClientWhatsAppRequestMessage(lang)
+  )}`;
 }
 
 export function getAllTravelers(): Record<string, TravelerProfile> {

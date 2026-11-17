@@ -721,7 +721,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               >
                                 <Send className="w-3 h-3" />
                                 <span>
-                                  {t('إرسال كود الدخول للرقم المسجل', 'Send OTP to Registered Number')}
+                                  {t(
+                                    'إرسال الكود يدوياً بضغطة واحدة عبر واتساب',
+                                    'Send OTP Manually via WhatsApp (1-Click)'
+                                  )}
                                 </span>
                               </button>
                               {!client.verified && (
@@ -866,9 +869,17 @@ export const AdminDashboardWorkspace: React.FC = () => {
             {canActivateOtp && (
               <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <span className="font-black text-[#0F2438]">
-                    {t('كود ورابط التفعيل المباشر عبر واتساب', 'WhatsApp OTP & Direct Activation Link')}
-                  </span>
+                  <div>
+                    <span className="font-black text-[#0F2438] block">
+                      {t('كود ورابط التفعيل المباشر عبر واتساب', 'WhatsApp OTP & Direct Activation Link')}
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      {t(
+                        'بديل يدوي فوري للمدير العام بجانب الرد الآلي التلقائي للعميل',
+                        'Quick manual fallback for management alongside automatic client replies'
+                      )}
+                    </span>
+                  </div>
                   <span className="font-bold text-[#0284C7] tabular-nums">
                     OTP: {selectedClient.otp}
                   </span>
@@ -909,7 +920,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   >
                     <Send className="w-3.5 h-3.5" />
                     <span>
-                      {t('إرسال كود الدخول للرقم المسجل', 'Send OTP to Registered Number')}
+                      {t(
+                        'إرسال الكود يدوياً بضغطة واحدة عبر واتساب',
+                        'Send OTP Manually via WhatsApp (1-Click)'
+                      )}
                     </span>
                   </button>
                 </div>

@@ -38,7 +38,7 @@ import {
   FAMILY_RELATIONSHIPS,
   TravelerProfileDraft,
   VISA_ORDER_STATUSES,
-  buildClientWhatsAppRequestMessage,
+  buildClientOtpWhatsAppUrl,
   commitTravelerProfileDraftCloud,
   compressImageToDataUrl,
   deleteFamilyMemberCloud,
@@ -154,6 +154,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const walletFileInputRef = useRef<HTMLInputElement>(null);
   const memberPassportInputRef = useRef<HTMLInputElement>(null);
   const memberPersonalPhotoInputRef = useRef<HTMLInputElement>(null);
+  const otpBoxRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   const handleDirectDownload = async (key: string, url: string, filename: string) => {
     if (!url) return;
@@ -391,9 +392,70 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // Step 2: Request Login OTP cleanly via WhatsApp (zero-leak / anti-spoofing exact message)
+  // Step 2: Request Login OTP cleanly via official WhatsApp number 201119227270 (zero-leak short message)
   const handleRequestWhatsAppOtp = () => {
-    openWhatsApp(buildClientWhatsAppRequestMessage(lang));
+    openWhatsApp(buildClientOtpWhatsAppUrl(lang));
+  };
+
+  const otpDigits = Array.from({ length: 6 }, (_, i) => {
+    const clean = normalizeArabicDigits(otpInput).replace(/\D/g, '');
+    return clean[i] || '';
+  });
+
+  const handleOtpBoxChange = (index: number, rawValue: string) => {
+    setOtpError('');
+    const digits = normalizeArabicDigits(rawValue).replace(/\D/g, '');
+
+    if (!digits) {
+      const next = [...otpDigits];
+      next[index] = '';
+      setOtpInput(next.join(''));
+      return;
+    }
+
+    if (digits.length > 1) {
+      const pasted = digits.slice(0, 6);
+      setOtpInput(pasted);
+      const focusIdx = Math.min(5, pasted.length - 1);
+      otpBoxRefs.current[focusIdx]?.focus();
+      return;
+    }
+
+    const next = [...otpDigits];
+    next[index] = digits;
+    setOtpInput(next.join(''));
+    if (index < 5) {
+      otpBoxRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpBoxKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace') {
+      if (!otpDigits[index] && index > 0) {
+        e.preventDefault();
+        const next = [...otpDigits];
+        next[index - 1] = '';
+        setOtpInput(next.join(''));
+        otpBoxRefs.current[index - 1]?.focus();
+      }
+    } else if (e.key === 'ArrowLeft' && index > 0) {
+      e.preventDefault();
+      otpBoxRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowRight' && index < 5) {
+      e.preventDefault();
+      otpBoxRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    setOtpError('');
+    const raw = e.clipboardData.getData('text') || '';
+    const digits = normalizeArabicDigits(raw).replace(/\D/g, '').slice(0, 6);
+    if (!digits) return;
+    setOtpInput(digits);
+    const focusIdx = Math.min(5, digits.length - 1);
+    otpBoxRefs.current[focusIdx]?.focus();
   };
 
   // Step 2: Submit 6-digit OTP to unlock session
@@ -865,35 +927,70 @@ Please advise on the next steps for my application.`
                   </span>
                   <p className="text-[11px] text-slate-600 leading-relaxed pt-1">
                     {t(
-                      'اضغط على الزر الأخضر أدناه لطلب كود الدخول عبر واتساب، ثم أدخل الكود المكون من 6 أرقام لفتح ملف المسافر.',
-                      'Tap the green button below to request your login code via WhatsApp, then enter the 6-digit code to unlock your account.'
+                      'يمكنك تفعيل الحساب بإدخال الكود المكون من 6 أرقام أدناه، أو الضغط مباشرةً على رابط التفعيل التلقائي القادم لك في رسالة الواتساب.',
+                      'Activate your account by entering the 6-digit OTP below, or simply tap the direct activation link sent in your WhatsApp reply.'
                     )}
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleRequestWhatsAppOtp}
-                  className="w-full min-h-[46px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
-                >
-                  <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
-                  <span>{t('طلب كود الدخول عبر واتساب', 'Request Login Code via WhatsApp')}</span>
-                </button>
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    onClick={handleRequestWhatsAppOtp}
+                    className="w-full min-h-[48px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
+                  >
+                    <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
+                    <span>
+                      {t('اطلب كود التفعيل عبر واتساب', 'Request Activation Code via WhatsApp')}
+                    </span>
+                  </button>
 
-                <form onSubmit={handleVerifyOtpSubmit} className="space-y-3 pt-2 border-t border-slate-200">
-                  <label className="block text-xs font-bold text-[#0F2438]">
-                    {t('أدخل كود الدخول المكون من 6 أرقام', 'Enter 6-Digit Login Code')}
-                  </label>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={otpInput}
-                    onChange={(e) => setOtpInput(e.target.value)}
-                    placeholder="______"
-                    autoFocus
-                    className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A052]"
-                  />
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-emerald-950">
+                    <Clock className="w-4 h-4 text-emerald-700 shrink-0" />
+                    <span className="text-xs font-bold leading-snug">
+                      {t(
+                        'الرد بالكود يتم آلياً عبر واتساب خلال ثوانٍ',
+                        'The activation code is sent automatically via WhatsApp within seconds.'
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                <form onSubmit={handleVerifyOtpSubmit} className="space-y-3.5 pt-3 border-t border-slate-200">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="block text-xs font-bold text-[#0F2438]">
+                      {t('أدخل كود التفعيل (6 أرقام)', 'Enter Activation Code (6 Digits)')}
+                    </label>
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {t('يدعم اللصق السريع', 'Quick paste supported')}
+                    </span>
+                  </div>
+
+                  <div
+                    dir="ltr"
+                    className="grid grid-cols-6 gap-2 sm:gap-2.5 max-w-sm mx-auto"
+                  >
+                    {otpDigits.map((digit, idx) => (
+                      <input
+                        key={idx}
+                        ref={(el) => {
+                          otpBoxRefs.current[idx] = el;
+                        }}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete={idx === 0 ? 'one-time-code' : 'off'}
+                        maxLength={6}
+                        value={digit}
+                        onChange={(e) => handleOtpBoxChange(idx, e.target.value)}
+                        onKeyDown={(e) => handleOtpBoxKeyDown(idx, e)}
+                        onPaste={handleOtpPaste}
+                        onFocus={(e) => e.target.select()}
+                        autoFocus={idx === 0}
+                        aria-label={t(`الخانة ${idx + 1} من كود التفعيل`, `OTP digit ${idx + 1}`)}
+                        className="w-full h-12 sm:h-13 rounded-xl border-2 border-slate-300 bg-slate-50 focus:bg-white text-center text-lg sm:text-xl font-black text-[#0F2438] tabular-nums focus:outline-none focus:border-[#C6A052] focus:ring-2 focus:ring-[#C6A052]/30 transition"
+                      />
+                    ))}
+                  </div>
 
                   {otpError && (
                     <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
@@ -901,7 +998,7 @@ Please advise on the next steps for my application.`
                     </div>
                   )}
 
-                  <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
                     <button
                       type="submit"
                       disabled={isVerifyingOtp}

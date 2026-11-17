@@ -145,7 +145,6 @@ export const App: React.FC = () => {
   }, [isAdminActive]);
 
   useEffect(() => {
-    let cancelled = false;
     const handleUrlActions = async () => {
       try {
         const url = new URL(window.location.href);
@@ -171,8 +170,8 @@ export const App: React.FC = () => {
           window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
 
           const res = await activateViaMagicLinkCloud(activatePhone, otp, nameParam);
-          if (cancelled) return;
           if (res.ok && res.profile) {
+            setPendingOtpPhone(null);
             setMagicLinkFeedback(
               t(
                 `تم تفعيل حسابك (${res.profile.name}) بنجاح والدخول المباشر عبر رابط الواتساب!`,
@@ -193,9 +192,6 @@ export const App: React.FC = () => {
     };
 
     void handleUrlActions();
-    return () => {
-      cancelled = true;
-    };
   }, [lang, isAdminActive, openAdminLoginModal, setAdminMode]);
 
   const handleSecretAdminTap = () => {
