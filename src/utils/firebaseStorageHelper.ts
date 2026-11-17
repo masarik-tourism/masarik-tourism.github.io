@@ -1,4 +1,10 @@
-import { deleteObject, getDownloadURL, ref, uploadString } from 'firebase/storage';
+import {
+  deleteObject,
+  getDownloadURL,
+  ref,
+  uploadBytes,
+  uploadString,
+} from 'firebase/storage';
 import { storage } from '../firebase';
 
 export async function uploadTravelerDocumentToStorage(
@@ -77,6 +83,59 @@ export async function uploadFamilyMemberFileToStorage(
   }
 }
 
+export async function uploadIssuedDeliverableToStorage(
+  phone: string,
+  deliverableId: string,
+  file: File
+): Promise<{
+  downloadUrl: string;
+  storagePath: string;
+  fileName: string;
+  mimeType: string;
+}> {
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (!cleanPhone) {
+    throw new Error('Invalid phone number for storage path.');
+  }
+
+  const lowerName = (file.name || '').toLowerCase();
+  const mime =
+    file.type ||
+    (lowerName.endsWith('.pdf')
+      ? 'application/pdf'
+      : lowerName.endsWith('.png')
+      ? 'image/png'
+      : lowerName.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg');
+
+  const ext =
+    mime === 'application/pdf' || lowerName.endsWith('.pdf')
+      ? 'pdf'
+      : mime === 'image/png' || lowerName.endsWith('.png')
+      ? 'png'
+      : mime === 'image/webp' || lowerName.endsWith('.webp')
+      ? 'webp'
+      : 'jpg';
+
+  const cleanId = deliverableId.replace(/[^a-zA-Z0-9_-]/g, '') || `${Date.now()}`;
+  const storagePath = `travelers/${cleanPhone}/deliverables/${cleanId}.${ext}`;
+  const storageRef = ref(storage, storagePath);
+
+  await uploadBytes(storageRef, file, {
+    contentType: mime,
+    cacheControl: 'public, max-age=31536000',
+  });
+
+  const downloadUrl = await getDownloadURL(storageRef);
+  return {
+    downloadUrl,
+    storagePath,
+    fileName: file.name || `Masarik_Deliverable_${cleanId}.${ext}`,
+    mimeType: mime,
+  };
+}
+
 export async function deleteTravelerDocumentFromStorage(storagePath?: string): Promise<void> {
   if (!storagePath) return;
   try {
@@ -126,6 +185,10 @@ function triggerAnchorDownload(href: string, filename: string, openInNewTab = fa
 export async function downloadCloudFile(urlOrDataUrl: string, filename: string): Promise<void> {
   if (!urlOrDataUrl) return;
   const safeName = filename || 'Masarik_Document.jpg';
+  const isPdf =
+    safeName.toLowerCase().endsWith('.pdf') ||
+    urlOrDataUrl.toLowerCase().includes('.pdf') ||
+    urlOrDataUrl.startsWith('data:application/pdf');
 
   if (urlOrDataUrl.startsWith('data:') || urlOrDataUrl.startsWith('blob:')) {
     triggerAnchorDownload(urlOrDataUrl, safeName);
@@ -140,10 +203,15 @@ export async function downloadCloudFile(urlOrDataUrl: string, filename: string):
     const blob = await response.blob();
     const blobUrl = URL.createObjectURL(blob);
     triggerAnchorDownload(blobUrl, safeName);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 6000);
     return;
   } catch {
-    // Fallback via CORS image canvas conversion
+    if (isPdf) {
+      // PDF files cannot be rendered through an <img> canvas; fall back directly to browser download/open
+      triggerAnchorDownload(urlOrDataUrl, safeName, true);
+      return;
+    }
+    // Fallback via CORS image canvas conversion for images
     try {
       const blobUrl = await new Promise<string>((resolve, reject) => {
         const img = new Image();
@@ -174,7 +242,7 @@ export async function downloadCloudFile(urlOrDataUrl: string, filename: string):
         img.src = urlOrDataUrl;
       });
       triggerAnchorDownload(blobUrl, safeName);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 6000);
       return;
     } catch {
       // Final safe fallback

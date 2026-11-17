@@ -70,6 +70,11 @@ export const TravelRepository = {
         'تعبئة النماذج الرسمية، تجهيز خطابات التعريف، ومراجعة وتجهيز كشوف الحسابات',
         'إصدار حجوزات الطيران والفنادق المبدئية والمؤكدة المطلوبة للتقديم بالسفارات',
       ],
+      requiredDocs: [
+        'صورة جواز سفر ساري لمدة لا تقل عن 6 أشهر',
+        'صورة شخصية حديثة بخلفية بيضاء',
+        'كشف حساب بنكي أو خطاب تعريف (لتأشيرات الشنغن والسفر)',
+      ],
     },
     {
       id: 'tasheer-vfs',
@@ -82,6 +87,11 @@ export const TravelRepository = {
         'استخراج الباركود الرسمي المعتمد وطباعة إيصال الموعد مباشرة',
         'مراجعة وتدقيق المستندات وتجهيز الملف بالكامل قبل موعد الحضور',
         'توفير مواعيد عادية ومواعيد مميزة (Lounge VIP) حسب رغبة العميل',
+      ],
+      requiredDocs: [
+        'صورة جواز السفر بوضوح (الصفحة الأولى)',
+        'صورة مستند التأشيرة أو الدعوة / رقم المستند',
+        'صورة شخصية بخلفية بيضاء + تحديد الفرع والمحافظة',
       ],
     },
     {
@@ -96,6 +106,11 @@ export const TravelRepository = {
         'إمكانية تعديل المواعيد، اختيار المقاعد، وإضافة الأوزان والحقائب الإضافية',
         'متابعة مستمرة وتأكيد فوري للتذكرة حتى موعد إقلاع الرحلة',
       ],
+      requiredDocs: [
+        'صورة جواز سفر ساري لكل مسافر',
+        'صورة التأشيرة أو الإقامة (للوجهة الدولية)',
+        'تحديد مطار المغادرة والوصول وتاريخ السفر المطلوب',
+      ],
     },
     {
       id: 'hotel-booking',
@@ -108,6 +123,10 @@ export const TravelRepository = {
         'حجوزات فندقية مؤكدة ومبدئية مطابقة لاشتراطات السفارات والتأشيرات',
         'خيارات غرف وأجنحة عائلية مع إفطار ومرونة في التعديل أو الإلغاء',
         'إرسال قسيمة الحجز الرسمية (Voucher) بالاسم وتفاصيل الإقامة فوراً',
+      ],
+      requiredDocs: [
+        'صورة جواز السفر (لتطابق الاسم الإنجليزي في القسيمة)',
+        'تاريخ الوصول والمغادرة وعدد النزلاء والغرف',
       ],
     },
     {
@@ -122,6 +141,10 @@ export const TravelRepository = {
         'توجيه وإرشاد لاستخراج وتجديد جوازات السفر والمستخرجات الرسمية المميكنة',
         'ترجمة معتمدة لجميع الوثائق والشهادات والتقارير الطبية للسفارات',
       ],
+      requiredDocs: [
+        'صورة واضحة للمستند أو الشهادة أو العقد المطلوب تخليصه',
+        'صورة جواز السفر أو بطاقة الرقم القومي لصاحب الطلب',
+      ],
     },
     {
       id: 'enjaz-insurance',
@@ -134,6 +157,11 @@ export const TravelRepository = {
         'حجز مواعيد الكشف الطبي المعتمد جامكا / وافد (GAMCA / Wafid) للسفر والعمل',
         'إصدار وثيقة التأمين الطبي الإلزامية المعتمدة واستخراج إيصال السداد النظامي',
         'ربط الطلب آلياً مع منصة تساهيل وحل مشكلات السداد وتحديث البيانات',
+      ],
+      requiredDocs: [
+        'صورة جواز السفر ساري لمدة لا تقل عن 6 أشهر',
+        'صورة شخصية حديثة بخلفية بيضاء',
+        'صورة التأشيرة / رقم التفويض أو العقد الإلكتروني',
       ],
     },
   ] as TravelService[],
@@ -167,24 +195,24 @@ export const TravelRepository = {
 
   faqs: [
     {
-      question: 'ما هي الخدمات التي تقدمها شركة مسارك للإنجاز السياحي حالياً؟',
-      answer: 'تقتصر خدماتنا المتخصصة حالياً على: استخراج وتجهيز ملفات التأشيرات (Visas)، حجز مواعيد تساهيل VFS وتسديد منصة إنجاز، تخليص الإجراءات وتصديق الأوراق، وحجز تذاكر الطيران والفنادق المعتمدة أونلاين.',
+      question: 'كم تستغرق مدة الإنجاز واستلام مستنداتي؟',
+      answer: 'يتم حجز مواعيد تساهيل ووافد (GAMCA) وإصدار تذاكر الطيران والفنادق وسداد منصة إنجاز بشكل فوري خلال دقائق إلى ساعات قليلة، بينما تجهيز ملفات التأشيرات وتصديق الأوراق يتم خلال 24 ساعة. ويصل مستند التنفيذ النهائي (PDF أو صورة) مباشرة في حسابك مع إشعار فوري.',
     },
     {
-      question: 'كيف يتم حجز موعد تساهيل VFS وما هو الوقت المطلوب؟',
-      answer: 'نقوم بحجز الموعد إلكترونياً فور إرسال بيانات الجواز والتأشيرة، ونوفر مواعيد عادية أو مستعجلة ومميزة حسب المتاح برغبتك، مع تسليمك الباركود الرسمي ووثيقة التأمين وإيصال السداد فوراً.',
+      question: 'كيف يتم حجز المواعيد (تساهيل VFS وجامكا) دون الحضور للمكتب؟',
+      answer: 'ترفع صورة الجواز والصورة الشخصية وتبدأ الطلب أونلاين بضغطة زر؛ يقوم فريقنا بحجز الموعد المناسب (عادي أو VIP Lounge) وإرفاق إيصال الموعد والباركود مباشرة داخل قسم "طلباتي" و"مستنداتي الصادرة" في حسابك.',
     },
     {
-      question: 'هل يمكنني إنجاز معاملتي بالكامل دون الحضور إلى المكتب؟',
-      answer: 'نعم بكل تأكيد، أكثر من 90% من معاملاتنا (خدمات التأشيرات، حجز تساهيل، تسديد إنجاز، حجز تذاكر الطيران والفنادق، وتخليص الأوراق) يتم إنهاؤها أونلاين عن بُعد عبر الواتساب ويصلك الملف جاهزاً.',
+      question: 'ما هي طرق السداد والتحويل المتاحة؟',
+      answer: 'نوفر وسائل سداد مرنة وموثقة تشمل: التحويل الفوري عبر إنستاباي (InstaPay) على الرابط الرسمي، التحويل البنكي المباشر لحساب الشركة، أو السداد نقداً عند زيارة مقر الشركة.',
     },
     {
-      question: 'ما هي طرق الدفع المتاحة لدى مسارك للإنجاز السياحي؟',
-      answer: 'نوفر وسائل دفع آمنة وسريعة تشمل الدفع عبر إنستاباي (InstaPay) على الحساب المعتمد، التحويل البنكي، أو الدفع نقداً من خلال زيارة مقر الشركة.',
+      question: 'هل أحتاج لتسجيل الدخول لتصفح الخدمات أو طلب خدمة؟',
+      answer: 'لا، تصفح جميع الخدمات والأسعار والأسئلة الشائعة والتواصل عبر الواتساب متاح للجميع فوراً دون اشتراط تسجيل. أما الحساب الشخصي فميزة مجانية تتيح لك حفظ أوراقك سحابياً ومتابعة طلبك وتحميل ملفات PDF الصادرة.',
     },
     {
-      question: 'هل مسارك للإنجاز السياحي جهة موثقة رسمياً؟',
-      answer: 'نعم، شركة مسارك للإنجاز السياحي (ذ.م.م) معتمدة ومرخصة رسمياً من الغرفة التجارية المصرية بسجل تجاري رقم 7839 ورقم موحد 110900100007839، ومقرها الرئيسي: الحجايزة - مركز السنبلاوين - محافظة الدقهلية، وتعمل بخبرة متخصصة ومستمرة منذ عام 2022.',
+      question: 'هل شركة مسارك للإنجاز السياحي مرخصة ومعتمدة رسمياً؟',
+      answer: 'نعم، شركة مسارك للإنجاز السياحي (ذ.م.م) مسجلة ومرخصة رسمياً من الغرفة التجارية المصرية بسجل تجاري رقم 7839 والرقم الموحد 110900100007839 وتعمل بخبرة متخصصة منذ عام 2022.',
     },
   ],
 
@@ -261,6 +289,11 @@ const EnglishTravelContent = {
         'Official form filling, employment letters, and bank statement review',
         'Embassy-compliant provisional and confirmed flight & hotel itineraries',
       ],
+      requiredDocs: [
+        'Passport scan valid for at least 6 months',
+        'Recent personal photo with white background',
+        'Bank statement or HR employment letter (for Schengen/travel)',
+      ],
     },
     {
       id: 'tasheer-vfs',
@@ -273,6 +306,11 @@ const EnglishTravelContent = {
         'Official barcode issuance and direct appointment confirmation receipt',
         'Full document audit and checklist preparation prior to your center visit',
         'Standard and VIP Lounge appointment options tailored to your schedule',
+      ],
+      requiredDocs: [
+        'Clear passport data page scan',
+        'Visa document or official invitation number',
+        'White-background personal photo & preferred branch',
       ],
     },
     {
@@ -287,6 +325,11 @@ const EnglishTravelContent = {
         'Flexible date changes, seat selection, and extra baggage allowance',
         'Continuous follow-up and instant ticket confirmation through departure',
       ],
+      requiredDocs: [
+        'Valid passport scan for each traveler',
+        'Visa or residency copy (for international destinations)',
+        'Departure/arrival airports and preferred travel dates',
+      ],
     },
     {
       id: 'hotel-booking',
@@ -299,6 +342,10 @@ const EnglishTravelContent = {
         'Confirmed and provisional hotel vouchers compliant with embassy visa rules',
         'Family suites, breakfast packages, and flexible modification or cancellation',
         'Instant delivery of official guest vouchers with full reservation details',
+      ],
+      requiredDocs: [
+        'Passport scan (to match full Latin name on voucher)',
+        'Check-in/out dates and number of guests/rooms',
       ],
     },
     {
@@ -313,6 +360,10 @@ const EnglishTravelContent = {
         'Guided support for passport issuance, renewals, and digitized civil records',
         'Certified translation of legal documents, certificates, and medical reports',
       ],
+      requiredDocs: [
+        'Clear scan of the certificate, contract, or document',
+        'Passport or National ID copy of the applicant',
+      ],
     },
     {
       id: 'enjaz-insurance',
@@ -325,6 +376,11 @@ const EnglishTravelContent = {
         'Official GAMCA / Wafid medical examination appointment booking for travel & employment',
         'Issuance of mandatory accredited travel medical insurance & official payment receipts',
         'Seamless linking with VFS Tasheer portals and resolving existing application issues',
+      ],
+      requiredDocs: [
+        'Passport scan valid for at least 6 months',
+        'Recent personal photo with white background',
+        'Visa copy / E-authorization or employment contract number',
       ],
     },
   ] as TravelService[],
@@ -358,24 +414,24 @@ const EnglishTravelContent = {
 
   faqs: [
     {
-      question: 'What services does Masarik Tourism LLC currently provide?',
-      answer: 'We specialize in tourist and visit visa file preparation, VFS Tasheer appointments, Enjaz fee payments & medical insurance, document attestation and certified translation, plus confirmed flight and hotel bookings online.',
+      question: 'How long does processing and document delivery take?',
+      answer: 'VFS Tasheer & GAMCA appointments, Enjaz payments, and flight/hotel bookings are completed within minutes to a few hours. Visa files & attestations take up to 24 hours. Final documents (PDF/Image) appear straight in your account with an instant alert.',
     },
     {
-      question: 'How do VFS Tasheer appointments work and how fast can they be booked?',
-      answer: 'We book your appointment electronically as soon as you share your passport and visa details, offering Standard or VIP Lounge slots with instant delivery of your official barcode, insurance policy, and payment receipt.',
+      question: 'How do appointment bookings (Tasheer VFS & GAMCA) work?',
+      answer: 'Upload your passport & personal photo before submitting your request. Our team books your Standard or VIP slot and delivers the official barcode/PDF receipt straight to your "My Orders" and "Issued Documents" wallet.',
     },
     {
-      question: 'Can I complete my entire application remotely without visiting an office?',
-      answer: 'Yes. Over 90% of our visa files, Tasheer appointments, Enjaz payments, flight/hotel bookings, and document clearances are completed seamlessly online via WhatsApp.',
+      question: 'What payment and transfer methods are available?',
+      answer: 'We accept instant InstaPay transfers via our verified link, direct bank transfers, or cash payment at our registered office.',
     },
     {
-      question: 'What payment methods are accepted by Masarik Tourism?',
-      answer: 'We accept instant InstaPay transfers to our official link, bank transfers (NBE / Banque Misr), or cash payments at our registered headquarters.',
+      question: 'Do I have to sign in to browse services or request a booking?',
+      answer: 'No. All services, requirements, FAQs, and WhatsApp requests are 100% open without login. Creating an account is optional to track progress live and download issued PDFs anytime.',
     },
     {
       question: 'Is Masarik Tourism officially licensed and registered?',
-      answer: 'Yes. Masarik Lil-Injaz Al-Siyahi LLC is officially licensed by the Egyptian Chamber of Commerce under Commercial Record No. 7839 and Unified No. 110900100007839, headquartered in El Senbellawein, Dakahlia, operating since 2022.',
+      answer: 'Yes. Masarik Lil-Injaz Al-Siyahi LLC is officially licensed by the Egyptian Chamber of Commerce under Commercial Record No. 7839 and Unified No. 110900100007839, operating since 2022.',
     },
   ] as FaqItem[],
 
@@ -441,6 +497,7 @@ export function normalizeOrderStatusValue(status?: string):
   | 'تم استلام الطلب'
   | 'قيد المراجعة والتنفيذ'
   | 'تم الحجز / الإصدار'
+  | 'تم تنفيذ الطلب'
   | 'مكتمل' {
   switch (status) {
     case 'قيد المراجعة والتنفيذ':
@@ -449,6 +506,8 @@ export function normalizeOrderStatusValue(status?: string):
     case 'تم الحجز / الإصدار':
     case 'تم حجز موعد تساهيل':
       return 'تم الحجز / الإصدار';
+    case 'تم تنفيذ الطلب':
+      return 'تم تنفيذ الطلب';
     case 'مكتمل':
     case 'صدرت التأشيرة':
       return 'مكتمل';
@@ -469,6 +528,8 @@ export function translateOrderStatus(status: VisaOrderStatus | string, lang: App
       return 'Under Review & Processing';
     case 'تم الحجز / الإصدار':
       return 'Booked / Issued';
+    case 'تم تنفيذ الطلب':
+      return 'Order Executed & Completed';
     case 'مكتمل':
       return 'Completed';
     default:

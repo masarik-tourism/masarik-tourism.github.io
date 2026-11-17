@@ -17,6 +17,9 @@ import {
   ClipboardList,
   FolderOpen,
   Briefcase,
+  Bell,
+  CheckCheck,
+  FileCheck2,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import {
@@ -30,6 +33,7 @@ import {
   formatFirstLastName,
   getActiveTraveler,
   getTravelerDisplayNames,
+  markClientNotificationsReadCloud,
   TRAVELERS_UPDATED_EVENT,
 } from '../utils/travelerStore';
 import { TravelerProfile } from '../types/travel';
@@ -76,9 +80,11 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [logoError, setLogoError] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [servicesDropdownOpen, setServicesDropdownOpen] = useState(false);
+  const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshToast, setShowRefreshToast] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const notifDropdownRef = useRef<HTMLDivElement>(null);
   const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
     getActiveTraveler()
   );
@@ -127,6 +133,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setServicesDropdownOpen(false);
+      }
+      if (notifDropdownRef.current && !notifDropdownRef.current.contains(event.target as Node)) {
+        setNotifDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -385,86 +394,206 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
-      {/* Slim Sleek Persistent Client Sub-Navbar (Visible Whenever Logged In & Not in Admin Workspace) */}
-      {activeTraveler && !isDashboardMode && (
-        <div
-          data-no-admin-edit="true"
-          className="bg-slate-50/95 border-t border-slate-200/90 px-2 sm:px-4"
-        >
-          <div className="max-w-6xl mx-auto flex items-center gap-1.5 overflow-x-auto py-1.5">
-            <button
-              type="button"
-              onClick={() => handleTabClick(0)}
-              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                !travelerSection && currentTab === 0
-                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
-              }`}
-            >
-              <Home className="w-3.5 h-3.5 shrink-0" />
-              <span>{t('الرئيسية', 'Home')}</span>
-            </button>
+      {/* Slim Sleek Persistent Client Sub-Navbar + Live Notification Bell */}
+      {activeTraveler && !isDashboardMode && (() => {
+        const notifications = activeTraveler.notifications || [];
+        const unreadCount = notifications.filter((n) => !n.read).length;
+        const issuedCount = activeTraveler.issuedDocuments?.length || 0;
+        return (
+          <div
+            data-no-admin-edit="true"
+            className="bg-slate-50/95 border-t border-slate-200/90 px-2 sm:px-4"
+          >
+            <div className="max-w-6xl mx-auto flex items-center justify-between gap-2 py-1.5">
+              <div className="flex items-center gap-1.5 overflow-x-auto flex-1 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => handleTabClick(0)}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    !travelerSection && currentTab === 0
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <Home className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('الرئيسية', 'Home')}</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => handleTravelerTabClick('account')}
-              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                travelerSection === 'account'
-                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
-              }`}
-            >
-              <UserCheck className="w-3.5 h-3.5 shrink-0" />
-              <span>{t('بيانات الحساب', 'Account Info')}</span>
-              {hasUnsavedTravelerDraft && (
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-              )}
-            </button>
+                <button
+                  type="button"
+                  onClick={() => handleTravelerTabClick('account')}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    travelerSection === 'account'
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('بيانات الحساب', 'Account Info')}</span>
+                  {hasUnsavedTravelerDraft && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                  )}
+                </button>
 
-            <button
-              type="button"
-              onClick={() => handleTravelerTabClick('orders')}
-              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                travelerSection === 'orders'
-                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
-              }`}
-            >
-              <ClipboardList className="w-3.5 h-3.5 shrink-0" />
-              <span>{t('طلباتي', 'My Orders')}</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => handleTravelerTabClick('orders')}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    travelerSection === 'orders'
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <ClipboardList className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('طلباتي', 'My Orders')}</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => handleTravelerTabClick('documents')}
-              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                travelerSection === 'documents'
-                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
-              }`}
-            >
-              <FolderOpen className="w-3.5 h-3.5 shrink-0" />
-              <span>{t('محفظة المستندات', 'Documents')}</span>
-              {hasUnsavedTravelerDraft && (
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-              )}
-            </button>
+                <button
+                  type="button"
+                  onClick={() => handleTravelerTabClick('documents')}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    travelerSection === 'documents'
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('مستنداتي الصادرة والمحفظة', 'Issued Docs & Wallet')}</span>
+                  {issuedCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-emerald-500 text-white text-[9.5px] font-black tabular-nums">
+                      {issuedCount}
+                    </span>
+                  )}
+                  {hasUnsavedTravelerDraft && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                  )}
+                </button>
 
-            <button
-              type="button"
-              onClick={() => handleTabClick(1)}
-              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
-                !travelerSection && currentTab === 1
-                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
-                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
-              }`}
-            >
-              <Briefcase className="w-3.5 h-3.5 shrink-0" />
-              <span>{t('الخدمات', 'Services')}</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => handleTabClick(1)}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    !travelerSection && currentTab === 1
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <Briefcase className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('الخدمات', 'Services')}</span>
+                </button>
+              </div>
+
+              {/* Live Client Notification Bell */}
+              <div className="relative shrink-0" ref={notifDropdownRef}>
+                <button
+                  type="button"
+                  onClick={() => setNotifDropdownOpen((prev) => !prev)}
+                  className={`relative px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-black flex items-center gap-1.5 transition cursor-pointer border ${
+                    unreadCount > 0
+                      ? 'bg-amber-50 border-amber-300 text-[#0F2438] hover:bg-amber-100'
+                      : 'bg-white border-slate-200 text-[#0F2438] hover:bg-slate-100'
+                  }`}
+                  aria-label={t('إشعارات الطلبات والمستندات', 'Order & Document Notifications')}
+                  title={t('إشعارات الطلبات والمستندات', 'Order & Document Notifications')}
+                >
+                  <Bell className={`w-3.5 h-3.5 ${unreadCount > 0 ? 'text-amber-600' : 'text-[#0F2438]'}`} />
+                  <span className="hidden sm:inline">{t('الإشعارات', 'Alerts')}</span>
+                  {unreadCount > 0 && (
+                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black flex items-center justify-center tabular-nums">
+                      {unreadCount}
+                    </span>
+                  )}
+                </button>
+
+                {notifDropdownOpen && (
+                  <div
+                    className={`absolute top-full ${
+                      isAr ? 'left-0' : 'right-0'
+                    } mt-2 w-80 max-w-[90vw] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden z-50 animate-in fade-in duration-150`}
+                  >
+                    <div className="bg-[#0F2438] text-white px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-[#C6A052]/50">
+                      <span className="text-xs font-black flex items-center gap-1.5">
+                        <Bell className="w-3.5 h-3.5 text-[#E5C887]" />
+                        <span>{t('الإشعارات اللحظية', 'Live Notifications')}</span>
+                      </span>
+                      {unreadCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => void markClientNotificationsReadCloud(activeTraveler.phone)}
+                          className="text-[10.5px] font-bold text-[#E5C887] hover:underline flex items-center gap-1 cursor-pointer"
+                        >
+                          <CheckCheck className="w-3 h-3" />
+                          <span>{t('تحديد كمقروء', 'Mark all read')}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                      {notifications.length === 0 ? (
+                        <div className="p-5 text-center text-xs text-slate-500">
+                          {t(
+                            'لا توجد إشعارات جديدة حالياً. سيصلك تنبيه فوري هنا عند أي تحديث لطلبك.',
+                            'No notifications yet. Live updates appear here as soon as your order changes.'
+                          )}
+                        </div>
+                      ) : (
+                        notifications.slice(0, 12).map((notif) => (
+                          <button
+                            key={notif.id}
+                            type="button"
+                            onClick={() => {
+                              void markClientNotificationsReadCloud(activeTraveler.phone, notif.id);
+                              setNotifDropdownOpen(false);
+                              handleTravelerTabClick(
+                                notif.type === 'deliverable' ? 'documents' : 'orders'
+                              );
+                            }}
+                            className={`w-full text-start p-3 transition flex items-start gap-2.5 cursor-pointer ${
+                              notif.read
+                                ? 'bg-white hover:bg-slate-50'
+                                : 'bg-emerald-50/60 hover:bg-emerald-50'
+                            }`}
+                          >
+                            <div
+                              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
+                                notif.type === 'deliverable'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'bg-sky-100 text-[#0284C7]'
+                              }`}
+                            >
+                              {notif.type === 'deliverable' ? (
+                                <FileCheck2 className="w-4 h-4" />
+                              ) : (
+                                <Bell className="w-4 h-4" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-black text-[#0F2438] truncate">
+                                  {lang === 'en' ? notif.titleEn : notif.titleAr}
+                                </span>
+                                {!notif.read && (
+                                  <span className="w-2 h-2 rounded-full bg-emerald-600 shrink-0" />
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-600 leading-relaxed">
+                                {lang === 'en' ? notif.bodyEn : notif.bodyAr}
+                              </p>
+                              <span className="text-[10px] text-slate-400 block tabular-nums">
+                                {notif.createdAt?.slice(0, 16).replace('T', ' ')}
+                              </span>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Active Admin Session Control Bar */}
       {isAdminActive && session && (

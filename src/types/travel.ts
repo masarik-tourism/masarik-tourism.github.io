@@ -10,6 +10,7 @@ export interface TravelService {
   badge?: string;
   speedBadge?: string;
   features: string[];
+  requiredDocs?: string[];
 }
 
 export interface ClientReview {
@@ -43,6 +44,7 @@ export type CanonicalVisaOrderStatus =
   | 'تم استلام الطلب'
   | 'قيد المراجعة والتنفيذ'
   | 'تم الحجز / الإصدار'
+  | 'تم تنفيذ الطلب'
   | 'مكتمل';
 
 export type LegacyVisaOrderStatus =
@@ -52,6 +54,30 @@ export type LegacyVisaOrderStatus =
   | 'صدرت التأشيرة';
 
 export type VisaOrderStatus = CanonicalVisaOrderStatus | LegacyVisaOrderStatus;
+
+export interface IssuedDocument {
+  id: string;
+  docTypeLabel: string;
+  fileName: string;
+  mimeType: string;
+  downloadUrl: string;
+  storagePath?: string;
+  notes?: string;
+  issuedAt: string;
+  issuedBy?: string;
+}
+
+export interface ClientNotification {
+  id: string;
+  titleAr: string;
+  titleEn: string;
+  bodyAr: string;
+  bodyEn: string;
+  type: 'deliverable' | 'status';
+  docId?: string;
+  createdAt: string;
+  read: boolean;
+}
 
 export interface TravelerDocument {
   id: string;
@@ -126,6 +152,8 @@ export interface TravelerProfile {
   nationality?: string;
   documents: TravelerDocument[];
   familyMembers?: FamilyMember[];
+  issuedDocuments?: IssuedDocument[];
+  notifications?: ClientNotification[];
 }
 
 export interface PassportAiCheckResult {

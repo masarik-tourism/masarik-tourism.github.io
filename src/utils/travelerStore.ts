@@ -11,15 +11,21 @@ import {
 } from 'firebase/firestore';
 import {
   CanonicalVisaOrderStatus,
+  ClientNotification,
   FamilyMember,
   FamilyRelationship,
+  IssuedDocument,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
   TrustedDevice,
   VisaOrderStatus,
 } from '../types/travel';
-import { TravelRepository, normalizeOrderStatusValue } from '../data/travelData';
+import {
+  TravelRepository,
+  normalizeOrderStatusValue,
+  translateOrderStatus,
+} from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
   TEMPORARY_SESSION_DURATION_MS,
@@ -32,6 +38,7 @@ import {
 import {
   deleteTravelerDocumentFromStorage,
   uploadFamilyMemberFileToStorage,
+  uploadIssuedDeliverableToStorage,
   uploadTravelerAvatarToStorage,
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
@@ -57,6 +64,9 @@ export const VISA_ORDER_STATUSES: CanonicalVisaOrderStatus[] = [
 
 export function getOrderStatusStageIndex(status?: string): number {
   const canonical = normalizeOrderStatusValue(status);
+  if (canonical === 'تم تنفيذ الطلب' || canonical === 'مكتمل') {
+    return VISA_ORDER_STATUSES.length - 1;
+  }
   const idx = VISA_ORDER_STATUSES.indexOf(canonical);
   return idx >= 0 ? idx : 0;
 }
@@ -400,6 +410,41 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
         }))
     : [];
 
+  const safeIssuedDocuments: IssuedDocument[] = Array.isArray(profile.issuedDocuments)
+    ? profile.issuedDocuments
+        .filter((d) => d && typeof d.id === 'string' && d.id.trim().length > 0)
+        .slice(0, 30)
+        .map((d) => ({
+          id: String(d.id).slice(0, 80),
+          docTypeLabel: String(d.docTypeLabel || 'مستند تنفيذ').trim().slice(0, 160) || 'مستند تنفيذ',
+          fileName: String(d.fileName || 'deliverable.pdf').slice(0, 220),
+          mimeType: String(d.mimeType || 'application/pdf').slice(0, 120),
+          downloadUrl:
+            d.downloadUrl && d.downloadUrl.length <= 4096 ? String(d.downloadUrl) : '',
+          ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
+          ...(d.notes ? { notes: String(d.notes).trim().slice(0, 300) } : {}),
+          issuedAt: String(d.issuedAt || new Date().toISOString()).slice(0, 64),
+          ...(d.issuedBy ? { issuedBy: String(d.issuedBy).trim().slice(0, 100) } : {}),
+        }))
+    : [];
+
+  const safeNotifications: ClientNotification[] = Array.isArray(profile.notifications)
+    ? profile.notifications
+        .filter((n) => n && typeof n.id === 'string' && n.id.trim().length > 0)
+        .slice(0, 30)
+        .map((n) => ({
+          id: String(n.id).slice(0, 80),
+          titleAr: String(n.titleAr || 'تحديث جديد').slice(0, 160),
+          titleEn: String(n.titleEn || 'New Update').slice(0, 160),
+          bodyAr: String(n.bodyAr || '').slice(0, 400),
+          bodyEn: String(n.bodyEn || '').slice(0, 400),
+          type: n.type === 'deliverable' ? 'deliverable' : 'status',
+          ...(n.docId ? { docId: String(n.docId).slice(0, 80) } : {}),
+          createdAt: String(n.createdAt || new Date().toISOString()).slice(0, 64),
+          read: Boolean(n.read),
+        }))
+    : [];
+
   const payload: Record<string, unknown> = {
     phone: normalized,
     phoneNormalized: normalized,
@@ -414,6 +459,8 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     documents: safeDocs,
     familyMembers: safeFamilyMembers,
     trustedDevices: validDevices,
+    issuedDocuments: safeIssuedDocuments,
+    notifications: safeNotifications,
   };
 
   if (profile.pinHash && /^[a-f0-9]{64}$/.test(profile.pinHash)) {
@@ -479,6 +526,24 @@ function mergeCloudClientWithLocal(
       })
     : localExisting?.familyMembers || [];
 
+  const localIssuedById = new Map<string, IssuedDocument>();
+  if (localExisting?.issuedDocuments) {
+    localExisting.issuedDocuments.forEach((d) => localIssuedById.set(d.id, d));
+  }
+  const mergedIssuedDocs: IssuedDocument[] = Array.isArray(cloudData.issuedDocuments)
+    ? cloudData.issuedDocuments.map((d) => {
+        const localDoc = localIssuedById.get(d.id);
+        return {
+          ...d,
+          downloadUrl: d.downloadUrl || localDoc?.downloadUrl || '',
+        };
+      })
+    : localExisting?.issuedDocuments || [];
+
+  const mergedNotifications: ClientNotification[] = Array.isArray(cloudData.notifications)
+    ? cloudData.notifications
+    : localExisting?.notifications || [];
+
   const split = splitPassportName(cloudData.name || '');
 
   return {
@@ -495,6 +560,8 @@ function mergeCloudClientWithLocal(
     avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
     documents: mergedDocs,
     familyMembers: mergedFamilyMembers,
+    issuedDocuments: mergedIssuedDocs,
+    notifications: mergedNotifications,
   };
 }
 
@@ -1529,6 +1596,8 @@ export function updateTravelerProfileDetails(
       | 'adminNotes'
       | 'verified'
       | 'verifiedAt'
+      | 'issuedDocuments'
+      | 'notifications'
     >
   >
 ): TravelerProfile | null {
@@ -1555,9 +1624,32 @@ export function updateTravelerProfileDetails(
       ? cleanUpdates.name.trim()
       : `${nextFirst} ${nextLast}`.trim() || existing.name;
 
+  // Automatically create a live notification when the order status stage advances/changes
+  let nextNotifications = cleanUpdates.notifications ?? existing.notifications ?? [];
+  if (
+    cleanUpdates.orderStatus &&
+    normalizeOrderStatusValue(cleanUpdates.orderStatus) !==
+      normalizeOrderStatusValue(existing.orderStatus)
+  ) {
+    const statusAr = translateOrderStatus(cleanUpdates.orderStatus, 'ar');
+    const statusEn = translateOrderStatus(cleanUpdates.orderStatus, 'en');
+    const statusNote: ClientNotification = {
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      titleAr: 'تحديث حالة الطلب',
+      titleEn: 'Order Status Updated',
+      bodyAr: `تم تحديث حالة طلبك الآن إلى: ${statusAr}.`,
+      bodyEn: `Your order status has been updated to: ${statusEn}.`,
+      type: 'status',
+      createdAt: new Date().toISOString(),
+      read: false,
+    };
+    nextNotifications = [statusNote, ...nextNotifications].slice(0, 30);
+  }
+
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
+    notifications: nextNotifications,
     phone,
     phoneNormalized: phone,
     firstName: nextFirst,
@@ -1567,6 +1659,225 @@ export function updateTravelerProfileDetails(
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(updated);
+  return updated;
+}
+
+/**
+ * Admin Action: Uploads an official completion deliverable (PDF or high-quality image) to Firebase Storage,
+ * saves it into `issuedDocuments`, updates `orderStatus` automatically to 'تم تنفيذ الطلب',
+ * and pushes an unread real-time notification to the client's bell.
+ */
+export async function approveAndDeliverDocumentCloud(
+  rawPhone: string,
+  input: {
+    file: File;
+    docTypeLabel: string;
+    notes?: string;
+    adminName?: string;
+  }
+): Promise<{
+  ok: boolean;
+  profile?: TravelerProfile;
+  deliverable?: IssuedDocument;
+  error?: string;
+}> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, error: 'رقم الهاتف غير صالح.' };
+  }
+  const cleanLabel = input.docTypeLabel.trim();
+  if (!cleanLabel) {
+    return { ok: false, error: 'يرجى تحديد أو كتابة نوع المستند أولاً.' };
+  }
+
+  const deliverableId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  let uploadResult: {
+    downloadUrl: string;
+    storagePath: string;
+    fileName: string;
+    mimeType: string;
+  };
+
+  try {
+    uploadResult = await uploadIssuedDeliverableToStorage(phone, deliverableId, input.file);
+  } catch (err) {
+    console.warn('Issued deliverable Firebase Storage upload failed:', err);
+    return {
+      ok: false,
+      error:
+        'تعذر رفع المستند إلى التخزين السحابي Firebase Storage. يرجى التحقق من الاتصال والمحاولة مجدداً.',
+    };
+  }
+
+  // Re-read freshest client record from Firestore or local cache before writing
+  const all = getAllTravelers();
+  let latestExisting: TravelerProfile | undefined = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      latestExisting = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch {
+    // Use local cache if offline
+  }
+
+  if (!latestExisting) {
+    return { ok: false, error: 'لم يتم العثور على ملف العميل.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const deliverable: IssuedDocument = {
+    id: deliverableId,
+    docTypeLabel: cleanLabel.slice(0, 160),
+    fileName: uploadResult.fileName.slice(0, 220),
+    mimeType: uploadResult.mimeType.slice(0, 120),
+    downloadUrl: uploadResult.downloadUrl,
+    storagePath: uploadResult.storagePath,
+    ...(input.notes?.trim() ? { notes: input.notes.trim().slice(0, 300) } : {}),
+    issuedAt: nowIso,
+    ...(input.adminName?.trim() ? { issuedBy: input.adminName.trim().slice(0, 100) } : {}),
+  };
+
+  const deliverableNotification: ClientNotification = {
+    id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    titleAr: 'تم تنفيذ الطلب وإرفاق مستند',
+    titleEn: 'Order Completed & Document Ready',
+    bodyAr: `تم تنفيذ طلبك وإرفاق مستند: ${cleanLabel}، جاهز للتحميل الآن.`,
+    bodyEn: `Your order has been completed and "${cleanLabel}" is ready to download now.`,
+    type: 'deliverable',
+    docId: deliverableId,
+    createdAt: nowIso,
+    read: false,
+  };
+
+  const updated: TravelerProfile = {
+    ...latestExisting,
+    orderStatus: 'تم تنفيذ الطلب',
+    issuedDocuments: [deliverable, ...(latestExisting.issuedDocuments || [])].slice(0, 30),
+    notifications: [deliverableNotification, ...(latestExisting.notifications || [])].slice(0, 30),
+  };
+
+  const latestAll = getAllTravelers();
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
+  return { ok: true, profile: updated, deliverable };
+}
+
+export async function removeIssuedDeliverableCloud(
+  rawPhone: string,
+  docId: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  const target = (existing.issuedDocuments || []).find((d) => d.id === docId);
+  if (target?.storagePath) {
+    void deleteTravelerDocumentFromStorage(target.storagePath);
+  }
+
+  const updated: TravelerProfile = {
+    ...existing,
+    issuedDocuments: (existing.issuedDocuments || []).filter((d) => d.id !== docId),
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function markClientNotificationsReadCloud(
+  rawPhone: string,
+  notificationId?: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing || !existing.notifications || existing.notifications.length === 0) {
+    return existing || null;
+  }
+
+  let changed = false;
+  const nextNotifications = existing.notifications.map((n) => {
+    if (!n.read && (!notificationId || n.id === notificationId)) {
+      changed = true;
+      return { ...n, read: true };
+    }
+    return n;
+  });
+
+  if (!changed) return existing;
+
+  const updated: TravelerProfile = {
+    ...existing,
+    notifications: nextNotifications,
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function attachPreOrderFilesToTravelerCloud(
+  rawPhone: string,
+  input: {
+    passportDataUrl?: string;
+    passportFileName?: string;
+    avatarDataUrl?: string;
+    serviceTitle?: string;
+  }
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  let nextAvatarUrl = existing.avatarUrl;
+  let nextAvatarStoragePath = existing.avatarStoragePath;
+  const addedDocs: TravelerDocument[] = [];
+
+  if (input.avatarDataUrl && input.avatarDataUrl.startsWith('data:')) {
+    const upAvatar = await uploadTravelerAvatarToStorage(phone, input.avatarDataUrl);
+    if (upAvatar) {
+      if (existing.avatarStoragePath && existing.avatarStoragePath !== upAvatar.storagePath) {
+        void deleteTravelerDocumentFromStorage(existing.avatarStoragePath);
+      }
+      nextAvatarUrl = upAvatar.downloadUrl;
+      nextAvatarStoragePath = upAvatar.storagePath;
+    } else {
+      nextAvatarUrl = input.avatarDataUrl;
+    }
+  }
+
+  if (input.passportDataUrl && input.passportDataUrl.startsWith('data:')) {
+    const docId = `pre-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const upPass = await uploadTravelerDocumentToStorage(phone, docId, input.passportDataUrl);
+    addedDocs.push({
+      id: docId,
+      label: 'صورة جواز السفر (مرفوعة مع الطلب)',
+      docType: 'passport',
+      fileName: input.passportFileName || 'passport.jpg',
+      dataUrl: upPass ? upPass.downloadUrl : input.passportDataUrl,
+      ...(upPass ? { storagePath: upPass.storagePath } : {}),
+      uploadedAt: new Date().toISOString(),
+    });
+  }
+
+  const latestAll = getAllTravelers();
+  const latest = latestAll[phone] || existing;
+  const updated: TravelerProfile = {
+    ...latest,
+    ...(input.serviceTitle ? { preferredVisaType: input.serviceTitle.slice(0, 200) } : {}),
+    ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
+    ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
+    documents: [...addedDocs, ...(latest.documents || [])].slice(0, 30),
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
   return updated;
 }
 
@@ -1820,6 +2131,7 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
 
   const docs = existing.documents || [];
   const familyMembers = existing.familyMembers || [];
+  const issuedDocs = existing.issuedDocuments || [];
   const avatarPath = existing.avatarStoragePath;
   delete all[phone];
   saveAllTravelersLocalOnly(all);
@@ -1832,6 +2144,11 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
     void deleteTravelerDocumentFromStorage(avatarPath);
   }
   docs.forEach((d) => {
+    if (d.storagePath) {
+      void deleteTravelerDocumentFromStorage(d.storagePath);
+    }
+  });
+  issuedDocs.forEach((d) => {
     if (d.storagePath) {
       void deleteTravelerDocumentFromStorage(d.storagePath);
     }

@@ -24,8 +24,8 @@ export const FAQAccordion: React.FC = () => {
           </h3>
           <p className="text-xs text-slate-500">
             {t(
-              'أهم المعلومات التي تهمك حول المواعيد والمستندات وطرق الدفع',
-              'Key answers about appointments, documents, and payment options'
+              'إجابات واضحة ومبسطة حول مدة الإنجاز، حجز المواعيد، وطرق السداد والتحويل المتاحة',
+              'Clear answers on processing times, appointment bookings, and available payment methods'
             )}
           </p>
         </div>

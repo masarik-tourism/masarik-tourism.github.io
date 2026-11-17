@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Check, ArrowLeft, ArrowRight, ShieldCheck, PhoneCall, Clock } from 'lucide-react';
+import { Check, ArrowLeft, ArrowRight, ShieldCheck, PhoneCall, Clock, FileCheck2 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { ServiceRequestModal } from '../components/ServiceRequestModal';
+import { FAQAccordion } from '../components/FAQAccordion';
 import { useLanguage } from '../contexts/LanguageContext';
 import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
 import { OfficialTrustFooter } from '../components/OfficialTrustFooter';
@@ -117,7 +118,7 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
                   </div>
                 </div>
 
-                <ul className="space-y-2.5 mb-5">
+                <ul className="space-y-2.5 mb-4">
                   {service.features.map((feat, i) => (
                     <li key={i} className="flex items-start gap-2 text-xs sm:text-[13px] text-slate-600 leading-relaxed">
                       <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
@@ -125,6 +126,23 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
                     </li>
                   ))}
                 </ul>
+
+                {service.requiredDocs && service.requiredDocs.length > 0 && (
+                  <div className="mb-4 bg-[#FAF8F2] border border-[#E5C887]/75 rounded-xl p-3 space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-[11px] font-black text-[#0F2438]">
+                      <FileCheck2 className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
+                      <span>{t('المستندات المطلوبة:', 'Required Documents:')}</span>
+                    </div>
+                    <ul className="space-y-1">
+                      {service.requiredDocs.map((req, idx) => (
+                        <li key={idx} className="text-[11px] text-slate-700 flex items-start gap-1.5 leading-snug">
+                          <span className="text-[#9E7B33] font-black shrink-0">•</span>
+                          <span>{req}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center gap-2.5 pt-3.5 border-t border-slate-100">
@@ -159,6 +177,9 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
             onRequestService={handleOpenOrder}
           />
         </div>
+
+        {/* Simplified FAQ (accessible to all guests without login) */}
+        <FAQAccordion />
 
         {/* Official Trust Footer */}
         <OfficialTrustFooter />

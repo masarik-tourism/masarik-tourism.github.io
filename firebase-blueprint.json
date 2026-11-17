@@ -94,6 +94,7 @@
             "تم استلام الطلب",
             "قيد المراجعة والتنفيذ",
             "تم الحجز / الإصدار",
+            "تم تنفيذ الطلب",
             "مكتمل",
             "تم استلام الأوراق",
             "تم حجز موعد تساهيل",
@@ -138,6 +139,14 @@
         "familyMembers": {
           "type": "array",
           "description": "Bounded list (max 25) of family members and companions with passport details and permanent Firebase Storage URLs for passport and personal photos."
+        },
+        "issuedDocuments": {
+          "type": "array",
+          "description": "Bounded list (max 30) of completed execution deliverables (PDF tickets, visas, Tasheer/GAMCA slips) issued by admin."
+        },
+        "notifications": {
+          "type": "array",
+          "description": "Bounded list (max 30) of real-time client notifications for issued documents and order status updates."
         }
       },
       "required": [

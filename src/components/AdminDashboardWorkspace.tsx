@@ -27,6 +27,9 @@ import {
   Lock,
   UserCog,
   LogOut,
+  FileUp,
+  Loader2,
+  ExternalLink,
 } from 'lucide-react';
 import {
   AdminPermission,
@@ -38,6 +41,7 @@ import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
   adminCreateClientCloud,
+  approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
   deleteTravelerProfile,
@@ -49,6 +53,7 @@ import {
   getTravelerDisplayNames,
   normalizeOrderStatusValue,
   normalizePhone,
+  removeIssuedDeliverableCloud,
   updateAdminPin,
   updateTravelerProfileDetails,
 } from '../utils/travelerStore';
@@ -129,6 +134,19 @@ export const AdminDashboardWorkspace: React.FC = () => {
     downloadName?: string;
   } | null>(null);
 
+  // Final Completion Deliverable Upload State (Admin -> Client Account)
+  const [deliverableTypeChoice, setDeliverableTypeChoice] = useState('تذكرة طيران');
+  const [customDeliverableType, setCustomDeliverableType] = useState('');
+  const [deliverableNotes, setDeliverableNotes] = useState('');
+  const [deliverableFile, setDeliverableFile] = useState<File | null>(null);
+  const [deliverablePreviewUrl, setDeliverablePreviewUrl] = useState<string | null>(null);
+  const [isSendingDeliverable, setIsSendingDeliverable] = useState(false);
+  const [deliverableFeedback, setDeliverableFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [confirmDeleteDeliverableId, setConfirmDeleteDeliverableId] = useState<string | null>(null);
+
   // Tab 2: Announcements & Site Content
   const [siteDraft, setSiteDraft] = useState<SiteConfig>(() => getSiteConfig());
   const [contentSavedMsg, setContentSavedMsg] = useState('');
@@ -190,6 +208,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setEditAdminNotes(selectedClient.adminNotes || '');
       setFolderSavedMsg('');
       setConfirmDeletePhone(null);
+      setDeliverableFile(null);
+      setDeliverablePreviewUrl(null);
+      setDeliverableNotes('');
+      setCustomDeliverableType('');
+      setDeliverableFeedback(null);
+      setConfirmDeleteDeliverableId(null);
     }
   }, [selectedClientPhone, travelers.length]);
 
@@ -310,6 +334,98 @@ export const AdminDashboardWorkspace: React.FC = () => {
     if (selectedClientPhone === phone) {
       setSelectedClientPhone(null);
     }
+    loadTravelers();
+  };
+
+  const handleSelectDeliverableFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setDeliverableFeedback(null);
+    if (deliverablePreviewUrl) {
+      URL.revokeObjectURL(deliverablePreviewUrl);
+    }
+    setDeliverableFile(file);
+    if (file.type.startsWith('image/')) {
+      setDeliverablePreviewUrl(URL.createObjectURL(file));
+    } else {
+      setDeliverablePreviewUrl(null);
+    }
+  };
+
+  const handleApproveAndDeliverDocument = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedClient || !canManageClients) return;
+    setDeliverableFeedback(null);
+
+    const effectiveDocType =
+      deliverableTypeChoice === '__custom__'
+        ? customDeliverableType.trim()
+        : deliverableTypeChoice.trim();
+
+    if (!effectiveDocType) {
+      setDeliverableFeedback({
+        ok: false,
+        text: t('يرجى اختيار أو كتابة نوع المستند أولاً.', 'Please specify the document type first.'),
+      });
+      return;
+    }
+    if (!deliverableFile) {
+      setDeliverableFeedback({
+        ok: false,
+        text: t(
+          'يرجى اختيار ملف المستند (PDF أو صورة) أولاً.',
+          'Please select a PDF or image file first.'
+        ),
+      });
+      return;
+    }
+
+    setIsSendingDeliverable(true);
+    try {
+      const res = await approveAndDeliverDocumentCloud(selectedClient.phone, {
+        file: deliverableFile,
+        docTypeLabel: effectiveDocType,
+        notes: deliverableNotes.trim() || undefined,
+        adminName: session?.name || 'المدير العام',
+      });
+      if (!res.ok) {
+        setDeliverableFeedback({
+          ok: false,
+          text:
+            res.error ||
+            t(
+              'تعذر رفع المستند. يرجى المحاولة مرة أخرى.',
+              'Could not upload deliverable document. Please try again.'
+            ),
+        });
+        return;
+      }
+
+      if (deliverablePreviewUrl) {
+        URL.revokeObjectURL(deliverablePreviewUrl);
+      }
+      setDeliverableFile(null);
+      setDeliverablePreviewUrl(null);
+      setDeliverableNotes('');
+      setCustomDeliverableType('');
+      setEditOrderStatus('تم تنفيذ الطلب');
+      loadTravelers();
+      setDeliverableFeedback({
+        ok: true,
+        text: t(
+          `تم اعتماد وإرسال المستند (${effectiveDocType}) للعميل وتحديث حالة الطلب تلقائياً إلى "تم تنفيذ الطلب".`,
+          `Document (${effectiveDocType}) approved & sent to client! Order status updated to "Order Executed & Completed".`
+        ),
+      });
+    } finally {
+      setIsSendingDeliverable(false);
+    }
+  };
+
+  const handleRemoveIssuedDeliverable = async (docId: string) => {
+    if (!selectedClient || !canManageClients) return;
+    await removeIssuedDeliverableCloud(selectedClient.phone, docId);
+    setConfirmDeleteDeliverableId(null);
     loadTravelers();
   };
 
@@ -689,8 +805,19 @@ export const AdminDashboardWorkspace: React.FC = () => {
                             </div>
                           </div>
 
-                          <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-[11px] font-bold text-[#0F2438] shrink-0">
-                            {translateOrderStatus(client.orderStatus, lang)}
+                          <span
+                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 inline-flex items-center gap-1 ${
+                              client.orderStatus === 'تم تنفيذ الطلب' ||
+                              client.orderStatus === 'مكتمل'
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                : 'bg-slate-100 border-slate-200 text-[#0F2438]'
+                            }`}
+                          >
+                            {(client.orderStatus === 'تم تنفيذ الطلب' ||
+                              client.orderStatus === 'مكتمل') && (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            )}
+                            <span>{translateOrderStatus(client.orderStatus, lang)}</span>
                           </span>
                         </div>
                       </div>
@@ -1313,6 +1440,258 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* FINAL COMPLETION DOCUMENT DELIVERY PANEL (ADMIN -> CLIENT ACCOUNT) */}
+            <div className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#C6A052]/30">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+                    <FileUp className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm sm:text-base font-black text-[#0F2438]">
+                      {t('إرفاق مستند التنفيذ النهائي', 'Attach Final Execution Document')}
+                    </h4>
+                    <p className="text-[11px] text-slate-600">
+                      {t(
+                        'ارفع ملف PDF أو صورة عالية الجودة لإرساله فوراً إلى حساب العميل وتحديث الطلب إلى "تم تنفيذ الطلب"',
+                        'Upload a PDF or high-quality image to deliver straight to client account and set status to Completed'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                {(selectedClient.issuedDocuments?.length || 0) > 0 && (
+                  <span className="px-2.5 py-1 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black tabular-nums">
+                    {t(
+                      `تم تسليم ${selectedClient.issuedDocuments?.length} مستند`,
+                      `Delivered: ${selectedClient.issuedDocuments?.length}`
+                    )}
+                  </span>
+                )}
+              </div>
+
+              <form onSubmit={handleApproveAndDeliverDocument} className="space-y-3.5 text-xs">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('نوع المستند', 'Document Type')} <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={deliverableTypeChoice}
+                      onChange={(e) => setDeliverableTypeChoice(e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    >
+                      <option value="تذكرة طيران">{t('تذكرة طيران', 'Flight Ticket')}</option>
+                      <option value="موعد تساهيل">{t('موعد تساهيل', 'Tasheer VFS Appointment')}</option>
+                      <option value="كشف طبي جامكا">{t('كشف طبي جامكا', 'GAMCA / Wafid Medical Slip')}</option>
+                      <option value="تأشيرة">{t('تأشيرة صادرة', 'Issued Visa')}</option>
+                      <option value="شهادة تطعيم">{t('شهادة تطعيم', 'Vaccination Certificate')}</option>
+                      <option value="حجز فندق مؤكد">{t('حجز فندق مؤكد', 'Confirmed Hotel Voucher')}</option>
+                      <option value="تأمين طبي وإيصال إنجاز">{t('تأمين طبي وإيصال إنجاز', 'Medical Insurance & Enjaz Receipt')}</option>
+                      <option value="__custom__">{t('كتابة نوع مستند آخر...', 'Enter Custom Document Type...')}</option>
+                    </select>
+                  </div>
+
+                  {deliverableTypeChoice === '__custom__' ? (
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1.5">
+                        {t('اكتب اسم / نوع المستند', 'Custom Document Type')}{' '}
+                        <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={customDeliverableType}
+                        onChange={(e) => setCustomDeliverableType(e.target.value)}
+                        placeholder={t('مثال: تصديق وزارة الخارجية', 'e.g. MOFA Attested Contract')}
+                        className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1.5">
+                        {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
+                      </label>
+                      <input
+                        type="text"
+                        value={deliverableNotes}
+                        onChange={(e) => setDeliverableNotes(e.target.value)}
+                        placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
+                        className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {deliverableTypeChoice === '__custom__' && (
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
+                    </label>
+                    <input
+                      type="text"
+                      value={deliverableNotes}
+                      onChange={(e) => setDeliverableNotes(e.target.value)}
+                      placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+                )}
+
+                <div className="bg-white border border-dashed border-[#C6A052] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    {deliverablePreviewUrl ? (
+                      <img
+                        src={deliverablePreviewUrl}
+                        alt={deliverableFile?.name || 'Preview'}
+                        className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-[#0F2438] shrink-0">
+                        <FileText className="w-6 h-6 text-[#0284C7]" />
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <span className="font-black text-[#0F2438] block truncate">
+                        {deliverableFile
+                          ? deliverableFile.name
+                          : t('اختر ملف المستند (PDF أو صورة)', 'Select Document File (PDF or Image)')}
+                      </span>
+                      <span className="text-[11px] text-slate-500 block">
+                        {deliverableFile
+                          ? `${(deliverableFile.size / 1024).toFixed(0)} KB · ${deliverableFile.type || 'document'}`
+                          : t(
+                              'يدعم ملفات PDF وصور JPG / PNG عالية الدقة',
+                              'Supports PDF files and high-resolution JPG / PNG images'
+                            )}
+                      </span>
+                    </div>
+                  </div>
+
+                  <label className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] font-black flex items-center justify-center gap-1.5 cursor-pointer shrink-0 transition">
+                    <FileUp className="w-4 h-4 text-[#0284C7]" />
+                    <span>{t('اختيار ملف', 'Choose File')}</span>
+                    <input
+                      type="file"
+                      accept="application/pdf,image/*"
+                      onChange={handleSelectDeliverableFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+
+                {deliverableFeedback && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                      deliverableFeedback.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-red-50 border-red-200 text-red-900'
+                    }`}
+                  >
+                    {deliverableFeedback.ok ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                    )}
+                    <span>{deliverableFeedback.text}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isSendingDeliverable}
+                  className="w-full sm:w-auto min-h-[44px] px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
+                >
+                  {isSendingDeliverable ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4" />
+                  )}
+                  <span>
+                    {isSendingDeliverable
+                      ? t('جاري الرفع والاعتماد...', 'Uploading & Sending...')
+                      : t('اعتماد وإرسال المستند للعميل', 'Approve & Send Document to Client')}
+                  </span>
+                </button>
+              </form>
+
+              {/* Previously Issued Completion Deliverables */}
+              {selectedClient.issuedDocuments && selectedClient.issuedDocuments.length > 0 && (
+                <div className="pt-3 border-t border-slate-200 space-y-2.5">
+                  <h5 className="text-xs font-black text-[#0F2438]">
+                    {t('المستندات الصادرة والمسلمة للعميل:', 'Delivered Documents in Client Account:')}
+                  </h5>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {selectedClient.issuedDocuments.map((delDoc) => {
+                      const isPdf =
+                        delDoc.mimeType === 'application/pdf' ||
+                        delDoc.fileName.toLowerCase().endsWith('.pdf');
+                      return (
+                        <div
+                          key={delDoc.id}
+                          className="bg-white border border-emerald-200 rounded-xl p-3 flex items-center justify-between gap-2.5"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                              <FileText className="w-5 h-5" />
+                            </div>
+                            <div className="min-w-0">
+                              <span className="text-xs font-black text-[#0F2438] block truncate">
+                                {delDoc.docTypeLabel}
+                              </span>
+                              <span className="text-[10.5px] text-slate-500 block truncate">
+                                {delDoc.fileName} · {delDoc.issuedAt.slice(0, 10)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <a
+                              href={delDoc.downloadUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438]"
+                              title={t('فتح', 'Open')}
+                            >
+                              {isPdf ? <ExternalLink className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void downloadCloudFile(delDoc.downloadUrl, delDoc.fileName)
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>{t('تحميل', 'DL')}</span>
+                            </button>
+                            {confirmDeleteDeliverableId === delDoc.id ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleRemoveIssuedDeliverable(delDoc.id)}
+                                className="px-2 py-1 rounded-lg bg-red-600 text-white text-[10.5px] font-bold cursor-pointer"
+                              >
+                                {t('تأكيد', 'Confirm')}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteDeliverableId(delDoc.id)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                                title={t('حذف', 'Delete')}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Dedicated Family Members & Companions Cloud Section */}

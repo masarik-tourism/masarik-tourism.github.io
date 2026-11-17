@@ -32,6 +32,9 @@ import {
   ShieldAlert,
   CalendarCheck2,
   Check,
+  Bell,
+  FileCheck2,
+  ExternalLink,
 } from 'lucide-react';
 import {
   FamilyMember,
@@ -57,6 +60,7 @@ import {
   initiateTravelerOtpLoginCloud,
   loginWithTrustedDevicePinCloud,
   logoutTravelerSession,
+  markClientNotificationsReadCloud,
   normalizeArabicDigits,
   normalizePhone,
   requestAccountSecurityOtpCloud,
@@ -2017,6 +2021,159 @@ Please advise on the next steps for my application.`
   const currentStatusIdx = getOrderStatusStageIndex(activeTraveler.orderStatus);
 
   const familyMembers = activeTraveler.familyMembers || [];
+  const issuedDocuments = activeTraveler.issuedDocuments || [];
+  const unreadNotifications = (activeTraveler.notifications || []).filter((n) => !n.read);
+
+  const renderIssuedDeliverablesSection = () => {
+    const hasCompletedStatus = activeTraveler.orderStatus === 'تم تنفيذ الطلب';
+    if (issuedDocuments.length === 0 && !hasCompletedStatus) return null;
+
+    return (
+      <div className="bg-white border-2 border-emerald-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-emerald-100">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <FileCheck2 className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+                  {t(
+                    `مستنداتي الصادرة والمنجزة (${issuedDocuments.length})`,
+                    `Issued & Completed Documents (${issuedDocuments.length})`
+                  )}
+                </h2>
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-[11px] font-black text-emerald-900">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                  <span>{t('تم تنفيذ الطلب', 'Order Completed')}</span>
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                {t(
+                  'مستندات الإنجاز النهائية المعتمدة من مسارك جاهزة للعرض والتحميل الفوري على جهازك في أي وقت.',
+                  'Your completed official documents delivered by Masarik are ready to view and download anytime.'
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {issuedDocuments.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {issuedDocuments.map((delDoc) => {
+              const isPdf =
+                delDoc.mimeType === 'application/pdf' ||
+                delDoc.fileName.toLowerCase().endsWith('.pdf') ||
+                delDoc.downloadUrl.toLowerCase().includes('.pdf');
+              const dlKey = `issued-${delDoc.id}`;
+
+              return (
+                <div
+                  key={delDoc.id}
+                  className="bg-emerald-50/45 border border-emerald-200 rounded-2xl p-4 flex flex-col justify-between gap-3"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[11px] font-black shadow-xs">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>{t('تم تنفيذ الطلب', 'Order Completed')}</span>
+                      </span>
+                      <span className="text-[10.5px] font-bold text-slate-500 tabular-nums">
+                        {new Date(delDoc.issuedAt).toLocaleDateString(isAr ? 'ar-EG' : 'en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </span>
+                    </div>
+
+                    <div>
+                      <span className="text-[10.5px] font-bold text-slate-500 block">
+                        {t('نوع المستند', 'Document Type')}
+                      </span>
+                      <h3 className="text-sm font-black text-[#0F2438] leading-snug">
+                        {delDoc.docTypeLabel}
+                      </h3>
+                      <span className="text-[11px] text-slate-500 block truncate mt-0.5" dir="ltr">
+                        {delDoc.fileName}
+                      </span>
+                    </div>
+
+                    {delDoc.notes && (
+                      <div className="bg-white border border-emerald-200/80 rounded-xl p-2.5 text-[11.5px] text-slate-700 leading-relaxed">
+                        <span className="font-black text-[#0F2438]">
+                          {t('ملاحظة الإدارة:', 'Note:')}{' '}
+                        </span>
+                        {delDoc.notes}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-2 border-t border-emerald-200/70">
+                    <button
+                      type="button"
+                      disabled={downloadingKey === dlKey}
+                      onClick={() => void handleDirectDownload(dlKey, delDoc.downloadUrl, delDoc.fileName)}
+                      className="flex-1 min-h-[44px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                    >
+                      {downloadingKey === dlKey ? (
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                      ) : (
+                        <Download className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>
+                        {isPdf
+                          ? t('تحميل المستند (PDF)', 'Download Document (PDF)')
+                          : t('تحميل المستند', 'Download Document')}
+                      </span>
+                    </button>
+
+                    {isPdf ? (
+                      <a
+                        href={delDoc.downloadUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-h-[44px] px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-emerald-300 text-[#0F2438] text-xs font-black flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+                        title={t('فتح الملف في نافذة جديدة', 'Open in new tab')}
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        <span>{t('عرض', 'View')}</span>
+                      </a>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPreviewLightbox({
+                            label: `${delDoc.docTypeLabel} — ${t('تم تنفيذ الطلب', 'Completed')}`,
+                            dataUrl: delDoc.downloadUrl,
+                            downloadName: delDoc.fileName,
+                          })
+                        }
+                        className="min-h-[44px] px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-emerald-300 text-[#0F2438] text-xs font-black flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+                      >
+                        <Eye className="w-4 h-4" />
+                        <span>{t('معاينة', 'Preview')}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-xs text-emerald-950 font-bold flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>
+              {t(
+                'تم تنفيذ طلبك بنجاح! ستظهر ملفات المستندات المرفقة هنا فور رفعها من الإدارة.',
+                'Your order is completed! Any uploaded final documents will appear here automatically.'
+              )}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderFamilyVaultSection = () => (
     <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
@@ -2719,12 +2876,54 @@ Please advise on the next steps for my application.`
             <FolderOpen className="w-4 h-4 shrink-0" />
             <span>
               {t(
-                `محفظة المستندات (${combinedDocuments.length})`,
-                `Documents (${combinedDocuments.length})`
+                `مستنداتي الصادرة والمحفظة (${combinedDocuments.length + issuedDocuments.length})`,
+                `Issued Docs & Wallet (${combinedDocuments.length + issuedDocuments.length})`
               )}
             </span>
           </button>
         </div>
+
+        {/* Live Unread Notifications Strip */}
+        {unreadNotifications.length > 0 && (
+          <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3.5 sm:p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                <Bell className="w-4.5 h-4.5" />
+              </div>
+              <div className="min-w-0">
+                <span className="text-xs sm:text-sm font-black text-emerald-950 block">
+                  {unreadNotifications[0].titleAr && unreadNotifications[0].titleEn
+                    ? isAr
+                      ? unreadNotifications[0].titleAr
+                      : unreadNotifications[0].titleEn
+                    : t('تحديث جديد على طلبك', 'New Update on Your Order')}
+                </span>
+                <p className="text-[11.5px] text-emerald-900 leading-relaxed">
+                  {isAr ? unreadNotifications[0].bodyAr : unreadNotifications[0].bodyEn}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  void markClientNotificationsReadCloud(activeTraveler.phone);
+                  onChangeSubTab(unreadNotifications[0].type === 'deliverable' ? 'documents' : 'orders');
+                }}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black cursor-pointer whitespace-nowrap"
+              >
+                {t('عرض التفاصيل', 'View Details')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void markClientNotificationsReadCloud(activeTraveler.phone)}
+                className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-bold cursor-pointer whitespace-nowrap"
+              >
+                {t('تحديد كمقروء', 'Mark Read')}
+              </button>
+            </div>
+          </div>
+        )}
 
         {saveFeedback && (
           <div
@@ -3551,6 +3750,8 @@ Please advise on the next steps for my application.`
         {/* SUB-TAB 2: MY ORDERS & VISA TRACKER */}
         {subTab === 'orders' && (
           <div className="space-y-5">
+            {renderIssuedDeliverablesSection()}
+
             <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2.5">
@@ -3568,8 +3769,19 @@ Please advise on the next steps for my application.`
                     </p>
                   </div>
                 </div>
-                <span className="px-3 py-1 rounded-full bg-[#0F2438] text-[#E5C887] text-xs font-black">
-                  {translateOrderStatus(activeTraveler.orderStatus, lang)}
+                <span
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black ${
+                    activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                    activeTraveler.orderStatus === 'مكتمل'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-[#0F2438] text-[#E5C887]'
+                  }`}
+                >
+                  {(activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                    activeTraveler.orderStatus === 'مكتمل') && (
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>{translateOrderStatus(activeTraveler.orderStatus, lang)}</span>
                 </span>
               </div>
 
@@ -3720,25 +3932,28 @@ Please advise on the next steps for my application.`
           </div>
         )}
 
-        {/* SUB-TAB 3: DOCUMENT WALLET WITH PERSISTENT DRAFTING */}
+        {/* SUB-TAB 3: ISSUED DOCS & PERSONAL DOCUMENT WALLET */}
         {subTab === 'documents' && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
-              <div>
-                <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
-                  {t(
-                    `محفظة المستندات والصور (${combinedDocuments.length})`,
-                    `Traveler Document Wallet (${combinedDocuments.length})`
-                  )}
-                </h2>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  {t(
-                    'مستنداتك محفوظة سحابياً للوصول والتحميل من أي جهاز في أي وقت',
-                    'Your documents are cloud-synced for instant access & download from any device'
-                  )}
-                </p>
+          <>
+            {renderIssuedDeliverablesSection()}
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                <div>
+                  <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+                    {t(
+                      `مستنداتي الشخصية والصور السحابية (${combinedDocuments.length})`,
+                      `Personal Documents & Cloud Wallet (${combinedDocuments.length})`
+                    )}
+                  </h2>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    {t(
+                      'مستنداتك محفوظة سحابياً للوصول والتحميل من أي جهاز في أي وقت',
+                      'Your documents are cloud-synced for instant access & download from any device'
+                    )}
+                  </p>
+                </div>
               </div>
-            </div>
 
             {/* Account Holder Primary Cloud Vault Cards (Personal Photo + Passport Download) */}
             {(effectiveAvatarUrl || latestPassportScan) && (
@@ -4142,7 +4357,8 @@ Please advise on the next steps for my application.`
                   </button>
                 </div>
               )}
-          </div>
+            </div>
+          </>
         )}
 
         {/* SUB-TAB 3 EXTRA: FAMILY MEMBERS & COMPANIONS CLOUD VAULT */}

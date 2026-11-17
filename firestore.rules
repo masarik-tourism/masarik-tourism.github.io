@@ -63,7 +63,9 @@ service cloud.firestore {
         'passportExpiryDate',
         'nationality',
         'documents',
-        'familyMembers'
+        'familyMembers',
+        'issuedDocuments',
+        'notifications'
       ])
       && data.phone is string
       && data.phone == phoneId
@@ -88,6 +90,7 @@ service cloud.firestore {
         'تم استلام الطلب',
         'قيد المراجعة والتنفيذ',
         'تم الحجز / الإصدار',
+        'تم تنفيذ الطلب',
         'مكتمل',
         'تم استلام الأوراق',
         'تم حجز موعد تساهيل',
@@ -163,6 +166,62 @@ service cloud.firestore {
               && data.familyMembers[0].passportPhotoUrl.size() <= 4096
               && data.familyMembers[0].personalPhotoUrl is string
               && data.familyMembers[0].personalPhotoUrl.size() <= 4096
+            )
+          )
+        )
+      )
+      && (
+        !('issuedDocuments' in data)
+        || (
+          data.issuedDocuments is list
+          && data.issuedDocuments.size() <= 30
+          && (
+            data.issuedDocuments.size() == 0
+            || (
+              data.issuedDocuments[0] is map
+              && data.issuedDocuments[0].id is string
+              && data.issuedDocuments[0].id.size() >= 1
+              && data.issuedDocuments[0].id.size() <= 80
+              && data.issuedDocuments[0].docTypeLabel is string
+              && data.issuedDocuments[0].docTypeLabel.size() >= 1
+              && data.issuedDocuments[0].docTypeLabel.size() <= 160
+              && data.issuedDocuments[0].fileName is string
+              && data.issuedDocuments[0].fileName.size() <= 220
+              && data.issuedDocuments[0].mimeType is string
+              && data.issuedDocuments[0].mimeType.size() <= 120
+              && data.issuedDocuments[0].downloadUrl is string
+              && data.issuedDocuments[0].downloadUrl.size() <= 4096
+              && data.issuedDocuments[0].issuedAt is string
+              && data.issuedDocuments[0].issuedAt.size() <= 64
+            )
+          )
+        )
+      )
+      && (
+        !('notifications' in data)
+        || (
+          data.notifications is list
+          && data.notifications.size() <= 30
+          && (
+            data.notifications.size() == 0
+            || (
+              data.notifications[0] is map
+              && data.notifications[0].id is string
+              && data.notifications[0].id.size() >= 1
+              && data.notifications[0].id.size() <= 80
+              && data.notifications[0].titleAr is string
+              && data.notifications[0].titleAr.size() <= 160
+              && data.notifications[0].titleEn is string
+              && data.notifications[0].titleEn.size() <= 160
+              && data.notifications[0].bodyAr is string
+              && data.notifications[0].bodyAr.size() <= 400
+              && data.notifications[0].bodyEn is string
+              && data.notifications[0].bodyEn.size() <= 400
+              && data.notifications[0].type is string
+              && data.notifications[0].type in ['deliverable', 'status']
+              && data.notifications[0].createdAt is string
+              && data.notifications[0].createdAt.size() <= 64
+              && data.notifications[0].read is bool
             )
           )
         )
@@ -279,7 +338,9 @@ service cloud.firestore {
           'passportExpiryDate',
           'nationality',
           'documents',
-          'familyMembers'
+          'familyMembers',
+          'issuedDocuments',
+          'notifications'
         ]);
       allow delete: if isValidPhoneId(phoneId) && resource != null;
     }

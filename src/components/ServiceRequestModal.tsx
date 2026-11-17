@@ -1,11 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import { X, Phone, CheckCircle2, ShieldCheck, Users, Check } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  X,
+  Phone,
+  CheckCircle2,
+  ShieldCheck,
+  Users,
+  Check,
+  FileCheck2,
+  Upload,
+  Camera,
+  Trash2,
+  Loader2,
+} from 'lucide-react';
 import { getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber, openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
 import {
   TRAVELERS_UPDATED_EVENT,
+  attachPreOrderFilesToTravelerCloud,
+  compressImageToDataUrl,
   formatPhoneForDisplay,
   formatTravelersOrderSummary,
   getActiveTraveler,
@@ -39,6 +53,14 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   const [notes, setNotes] = useState('');
   const [submitted, setSubmitted] = useState(false);
 
+  // Pre-order document preparation & instant preview (works for guests & logged-in clients)
+  const [prePassportPreview, setPrePassportPreview] = useState<string>('');
+  const [prePersonalPhotoPreview, setPrePersonalPhotoPreview] = useState<string>('');
+  const [isPreparingUpload, setIsPreparingUpload] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const passportFileRef = useRef<HTMLInputElement | null>(null);
+  const personalPhotoFileRef = useRef<HTMLInputElement | null>(null);
+
   useEffect(() => {
     const sync = () => setActiveTraveler(getActiveTraveler());
     window.addEventListener(TRAVELERS_UPDATED_EVENT, sync);
@@ -64,43 +86,111 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
 
   if (!isOpen) return null;
 
+  const currentServiceObj =
+    localized.services.find((s) => s.title === selectedService) || localized.services[0];
+
   const toggleTravelerId = (id: string) => {
     setSelectedTravelerIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
   };
 
-  const handleSubmitWhatsApp = (e: React.FormEvent) => {
-    e.preventDefault();
-    const travelersBlock = activeTraveler
-      ? formatTravelersOrderSummary(activeTraveler, selectedTravelerIds, lang)
-      : '';
+  const handleSelectPreOrderImage = async (
+    target: 'passport' | 'photo',
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setIsPreparingUpload(true);
+    try {
+      const compressed = await compressImageToDataUrl(
+        file,
+        target === 'passport' ? 1280 : 720,
+        target === 'passport' ? 0.8 : 0.82
+      );
+      if (target === 'passport') {
+        setPrePassportPreview(compressed.dataUrl);
+      } else {
+        setPrePersonalPhotoPreview(compressed.dataUrl);
+      }
+    } catch {
+      // Ignore invalid image files cleanly
+    } finally {
+      setIsPreparingUpload(false);
+    }
+  };
 
-    const message =
-      lang === 'en'
-        ? `Hello Masarik Tourism LLC,
+  const handleSubmitWhatsApp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    let updatedTraveler = activeTraveler;
+
+    try {
+      if (activeTraveler && (prePassportPreview || prePersonalPhotoPreview)) {
+        const res = await attachPreOrderFilesToTravelerCloud(activeTraveler.phone, {
+          passportDataUrl: prePassportPreview || undefined,
+          avatarDataUrl: prePersonalPhotoPreview || undefined,
+          serviceTitle: selectedService,
+        });
+        if (res) {
+          updatedTraveler = res;
+        }
+      }
+
+      const travelersBlock = updatedTraveler
+        ? formatTravelersOrderSummary(updatedTraveler, selectedTravelerIds, lang)
+        : '';
+
+      const preOrderAttachedList: string[] = [];
+      if (prePassportPreview) {
+        preOrderAttachedList.push(
+          lang === 'en' ? 'Passport photo prepared & ready' : 'صورة جواز السفر (مجهّزة للإرسال)'
+        );
+      }
+      if (prePersonalPhotoPreview) {
+        preOrderAttachedList.push(
+          lang === 'en' ? 'Personal photo prepared & ready' : 'الصورة الشخصية (مجهّزة للإرسال)'
+        );
+      }
+
+      const preOrderNote =
+        preOrderAttachedList.length > 0
+          ? lang === 'en'
+            ? `\n• Pre-Order Documents Ready: ${preOrderAttachedList.join(', ')}`
+            : `\n• المستندات المجهزة مسبقاً: ${preOrderAttachedList.join(' + ')}`
+          : '';
+
+      const message =
+        lang === 'en'
+          ? `Hello Masarik Tourism LLC,
 I would like to request a service:
 • Service: ${selectedService}
 • Full Name: ${fullName.trim() || 'Client'}
-• Phone / WhatsApp: ${phone.trim() || 'N/A'}${
-            travelersBlock ? `\n\nSelected Traveler(s) & Cloud Documents:\n${travelersBlock}` : ''
-          }${notes.trim() ? `\n• Notes: ${notes.trim()}` : ''}
+• Phone / WhatsApp: ${phone.trim() || 'N/A'}${preOrderNote}${
+              travelersBlock ? `\n\nSelected Traveler(s) & Cloud Documents:\n${travelersBlock}` : ''
+            }${notes.trim() ? `\n• Notes: ${notes.trim()}` : ''}
 Please share requirements and next steps. Thank you.`
-        : `السلام عليكم ورحمة الله وبركاته،
+          : `السلام عليكم ورحمة الله وبركاته،
 أرغب في طلب خدمة من منصة مسارك للإنجاز السياحي:
 • الخدمة المطلوبة: ${selectedService}
 • الاسم: ${fullName.trim() || 'عميل مسارك'}
-• رقم الهاتف: ${phone.trim() || 'غير محدد'}${
-            travelersBlock ? `\n\nالمسافرون المشمولون بالطلب ومستنداتهم السحابية:\n${travelersBlock}` : ''
-          }${notes.trim() ? `\n• تفاصيل إضافية: ${notes.trim()}` : ''}
+• رقم الهاتف: ${phone.trim() || 'غير محدد'}${preOrderNote}${
+              travelersBlock ? `\n\nالمسافرون المشمولون بالطلب ومستنداتهم السحابية:\n${travelersBlock}` : ''
+            }${notes.trim() ? `\n• تفاصيل إضافية: ${notes.trim()}` : ''}
 يرجى تزويدي بالمتطلبات والتفاصيل وسرعة المتابعة. شكراً لكم.`;
 
-    openWhatsApp(message);
-    setSubmitted(true);
-    setTimeout(() => {
-      setSubmitted(false);
-      onClose();
-    }, 2500);
+      openWhatsApp(message);
+      setPrePassportPreview('');
+      setPrePersonalPhotoPreview('');
+      setSubmitted(true);
+      setTimeout(() => {
+        setSubmitted(false);
+        onClose();
+      }, 2500);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const ownerNames = activeTraveler ? getTravelerDisplayNames(activeTraveler) : null;
@@ -173,6 +263,151 @@ Please share requirements and next steps. Thank you.`
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* Required Documents for Selected Service */}
+              {currentServiceObj?.requiredDocs && currentServiceObj.requiredDocs.length > 0 && (
+                <div className="bg-[#FAF8F2] border border-[#E5C887] rounded-2xl p-3.5 space-y-2">
+                  <div className="flex items-center gap-1.5 text-xs font-black text-[#0F2438]">
+                    <FileCheck2 className="w-4 h-4 text-[#9E7B33] shrink-0" />
+                    <span>
+                      {t('المستندات المطلوبة لهذه الخدمة:', 'Required Documents for This Service:')}
+                    </span>
+                  </div>
+                  <ul className="space-y-1">
+                    {currentServiceObj.requiredDocs.map((req, idx) => (
+                      <li key={idx} className="text-[11.5px] text-slate-700 flex items-start gap-1.5 leading-snug">
+                        <span className="text-[#9E7B33] font-black shrink-0">•</span>
+                        <span>{req}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Pre-Order Document Upload & Instant Preview (No Login Required) */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-black text-[#0F2438]">
+                    {t(
+                      'تجهيز ومعاينة المستندات قبل الطلب (اختياري)',
+                      'Prepare & Preview Photos Before Ordering (Optional)'
+                    )}
+                  </span>
+                  {isPreparingUpload && <Loader2 className="w-3.5 h-3.5 text-[#0284C7] animate-spin" />}
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  {activeTraveler
+                    ? t(
+                        'يمكنك إرفاق أو تحديث صورة الجواز والصورة الشخصية الآن ليتم حفظها سحابياً وإرفاق روابطها بطلبك تلقائياً.',
+                        'Attach or update passport & personal photos now to sync to cloud and include links in your order.'
+                      )
+                    : t(
+                        'تحقق من وضوح صورة الجواز والصورة الشخصية بالمعاينة الفورية الآن لتسريع التنفيذ عند إرسال الطلب.',
+                        'Preview your passport and personal photo here right away for faster processing upon request.'
+                      )}
+                </p>
+
+                <input
+                  ref={passportFileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => void handleSelectPreOrderImage('passport', e)}
+                />
+                <input
+                  ref={personalPhotoFileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => void handleSelectPreOrderImage('photo', e)}
+                />
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {/* Passport Preview / Upload */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-2.5 space-y-2">
+                    <span className="text-[11px] font-black text-[#0F2438] block">
+                      {t('صورة جواز السفر', 'Passport Photo')}
+                    </span>
+                    {prePassportPreview ? (
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={prePassportPreview}
+                          alt={t('معاينة الجواز', 'Passport preview')}
+                          className="w-12 h-12 rounded-lg object-cover border border-[#C6A052] shrink-0"
+                        />
+                        <div className="flex flex-col gap-1 flex-1 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => passportFileRef.current?.click()}
+                            className="w-full py-1 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold cursor-pointer"
+                          >
+                            {t('تغيير', 'Replace')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPrePassportPreview('')}
+                            className="w-full py-1 px-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>{t('إزالة', 'Remove')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => passportFileRef.current?.click()}
+                        className="w-full min-h-[44px] px-2.5 py-2 rounded-xl border border-dashed border-[#C6A052] bg-[#FAF8F2] hover:bg-[#F5EFE0] text-[#0F2438] text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-[#9E7B33]" />
+                        <span>{t('رفع ومعاينة الجواز', 'Upload & Preview')}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Personal Photo Preview / Upload */}
+                  <div className="bg-white border border-slate-200 rounded-xl p-2.5 space-y-2">
+                    <span className="text-[11px] font-black text-[#0F2438] block">
+                      {t('الصورة الشخصية', 'Personal Photo')}
+                    </span>
+                    {prePersonalPhotoPreview ? (
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={prePersonalPhotoPreview}
+                          alt={t('معاينة الصورة', 'Personal photo preview')}
+                          className="w-12 h-12 rounded-full object-cover border border-[#C6A052] shrink-0"
+                        />
+                        <div className="flex flex-col gap-1 flex-1 min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => personalPhotoFileRef.current?.click()}
+                            className="w-full py-1 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold cursor-pointer"
+                          >
+                            {t('تغيير', 'Replace')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPrePersonalPhotoPreview('')}
+                            className="w-full py-1 px-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>{t('إزالة', 'Remove')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => personalPhotoFileRef.current?.click()}
+                        className="w-full min-h-[44px] px-2.5 py-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 text-[#0F2438] text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-slate-600" />
+                        <span>{t('رفع ومعاينة الصورة', 'Upload & Preview')}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Logged-in Account Holder + Family Members Multi-Selector */}
@@ -352,10 +587,19 @@ Please share requirements and next steps. Thank you.`
               <div className="pt-2 flex flex-col sm:flex-row items-center gap-2.5">
                 <button
                   type="submit"
-                  className="w-full sm:flex-1 py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer"
+                  disabled={isSubmitting}
+                  className="w-full sm:flex-1 py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer"
                 >
-                  <WhatsAppIcon className="w-4.5 h-4.5" variant="white" />
-                  <span>{t('إرسال الطلب عبر واتساب (مباشر)', 'Send Request via WhatsApp')}</span>
+                  {isSubmitting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <WhatsAppIcon className="w-4.5 h-4.5" variant="white" />
+                  )}
+                  <span>
+                    {isSubmitting
+                      ? t('جاري التجهيز والإرسال...', 'Preparing & Sending...')
+                      : t('إرسال الطلب عبر واتساب (مباشر)', 'Send Request via WhatsApp')}
+                  </span>
                 </button>
                 <button
                   type="button"
