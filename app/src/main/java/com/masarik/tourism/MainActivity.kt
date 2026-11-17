@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -18,8 +19,10 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -297,6 +300,17 @@ fun MainWebViewScreen(
     var availableUpdate by remember { mutableStateOf<AppReleaseUpdate?>(null) }
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var fileUploadCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+
+    val fileChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = fileUploadCallback
+        fileUploadCallback = null
+        if (callback == null) return@rememberLauncherForActivityResult
+        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+        callback.onReceiveValue(uris)
+    }
 
     LaunchedEffect(Unit) {
         availableUpdate = checkLatestGitHubRelease(installedVersion)
@@ -436,6 +450,28 @@ fun MainWebViewScreen(
                             progress = newProgress / 100f
                             if (newProgress >= 100) {
                                 isLoading = false
+                            }
+                        }
+
+                        override fun onShowFileChooser(
+                            webView: WebView?,
+                            filePathCallback: ValueCallback<Array<Uri>>?,
+                            fileChooserParams: FileChooserParams?
+                        ): Boolean {
+                            fileUploadCallback?.onReceiveValue(null)
+                            fileUploadCallback = filePathCallback
+                            return try {
+                                val intent = fileChooserParams?.createIntent()
+                                    ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                        type = "image/*"
+                                    }
+                                fileChooserLauncher.launch(intent)
+                                true
+                            } catch (_: Exception) {
+                                fileUploadCallback?.onReceiveValue(null)
+                                fileUploadCallback = null
+                                false
                             }
                         }
                     }

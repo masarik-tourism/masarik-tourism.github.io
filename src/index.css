@@ -24,7 +24,6 @@
 
   html {
     font-family: 'Cairo', 'Tajawal', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    direction: rtl;
     scroll-behavior: smooth;
   }
 
@@ -33,8 +32,7 @@
   }
 
   body {
-    direction: rtl;
-    text-align: right;
+    text-align: start;
     background-color: var(--canvas-bg);
     color: var(--text-primary);
     overflow-x: hidden;

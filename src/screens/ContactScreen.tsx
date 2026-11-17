@@ -11,25 +11,40 @@ import {
   Clock,
   Loader2,
 } from 'lucide-react';
-import { TravelRepository } from '../data/travelData';
+import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber, openWhatsApp, launchEmail } from '../utils/communication';
 import { FacebookIcon } from '../components/FacebookIcon';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
+import { useLanguage } from '../contexts/LanguageContext';
 
 interface ContactScreenProps {
   initialService?: string | null;
 }
 
 export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) => {
-  const serviceOptions = [
-    'حجز مواعيد تساهيل و VFS Tasheer',
-    'استخراج وتجهيز ملفات التأشيرات السياحية',
-    'حجز الطيران وتذاكر السفر المؤكدة',
-    'استخراج جوازات السفر والمستخرجات الرسمية',
-    'تصديق الأوراق وترجمة الوثائق المعتمدة',
-    'خدمات منصة إنجاز ودفع الرسوم والتأمين الطبي',
-    'استفسار عام أو متابعة معاملة سابقة',
-  ];
+  const { lang, dir, t } = useLanguage();
+  const localized = getLocalizedTravelContent(lang);
+
+  const serviceOptions =
+    lang === 'en'
+      ? [
+          'VFS Tasheer Biometric Appointments',
+          'Tourist & Visit Visa File Preparation',
+          'Confirmed Flight Ticket Reservations',
+          'Passport Issuance & Official Records Guidance',
+          'Document Attestation & Certified Translation',
+          'Enjaz Platform Payments & Medical Insurance',
+          'General Inquiry or Existing Application Follow-Up',
+        ]
+      : [
+          'حجز مواعيد تساهيل و VFS Tasheer',
+          'استخراج وتجهيز ملفات التأشيرات السياحية',
+          'حجز الطيران وتذاكر السفر المؤكدة',
+          'استخراج جوازات السفر والمستخرجات الرسمية',
+          'تصديق الأوراق وترجمة الوثائق المعتمدة',
+          'خدمات منصة إنجاز ودفع الرسوم والتأمين الطبي',
+          'استفسار عام أو متابعة معاملة سابقة',
+        ];
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -44,41 +59,47 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
 
   useEffect(() => {
     if (initialService) {
-      const match = serviceOptions.find((opt) =>
-        opt.includes(initialService) || initialService.includes(opt)
+      const match = serviceOptions.find(
+        (opt) => opt.includes(initialService) || initialService.includes(opt)
       );
       setSelectedService(match || initialService);
+    } else {
+      setSelectedService(serviceOptions[0]);
     }
-  }, [initialService]);
+  }, [initialService, lang]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!name.trim() || !phone.trim() || !email.trim()) {
-      setValidationError('يرجى ملء الاسم ورقم الهاتف والبريد الإلكتروني لإتمام الإرسال.');
+      setValidationError(
+        t(
+          'يرجى ملء الاسم ورقم الهاتف والبريد الإلكتروني لإتمام الإرسال.',
+          'Please fill in your full name, phone number, and email address.'
+        )
+      );
       return;
     }
     setValidationError(null);
     setIsSending(true);
 
     const now = new Date();
-    const formattedDate = now.toLocaleString('ar-EG');
-    const subject = `طلب جديد من مسارك للإنجاز السياحي (س.ت: ${TravelRepository.COMMERCIAL_RECORD}): ${selectedService}`;
+    const formattedDate = now.toLocaleString(lang === 'en' ? 'en-US' : 'ar-EG');
+    const subject =
+      lang === 'en'
+        ? `New Service Request from Masarik Tourism (CR: ${TravelRepository.COMMERCIAL_RECORD}): ${selectedService}`
+        : `طلب جديد من مسارك للإنجاز السياحي (س.ت: ${TravelRepository.COMMERCIAL_RECORD}): ${selectedService}`;
     const bodyText = `
-السلام عليكم ورحمة الله،
-طلب حجز واستفسار جديد عبر تطبيق مسارك للإنجاز السياحي:
+• Client Name: ${name}
+• Client Email: ${email}
+• Phone / WhatsApp: ${phone}
+• Requested Service: ${selectedService}
+• Message / Notes:
+${message.trim() ? message.trim() : 'No additional notes'}
 --------------------------------------------------
-• اسم العميل: ${name}
-• البريد الإلكتروني للعميل: ${email}
-• رقم الهاتف / الواتساب: ${phone}
-• الخدمة المطلوبة: ${selectedService}
-• تفاصيل الرسالة والملاحظات:
-${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
---------------------------------------------------
-سجل تجاري: ${TravelRepository.COMMERCIAL_RECORD}
-تاريخ وتوقيت الطلب: ${formattedDate}
-المرسل إليه الرسمي: ${TravelRepository.OFFICIAL_EMAIL}
---------------------------------------------------
+CR: ${TravelRepository.COMMERCIAL_RECORD}
+Timestamp: ${formattedDate}
+Official Email: ${TravelRepository.OFFICIAL_EMAIL}
     `.trim();
 
     try {
@@ -114,7 +135,20 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
   };
 
   const handleWhatsAppForward = () => {
-    const msg = `السلام عليكم، أود حجز خدمة من مكتب ${TravelRepository.COMPANY_NAME_AR} (س.ت: ${TravelRepository.COMMERCIAL_RECORD}):\n• الاسم: ${name.trim() || 'عميل'}\n• الإيميل: ${email.trim() || 'غير محدد'}\n• الهاتف: ${phone.trim() || 'غير محدد'}\n• الخدمة: ${selectedService}\n• تفاصيل: ${message.trim() || 'لا توجد'}`;
+    const msg =
+      lang === 'en'
+        ? `Hello ${localized.companyName} (CR: ${TravelRepository.COMMERCIAL_RECORD}):\n• Name: ${
+            name.trim() || 'Client'
+          }\n• Email: ${email.trim() || 'N/A'}\n• Phone: ${
+            phone.trim() || 'N/A'
+          }\n• Service: ${selectedService}\n• Details: ${message.trim() || 'None'}`
+        : `السلام عليكم، أود حجز خدمة من مكتب ${TravelRepository.COMPANY_NAME_AR} (س.ت: ${
+            TravelRepository.COMMERCIAL_RECORD
+          }):\n• الاسم: ${name.trim() || 'عميل'}\n• الإيميل: ${
+            email.trim() || 'غير محدد'
+          }\n• الهاتف: ${phone.trim() || 'غير محدد'}\n• الخدمة: ${selectedService}\n• تفاصيل: ${
+            message.trim() || 'لا توجد'
+          }`;
     openWhatsApp(msg);
   };
 
@@ -125,10 +159,10 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
           <ShieldCheck className="w-5 h-5 text-[#9E7B33] shrink-0" />
           <div>
             <h2 className="text-xs md:text-sm font-black text-[#9E7B33]">
-              {TravelRepository.CERTIFICATION_TITLE}
+              {localized.certificationTitle}
             </h2>
             <p className="text-[11px] md:text-xs font-bold text-[#0F2437]">
-              {TravelRepository.COMMERCIAL_RECORD_STATEMENT}
+              {localized.commercialRecordStatement}
             </p>
           </div>
         </div>
@@ -140,14 +174,20 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
             </div>
             <div>
               <h2 className="text-sm md:text-base font-black text-[#0F2437]">
-                تواصل ومراسلة مباشرة للإيميل
+                {t('تواصل ومراسلة مباشرة للإيميل', 'Direct Official Email Contact')}
               </h2>
               <p className="text-[11px] md:text-xs text-[#324D61]">
-                يتم إرسال كافة البيانات فوراً إلى بريد المكتب الرسمي:
+                {t(
+                  'يتم إرسال كافة البيانات فوراً إلى بريد المكتب الرسمي:',
+                  'All requests are delivered directly to our official company email:'
+                )}
               </p>
             </div>
           </div>
-          <div className="bg-white border border-[#E2DAC8] rounded-xl px-3.5 py-2 text-xs md:text-sm font-bold text-[#2A7688] font-mono text-center md:text-right">
+          <div
+            dir="ltr"
+            className="bg-white border border-[#E2DAC8] rounded-xl px-3.5 py-2 text-xs md:text-sm font-bold text-[#2A7688] font-mono text-center md:text-start"
+          >
             {TravelRepository.OFFICIAL_EMAIL}
           </div>
         </div>
@@ -158,7 +198,7 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
             className="bg-[#25D366] hover:bg-[#128C7E] text-white py-2.5 px-3 rounded-xl text-xs md:text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer"
           >
             <WhatsAppIcon className="w-4 h-4" variant="white" />
-            <span>واتساب فوري</span>
+            <span>{t('واتساب فوري', 'Instant WhatsApp')}</span>
           </button>
           <a
             href={TravelRepository.FACEBOOK_URL}
@@ -167,24 +207,27 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
             className="bg-[#1877F2] hover:bg-[#166fe5] text-white py-2.5 px-3 rounded-xl text-xs md:text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] text-center"
           >
             <FacebookIcon className="w-4 h-4 fill-white" />
-            <span>صفحة فيسبوك</span>
+            <span>{t('صفحة فيسبوك', 'Facebook Page')}</span>
           </a>
           <button
             onClick={() => dialPhoneNumber()}
             className="bg-[#17344F] hover:bg-[#0F2437] text-white py-2.5 px-3 rounded-xl text-xs md:text-sm font-bold flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer"
           >
             <Phone className="w-4 h-4" />
-            <span>اتصال هاتفياً</span>
+            <span>{t('اتصال هاتفياً', 'Call Directly')}</span>
           </button>
         </div>
 
         <div className="bg-white border border-[#E2DAC8] rounded-2xl p-5 md:p-6 shadow-sm space-y-4">
           <div>
             <h2 className="text-base md:text-lg font-bold text-[#17344F]">
-              نموذج إرسال الطلب وحجز الخدمة
+              {t('نموذج إرسال الطلب وحجز الخدمة', 'Service Inquiry & Booking Form')}
             </h2>
             <p className="text-xs text-[#678093] mt-0.5">
-              اكتب بياناتك وسيتم إرسالها فوراً لبريد {TravelRepository.OFFICIAL_EMAIL}
+              {t(
+                `اكتب بياناتك وسيتم إرسالها فوراً لبريد ${TravelRepository.OFFICIAL_EMAIL}`,
+                `Enter your details to send directly to ${TravelRepository.OFFICIAL_EMAIL}`
+              )}
             </p>
           </div>
 
@@ -198,25 +241,26 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
           <form onSubmit={handleSubmit} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
-                الاسم بالكامل *
+                {t('الاسم بالكامل *', 'Full Name *')}
               </label>
               <input
                 type="text"
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="مثال: أحمد محمد علي"
+                placeholder={t('مثال: أحمد محمد علي', 'e.g. Ahmed Mohamed Ali')}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium"
               />
             </div>
 
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
-                بريدك الإلكتروني (لإرسال الرد والتأكيد) *
+                {t('بريدك الإلكتروني (لإرسال الرد والتأكيد) *', 'Your Email (For Reply & Confirmation) *')}
               </label>
               <input
                 type="email"
                 required
+                dir="ltr"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="example@gmail.com"
@@ -226,21 +270,22 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
 
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
-                رقم الهاتف / الواتساب *
+                {t('رقم الهاتف / الواتساب *', 'Phone / WhatsApp Number *')}
               </label>
               <input
                 type="tel"
                 required
+                dir="ltr"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 placeholder={TravelRepository.PHONE_NUMBER}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium tabular-nums"
               />
             </div>
 
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
-                نوع الخدمة المراد إنجازها:
+                {t('نوع الخدمة المراد إنجازها:', 'Required Service:')}
               </label>
               <select
                 value={selectedService}
@@ -257,13 +302,16 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
 
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
-                تفاصيل الرسالة أو الاستفسار أو الموعد:
+                {t('تفاصيل الرسالة أو الاستفسار أو الموعد:', 'Message, Inquiry, or Preferred Date:')}
               </label>
               <textarea
                 rows={3}
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="اكتب أي بيانات إضافية تخص التأشيرة أو عدد المسافرين أو الموعد المرغوب..."
+                placeholder={t(
+                  'اكتب أي بيانات إضافية تخص التأشيرة أو عدد المسافرين أو الموعد المرغوب...',
+                  'Share any extra details about visa type, number of travelers, or preferred appointment date...'
+                )}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium"
               />
             </div>
@@ -276,12 +324,12 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
               {isSending ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>جارٍ إرسال الإيميل...</span>
+                  <span>{t('جارٍ إرسال الإيميل...', 'Sending Email...')}</span>
                 </>
               ) : (
                 <>
                   <Send className="w-4 h-4" />
-                  <span>إرسال الطلب عبر الإيميل</span>
+                  <span>{t('إرسال الطلب عبر الإيميل', 'Submit Request via Email')}</span>
                 </>
               )}
             </button>
@@ -293,26 +341,30 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
             className="w-full bg-transparent hover:bg-green-50 text-[#128C7E] border-2 border-[#25D366] py-2.5 px-4 rounded-xl text-xs md:text-sm font-bold transition active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
           >
             <MessageCircle className="w-4 h-4 text-[#25D366]" />
-            <span>إرسال نسخة عبر الواتساب فوراً</span>
+            <span>{t('إرسال نسخة عبر الواتساب فوراً', 'Send a Copy via WhatsApp')}</span>
           </button>
         </div>
 
         <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-4 space-y-2.5 text-xs md:text-sm">
           <h3 className="font-bold text-[#0F2437]">
-            بيانات اعتماد ومقر {TravelRepository.COMPANY_NAME_AR}
+            {t(`بيانات اعتماد ومقر ${TravelRepository.COMPANY_NAME_AR}`, `${localized.companyName} Credentials & Address`)}
           </h3>
           <div className="space-y-1.5 text-[#324D61]">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-[#C6A052] shrink-0" />
-              <span>سجل تجاري رقم: {TravelRepository.COMMERCIAL_RECORD} • الرقم الموحد: {TravelRepository.UNIFIED_NUMBER}</span>
+              <span>{localized.commercialRecordStatement}</span>
             </div>
             <div className="flex items-center gap-2">
               <MapPin className="w-4 h-4 text-[#2A7688] shrink-0" />
-              <span>المقر الرئيسي: {TravelRepository.ADDRESS}</span>
+              <span>
+                {t('المقر الرئيسي:', 'Headquarters:')} {localized.address}
+              </span>
             </div>
             <div className="flex items-center gap-2 text-[#678093]">
               <Clock className="w-4 h-4 shrink-0" />
-              <span>{TravelRepository.WORKING_HOURS} • {TravelRepository.EXPERIENCE_TEXT}</span>
+              <span>
+                {localized.workingHours} • {localized.experienceText}
+              </span>
             </div>
           </div>
         </div>
@@ -320,43 +372,75 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
 
       {showSuccessDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-[#E2DAC8] text-right space-y-4">
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-[#E2DAC8] text-start space-y-4"
+            dir={dir}
+          >
             <div className="flex items-center gap-2.5 text-green-700">
               <CheckCircle className="w-6 h-6 text-green-600 shrink-0" />
-              <h3 className="text-base font-bold">تم إرسال الطلب بنجاح!</h3>
+              <h3 className="text-base font-bold">
+                {t('تم إرسال الطلب بنجاح!', 'Request Sent Successfully!')}
+              </h3>
             </div>
 
             <p className="text-xs text-[#324D61] leading-relaxed">
-              شكراً لك يا <span className="font-bold text-[#0F2437]">{name}</span>. تم إرسال رسالتك
-              وتفاصيل طلبك بنجاح إلى البريد الإلكتروني الرسمي:
+              {t('شكراً لك يا', 'Thank you,')}{' '}
+              <span className="font-bold text-[#0F2437]">{name}</span>.{' '}
+              {t(
+                'تم إرسال رسالتك وتفاصيل طلبك بنجاح إلى البريد الإلكتروني الرسمي:',
+                'Your inquiry details have been sent to our official email:'
+              )}
             </p>
 
-            <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3 text-xs font-mono font-bold text-[#17344F] text-center">
+            <div
+              dir="ltr"
+              className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3 text-xs font-mono font-bold text-[#17344F] text-center"
+            >
               {TravelRepository.OFFICIAL_EMAIL}
             </div>
 
             <div className="bg-[#FBF7EE] border border-[#E5C887]/60 rounded-xl p-3 text-xs space-y-1 text-[#324D61]">
-              <p>• الخدمة: <span className="font-bold text-[#0F2437]">{selectedService}</span></p>
-              <p>• رقم الهاتف: <span className="font-bold text-[#0F2437]">{phone}</span></p>
-              <p>• بريد العميل: <span className="font-bold text-[#0F2437]">{email}</span></p>
-              <p>• رقم السجل التجاري: <span className="font-bold text-[#0F2437]">{TravelRepository.COMMERCIAL_RECORD}</span></p>
+              <p>
+                • {t('الخدمة:', 'Service:')}{' '}
+                <span className="font-bold text-[#0F2437]">{selectedService}</span>
+              </p>
+              <p>
+                • {t('رقم الهاتف:', 'Phone:')}{' '}
+                <span className="font-bold text-[#0F2437]">{phone}</span>
+              </p>
+              <p>
+                • {t('بريد العميل:', 'Email:')}{' '}
+                <span className="font-bold text-[#0F2437]">{email}</span>
+              </p>
+              <p>
+                • {t('رقم السجل التجاري:', 'CR No.:')}{' '}
+                <span className="font-bold text-[#0F2437]">
+                  {TravelRepository.COMMERCIAL_RECORD}
+                </span>
+              </p>
             </div>
 
             <p className="text-[11px] text-[#678093]">
-              سيقوم فريق العمل بالرد والتواصل معك في أقرب وقت لإتمام الإجراءات وتأكيد الموعد.
+              {t(
+                'سيقوم فريق العمل بالرد والتواصل معك في أقرب وقت لإتمام الإجراءات وتأكيد الموعد.',
+                'Our team will follow up with you promptly to finalize your request.'
+              )}
             </p>
 
             <div className="flex flex-col gap-2 pt-2">
               <button
                 onClick={() => {
-                  const msg = `السلام عليكم، قمت بإرسال طلب لخدمة (${selectedService}) عبر الإيميل باسم (${name}) ورقم (${phone}). أرجو المتابعة.`;
+                  const msg =
+                    lang === 'en'
+                      ? `Hello Masarik Tourism, I submitted a request for (${selectedService}) via email under name (${name}) and phone (${phone}). Please follow up.`
+                      : `السلام عليكم، قمت بإرسال طلب لخدمة (${selectedService}) عبر الإيميل باسم (${name}) ورقم (${phone}). أرجو المتابعة.`;
                   openWhatsApp(msg);
                   setShowSuccessDialog(false);
                 }}
                 className="w-full bg-[#25D366] hover:bg-[#128C7E] text-white py-2.5 rounded-xl text-xs font-bold shadow flex items-center justify-center gap-1.5 transition cursor-pointer"
               >
                 <MessageCircle className="w-4 h-4" />
-                <span>متابعة بالواتساب أيضاً</span>
+                <span>{t('متابعة بالواتساب أيضاً', 'Follow Up on WhatsApp Too')}</span>
               </button>
               <button
                 onClick={() => {
@@ -368,7 +452,7 @@ ${message.trim() ? message.trim() : 'لا توجد ملاحظات إضافية'}
                 }}
                 className="w-full py-2 rounded-xl text-xs font-bold text-[#678093] hover:text-[#17344F] transition cursor-pointer"
               >
-                تم
+                {t('تم', 'Done')}
               </button>
             </div>
           </div>

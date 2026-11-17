@@ -1,16 +1,16 @@
 {
   "id": "/",
-  "name": "مسارك للسياحة",
-  "short_name": "مسارك للسياحة",
-  "description": "شركة مسارك للإنجاز السياحي | خدمات التأشيرات، تخليص الإجراءات والأوراق، حجز تذاكر الطيران والفنادق، ومواعيد تساهيل وإنجاز. س.ت: 7839",
+  "name": "Masarik Tourism | مسارك للإنجاز السياحي",
+  "short_name": "Masarik Tourism",
+  "description": "Masarik Tourism L.L.C (مسارك للإنجاز السياحي) — Visa services, Tasheer VFS appointments, Enjaz & medical insurance, confirmed flight & hotel bookings, and document attestation. CR: 7839",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0F2438",
   "theme_color": "#0F2438",
-  "lang": "ar",
-  "dir": "rtl",
+  "lang": "en",
+  "dir": "auto",
   "icons": [
     {
       "src": "/pwa-192x192.png",

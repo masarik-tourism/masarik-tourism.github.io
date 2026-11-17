@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
 import { ChevronDown, HelpCircle } from 'lucide-react';
-import { TravelRepository } from '../data/travelData';
+import { getLocalizedTravelContent } from '../data/travelData';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export const FAQAccordion: React.FC = () => {
+  const { lang, t } = useLanguage();
+  const localized = getLocalizedTravelContent(lang);
   const [openIndex, setOpenIndex] = useState<number | null>(0);
 
   const toggleAccordion = (idx: number) => {
@@ -17,16 +20,19 @@ export const FAQAccordion: React.FC = () => {
         </div>
         <div>
           <h3 className="text-base md:text-lg font-bold text-[#0F2438]">
-            الأسئلة الشائعة وإجاباتها
+            {t('الأسئلة الشائعة وإجاباتها', 'Frequently Asked Questions')}
           </h3>
           <p className="text-xs text-slate-500">
-            أهم المعلومات التي تهمك حول المواعيد والمستندات وطرق الدفع
+            {t(
+              'أهم المعلومات التي تهمك حول المواعيد والمستندات وطرق الدفع',
+              'Key answers about appointments, documents, and payment options'
+            )}
           </p>
         </div>
       </div>
 
       <div className="space-y-2.5">
-        {TravelRepository.faqs.map((faq, idx) => {
+        {localized.faqs.map((faq, idx) => {
           const isOpen = openIndex === idx;
           return (
             <div
@@ -36,7 +42,7 @@ export const FAQAccordion: React.FC = () => {
               <button
                 type="button"
                 onClick={() => toggleAccordion(idx)}
-                className="w-full p-4 text-right flex items-center justify-between gap-3 cursor-pointer hover:bg-slate-50/70 transition-colors"
+                className="w-full p-4 text-start flex items-center justify-between gap-3 cursor-pointer hover:bg-slate-50/70 transition-colors"
                 aria-expanded={isOpen}
               >
                 <span className="text-xs sm:text-sm font-bold text-[#0F2438] leading-snug">

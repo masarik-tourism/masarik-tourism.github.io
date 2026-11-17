@@ -1,9 +1,11 @@
 import React from 'react';
 import { RefreshCw, Sparkles, X } from 'lucide-react';
 import { useSiteUpdate } from '../hooks/useSiteUpdate';
+import { useLanguage } from '../contexts/LanguageContext';
 
 export const SiteUpdateBanner: React.FC = () => {
   const { hasUpdate, isUpdating, applyUpdate, dismissUpdate } = useSiteUpdate();
+  const { t } = useLanguage();
 
   if (!hasUpdate) return null;
 
@@ -19,10 +21,10 @@ export const SiteUpdateBanner: React.FC = () => {
         </div>
         <div className="min-w-0">
           <p className="text-xs sm:text-sm font-black text-white leading-tight">
-            يتوفر تحديث جديد للموقع
+            {t('يتوفر تحديث جديد للموقع', 'A New Platform Update is Available')}
           </p>
           <p className="text-[11px] text-slate-300 mt-0.5 truncate">
-            تم تحديث البيانات والخدمات لعرض أحدث نسخة
+            {t('تم تحديث البيانات والخدمات لعرض أحدث نسخة', 'Reload to display the latest version')}
           </p>
         </div>
       </div>
@@ -34,13 +36,13 @@ export const SiteUpdateBanner: React.FC = () => {
           className="bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 shadow-sm transition active:scale-95 cursor-pointer whitespace-nowrap disabled:opacity-80"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isUpdating ? 'animate-spin' : ''}`} />
-          <span>{isUpdating ? 'جاري التحديث...' : 'تحديث الآن'}</span>
+          <span>{isUpdating ? t('جاري التحديث...', 'Updating...') : t('تحديث الآن', 'Update Now')}</span>
         </button>
 
         {!isUpdating && (
           <button
             onClick={dismissUpdate}
-            aria-label="إغلاق إشعار التحديث"
+            aria-label={t('إغلاق إشعار التحديث', 'Dismiss Update Notice')}
             className="p-1.5 text-slate-400 hover:text-white rounded-lg transition cursor-pointer"
           >
             <X className="w-4 h-4" />

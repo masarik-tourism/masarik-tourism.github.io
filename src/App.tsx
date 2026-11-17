@@ -1,21 +1,91 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { HomeScreen } from './screens/HomeScreen';
 import { ServicesScreen } from './screens/ServicesScreen';
 import { PaymentScreen } from './screens/PaymentScreen';
 import { ContactScreen } from './screens/ContactScreen';
-import { TravelRepository } from './data/travelData';
+import { TravelRepository, getLocalizedTravelContent } from './data/travelData';
 import { dialPhoneNumber, openWhatsApp } from './utils/communication';
 import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight } from 'lucide-react';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
+import { InAppVersionBanner } from './components/InAppVersionBanner';
+import { TravelerProfileModal } from './components/TravelerProfileModal';
+import { AdminDashboardModal } from './components/AdminDashboardModal';
+import { activateViaMagicLink } from './utils/travelerStore';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
+import { useLanguage } from './contexts/LanguageContext';
 
 export const App: React.FC = () => {
+  const { lang, dir, t } = useLanguage();
+  const localized = getLocalizedTravelContent(lang);
+
   const [currentTab, setCurrentTab] = useState<number>(0);
   const [selectedServiceForContact, setSelectedServiceForContact] = useState<string | null>(null);
+  const [travelerModalOpen, setTravelerModalOpen] = useState<boolean>(false);
+  const [magicLinkFeedback, setMagicLinkFeedback] = useState<string | null>(null);
+  const [adminModalOpen, setAdminModalOpen] = useState<boolean>(false);
+  const adminTapCountRef = useRef<number>(0);
+  const adminTapTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const activatePhone = url.searchParams.get('activate_phone');
+      const otp = url.searchParams.get('otp');
+      const nameParam = url.searchParams.get('name');
+
+      if (activatePhone && otp) {
+        const res = activateViaMagicLink(activatePhone, otp, nameParam);
+        if (res.ok && res.profile) {
+          setMagicLinkFeedback(
+            t(
+              `تم تفعيل حسابك (${res.profile.name}) بنجاح وتوثيقه عبر رابط الواتساب المباشر!`,
+              `Your account (${res.profile.name}) has been verified ✓ via your WhatsApp activation link!`
+            )
+          );
+          setTravelerModalOpen(true);
+        } else {
+          setMagicLinkFeedback(
+            res.error || t('رابط التفعيل غير صالح.', 'Invalid activation link.')
+          );
+          setTravelerModalOpen(true);
+        }
+
+        url.searchParams.delete('activate_phone');
+        url.searchParams.delete('otp');
+        url.searchParams.delete('name');
+        window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+      }
+    } catch {
+      // Ignore malformed URLs
+    }
+  }, [lang]);
+
+  const handleCopyrightTap = () => {
+    adminTapCountRef.current += 1;
+    if (adminTapTimerRef.current) {
+      window.clearTimeout(adminTapTimerRef.current);
+    }
+    if (adminTapCountRef.current >= 5) {
+      adminTapCountRef.current = 0;
+      setAdminModalOpen(true);
+      return;
+    }
+    adminTapTimerRef.current = window.setTimeout(() => {
+      adminTapCountRef.current = 0;
+    }, 3000);
+  };
+
+  const handleNavigateToAiScanner = () => {
+    setCurrentTab(0);
+    setTimeout(() => {
+      const el = document.getElementById('traveler-smart-tools');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
+  };
 
   const handleNavigateToContact = (serviceTitle?: string) => {
     if (serviceTitle) {
@@ -37,12 +107,16 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F2438] selection:bg-[#0284C7]/20">
+    <div
+      dir={dir}
+      className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F2438] selection:bg-[#0284C7]/20"
+    >
       {/* Organized Navigation Bar */}
       <Navbar
         currentTab={currentTab}
         onSelectTab={handleSelectTab}
         onSelectService={handleSelectServiceFromNavbar}
+        onOpenTravelerProfile={() => setTravelerModalOpen(true)}
       />
 
       {/* Main Content Viewport */}
@@ -51,6 +125,7 @@ export const App: React.FC = () => {
           <HomeScreen
             onNavigateToServices={() => handleSelectTab(1)}
             onNavigateToContact={handleNavigateToContact}
+            onOpenTravelerProfile={() => setTravelerModalOpen(true)}
           />
         )}
         {currentTab === 1 && (
@@ -69,62 +144,67 @@ export const App: React.FC = () => {
         <div className="max-w-5xl mx-auto px-4 grid grid-cols-1 md:grid-cols-4 gap-8 mb-10 text-xs sm:text-sm">
           {/* Col 1: Bio & Licensing */}
           <div className="space-y-3 md:col-span-2">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-base sm:text-lg font-black text-white">
-                {TravelRepository.COMPANY_NAME_AR}
+                {localized.companyName}
               </span>
               <span className="text-xs text-[#C6A052] font-bold">
                 ({TravelRepository.COMPANY_NAME_EN})
               </span>
             </div>
             <p className="text-slate-300 leading-relaxed max-w-md">
-              شباكك الواحد وبوابتك المعتمدة رسمياً لإنجاز كافة معاملات التأشيرات وحجز مواعيد تساهيل VFS، تسديد منصة إنجاز والتأمين الصحي، حجز تذاكر الطيران وتوثيق الأوراق الحكومية – بخبرة رائدة ومستمرة منذ عام 2022.
+              {t(
+                'شباكك الواحد وبوابتك المعتمدة رسمياً لإنجاز كافة معاملات التأشيرات وحجز مواعيد تساهيل VFS، تسديد منصة إنجاز والتأمين الصحي، حجز تذاكر الطيران وتوثيق الأوراق الحكومية – بخبرة رائدة ومستمرة منذ عام 2022.',
+                'Your officially licensed portal for visa processing, VFS Tasheer appointments, Enjaz & medical insurance, flight & hotel bookings, and official document legalization — serving travelers since 2022.'
+              )}
             </p>
             <div className="flex flex-col gap-1 text-xs text-[#E5C887] font-semibold pt-1">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 shrink-0 text-[#C6A052]" />
-                <span>سجل تجاري رقم: {TravelRepository.COMMERCIAL_RECORD} • الرقم الموحد: {TravelRepository.UNIFIED_NUMBER}</span>
+                <span>{localized.commercialRecordStatement}</span>
               </div>
-              <span className="text-slate-400 text-[11px] pr-6">شركة معتمدة وموثقة من الغرفة التجارية المصرية</span>
+              <span className="text-slate-400 text-[11px] ps-6">
+                {localized.certificationTitle}
+              </span>
             </div>
           </div>
 
           {/* Col 2: Quick Links */}
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-[#E5C887] uppercase tracking-wider">
-              أقسام المنصة
+              {t('أقسام المنصة', 'Platform Sections')}
             </h3>
             <ul className="space-y-2 text-slate-300">
               <li>
                 <button
                   onClick={() => handleSelectTab(0)}
-                  className="hover:text-white transition flex items-center gap-1 cursor-pointer"
+                  className="hover:text-white transition flex items-center gap-1 cursor-pointer text-start"
                 >
-                  <span>الرئيسية والدليل التفاعلي</span>
+                  <span>{t('الرئيسية والدليل التفاعلي', 'Home & Interactive Guide')}</span>
                 </button>
               </li>
               <li>
                 <button
                   onClick={() => handleSelectTab(1)}
-                  className="hover:text-white transition flex items-center gap-1 cursor-pointer"
+                  className="hover:text-white transition flex items-center gap-1 cursor-pointer text-start"
                 >
-                  <span>دليل الخدمات والتأشيرات</span>
+                  <span>{t('دليل الخدمات والتأشيرات', 'Services & Visas Directory')}</span>
                 </button>
               </li>
               <li>
                 <button
                   onClick={() => handleSelectTab(2)}
-                  className="hover:text-white transition flex items-center gap-1 cursor-pointer"
+                  className="hover:text-white transition flex items-center gap-1 cursor-pointer text-start"
                 >
-                  <span>طرق الدفع المعتمدة (InstaPay)</span>
+                  <span>{t('طرق الدفع المعتمدة (InstaPay)', 'Payment Methods (InstaPay)')}</span>
                 </button>
               </li>
               <li>
                 <button
                   onClick={() => handleSelectTab(3)}
-                  className="hover:text-white transition flex items-center gap-1 cursor-pointer"
+                  className="hover:text-white transition flex items-center gap-1 cursor-pointer text-start"
                 >
-                  <span>بيانات الاتصال ومقر الفروع</span>
+                  <span>{t('بيانات الاتصال ومقر الفروع', 'Contact & Office Address')}</span>
                 </button>
               </li>
             </ul>
@@ -133,38 +213,46 @@ export const App: React.FC = () => {
           {/* Col 3: Direct Contact */}
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-[#E5C887] uppercase tracking-wider">
-              التواصل والمقر الرسمي
+              {t('التواصل والمقر الرسمي', 'Contact & Headquarters')}
             </h3>
             <div className="space-y-2 text-slate-300">
               <button
                 onClick={() => dialPhoneNumber()}
-                className="flex items-center gap-2 hover:text-[#E5C887] transition cursor-pointer text-right w-full"
+                className="flex items-center gap-2 hover:text-[#E5C887] transition cursor-pointer text-start w-full"
               >
                 <Phone className="w-4 h-4 text-[#C6A052] shrink-0" />
-                <span>الهاتف: {TravelRepository.PHONE_NUMBER}</span>
+                <span>
+                  {t('الهاتف:', 'Phone:')} {TravelRepository.PHONE_NUMBER}
+                </span>
               </button>
 
               <button
                 onClick={() => openWhatsApp()}
-                className="flex items-center gap-2 hover:text-[#25D366] transition cursor-pointer text-right w-full"
+                className="flex items-center gap-2 hover:text-[#25D366] transition cursor-pointer text-start w-full"
               >
                 <WhatsAppIcon className="w-4 h-4 shrink-0" variant="colored" />
-                <span>واتساب: {TravelRepository.PHONE_NUMBER}</span>
+                <span>
+                  {t('واتساب:', 'WhatsApp:')} {TravelRepository.PHONE_NUMBER}
+                </span>
               </button>
 
               <div className="flex items-center gap-2 text-slate-300">
                 <Mail className="w-4 h-4 text-[#C6A052] shrink-0" />
-                <span className="truncate">البريد: {TravelRepository.OFFICIAL_EMAIL}</span>
+                <span className="truncate">
+                  {t('البريد:', 'Email:')} {TravelRepository.OFFICIAL_EMAIL}
+                </span>
               </div>
 
               <div className="flex items-center gap-2 text-slate-300">
                 <Clock className="w-4 h-4 text-[#C6A052] shrink-0" />
-                <span>{TravelRepository.WORKING_HOURS}</span>
+                <span>{localized.workingHours}</span>
               </div>
 
               <div className="flex items-start gap-2 text-slate-300">
                 <MapPin className="w-4 h-4 text-[#C6A052] shrink-0 mt-0.5" />
-                <span>العنوان: {TravelRepository.ADDRESS}</span>
+                <span>
+                  {t('العنوان:', 'Address:')} {localized.address}
+                </span>
               </div>
 
               <a
@@ -174,7 +262,7 @@ export const App: React.FC = () => {
                 className="flex items-center gap-2 hover:text-[#60A5FA] text-slate-200 transition cursor-pointer pt-1"
               >
                 <FacebookIcon className="w-4 h-4 fill-[#1877F2]" />
-                <span>صفحة مسارك على فيسبوك</span>
+                <span>{t('صفحة مسارك على فيسبوك', 'Masarik on Facebook')}</span>
                 <ArrowUpRight className="w-3 h-3 text-slate-400" />
               </a>
             </div>
@@ -183,20 +271,54 @@ export const App: React.FC = () => {
 
         {/* Legal notice bottom */}
         <div className="border-t border-white/10 pt-6 pb-2 text-center max-w-5xl mx-auto px-4">
-          <p className="text-xs md:text-sm text-slate-300 font-medium tracking-wide">
-            مسارك للإنجاز السياحي (2022) © جميع الحقوق محفوظة
+          <p className="text-xs md:text-sm text-slate-300 font-medium tracking-wide select-none">
+            {t('مسارك للإنجاز السياحي', 'Masarik Tourism LLC')}{' '}
+            <button
+              type="button"
+              onClick={handleCopyrightTap}
+              className="text-slate-300 hover:text-white cursor-default focus:outline-none"
+              aria-label={t('عام التأسيس', 'Founding Year')}
+            >
+              (2022)
+            </button>{' '}
+            © {t('جميع الحقوق محفوظة', 'All Rights Reserved')}
           </p>
         </div>
       </footer>
 
+      {/* Traveler Profile & Internal Verification Modal */}
+      <TravelerProfileModal
+        isOpen={travelerModalOpen}
+        onClose={() => {
+          setTravelerModalOpen(false);
+          setMagicLinkFeedback(null);
+        }}
+        magicLinkFeedback={magicLinkFeedback}
+        onNavigateToAiScanner={handleNavigateToAiScanner}
+      />
+
+      {/* Hidden Admin Panel (Triggered by 5 taps on 2022) */}
+      <AdminDashboardModal
+        isOpen={adminModalOpen}
+        onClose={() => setAdminModalOpen(false)}
+      />
+
       {/* Self-Updating Website Notification Banner */}
       <SiteUpdateBanner />
+
+      {/* Android WebView In-App Release Update Notification */}
+      <InAppVersionBanner />
 
       {/* Offline Mode Alert */}
       <OfflineIndicator />
 
       {/* Mobile Bottom Navigation Bar */}
-      <BottomNav currentTab={currentTab} onSelectTab={handleSelectTab} />
+      <BottomNav
+        currentTab={currentTab}
+        onSelectTab={handleSelectTab}
+        onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+        isTravelerOpen={travelerModalOpen}
+      />
     </div>
   );
 };

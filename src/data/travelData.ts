@@ -1,4 +1,13 @@
-import { ServiceCategory, TravelService, ClientReview, FeatureBadge } from '../types/travel';
+import {
+  ServiceCategory,
+  TravelService,
+  ClientReview,
+  FeatureBadge,
+  WhyChooseItem,
+  FaqItem,
+  VisaOrderStatus,
+} from '../types/travel';
+import { AppLanguage } from '../contexts/LanguageContext';
 
 export const TravelRepository = {
   COMPANY_NAME_AR: 'مسارك للإنجاز السياحي (ذ.م.م)',
@@ -218,3 +227,228 @@ export const TravelRepository = {
     },
   ] as ClientReview[],
 };
+
+const EnglishTravelContent = {
+  companyName: 'Masarik Lil-Injaz Al-Siyahi LLC',
+  shortCompanyName: 'Masarik Tourism',
+  tagline: 'Your Official Portal for Visa Services, Paperwork Clearance, Flights & Hotels',
+  certificationTitle: 'Certified & Verified by the Egyptian Chamber of Commerce',
+  commercialRecordStatement: 'Commercial Record No. 7839 • Unified ID: 110900100007839',
+  address: 'Al-Hajayza - El Senbellawein Center - Dakahlia Governorate, Egypt',
+  workingHours: '24/7 Customer Support All Week Long',
+  experienceText: 'Continuous Expertise Since 2022',
+  copyright: 'Masarik Lil-Injaz Al-Siyahi LLC (2022) © All Rights Reserved',
+
+  categories: [
+    { id: 'all', titleAr: 'All Services' },
+    { id: 'visa-tasheel', titleAr: 'Visas & Tasheer' },
+    { id: 'documents', titleAr: 'Document Clearance' },
+    { id: 'flights', titleAr: 'Flight Tickets' },
+    { id: 'hotels', titleAr: 'Hotel Bookings' },
+    { id: 'enjaz', titleAr: 'Enjaz & Insurance' },
+  ] as ServiceCategory[],
+
+  services: [
+    {
+      id: 'tourist-visas',
+      categoryId: 'visa-tasheel',
+      title: 'Visa Services & Application File Preparation',
+      badge: 'Visa Services',
+      speedBadge: 'Within 24h',
+      features: [
+        'Complete preparation of tourist, family visit, personal, and business visa files',
+        'Saudi Arabia, GCC, Schengen, European Union, and UK visa applications',
+        'Official form filling, employment letters, and bank statement review',
+        'Embassy-compliant provisional and confirmed flight & hotel itineraries',
+      ],
+    },
+    {
+      id: 'tasheer-vfs',
+      categoryId: 'visa-tasheel',
+      title: 'VFS Tasheer Biometric Appointments',
+      badge: 'Verified Booking',
+      speedBadge: 'Instant',
+      features: [
+        'Immediate and urgent biometric appointment scheduling across all VFS Tasheer centers in Egypt',
+        'Official barcode issuance and direct appointment confirmation receipt',
+        'Full document audit and checklist preparation prior to your center visit',
+        'Standard and VIP Lounge appointment options tailored to your schedule',
+      ],
+    },
+    {
+      id: 'flight-booking',
+      categoryId: 'flights',
+      title: 'Confirmed Flight Ticket Reservations',
+      badge: 'Best Rates',
+      speedBadge: 'Instant',
+      features: [
+        'International and domestic flight bookings on all major certified airlines',
+        'Direct flights from Cairo, Borg El Arab, and all Egyptian airports',
+        'Flexible date changes, seat selection, and extra baggage allowance',
+        'Continuous follow-up and instant ticket confirmation through departure',
+      ],
+    },
+    {
+      id: 'hotel-booking',
+      categoryId: 'hotels',
+      title: 'Verified Hotel & Serviced Apartment Bookings',
+      badge: 'Official Voucher',
+      speedBadge: 'Instant',
+      features: [
+        'Luxury and budget stays in Saudi Arabia and destinations worldwide',
+        'Confirmed and provisional hotel vouchers compliant with embassy visa rules',
+        'Family suites, breakfast packages, and flexible modification or cancellation',
+        'Instant delivery of official guest vouchers with full reservation details',
+      ],
+    },
+    {
+      id: 'attestation-translation',
+      categoryId: 'documents',
+      title: 'Document Clearance, Attestation & Translation',
+      badge: 'CR 7839',
+      speedBadge: 'Within 24h',
+      features: [
+        'Document clearance and legalization at the Egyptian Chamber of Commerce & MOFA',
+        'Attestation of work contracts, powers of attorney, and academic diplomas',
+        'Guided support for passport issuance, renewals, and digitized civil records',
+        'Certified translation of legal documents, certificates, and medical reports',
+      ],
+    },
+    {
+      id: 'enjaz-insurance',
+      categoryId: 'enjaz',
+      title: 'Enjaz Platform Payments & Medical Insurance',
+      badge: 'E-Linked',
+      speedBadge: 'Instant',
+      features: [
+        'Electronic payment of official visa fees on the Saudi Enjaz platform',
+        'Issuance of mandatory accredited travel medical insurance policies',
+        'Official payment receipt generation linked directly with appointment portals',
+        'Resolving payment issues and updating existing visa applications',
+      ],
+    },
+  ] as TravelService[],
+
+  whyChooseUs: [
+    {
+      id: 'step-by-step',
+      title: 'Full Step-by-Step Follow-Up',
+      description: 'We stay with you at every stage with real-time updates from submission until you receive your visa and documents.',
+      icon: 'clock-check',
+    },
+    {
+      id: 'online-remote',
+      title: '100% Remote Online Processing',
+      description: 'Complete your paperwork and bookings comfortably from home anywhere in Egypt without queues or travel.',
+      icon: 'laptop',
+    },
+    {
+      id: 'complete-security',
+      title: 'Strict Document Confidentiality',
+      description: 'Total privacy and protection for your personal details, passport scans, and official papers under strict standards.',
+      icon: 'shield-lock',
+    },
+    {
+      id: 'licensed-company',
+      title: 'Officially Registered & Licensed LLC',
+      description: 'Officially licensed by the Egyptian Chamber of Commerce (CR No. 7839, Unified ID 110900100007839) with trusted expertise since 2022.',
+      icon: 'award-check',
+    },
+  ] as WhyChooseItem[],
+
+  faqs: [
+    {
+      question: 'What services does Masarik Tourism LLC currently provide?',
+      answer: 'We specialize in tourist and visit visa file preparation, VFS Tasheer appointments, Enjaz fee payments & medical insurance, document attestation and certified translation, plus confirmed flight and hotel bookings online.',
+    },
+    {
+      question: 'How do VFS Tasheer appointments work and how fast can they be booked?',
+      answer: 'We book your appointment electronically as soon as you share your passport and visa details, offering Standard or VIP Lounge slots with instant delivery of your official barcode, insurance policy, and payment receipt.',
+    },
+    {
+      question: 'Can I complete my entire application remotely without visiting an office?',
+      answer: 'Yes. Over 90% of our visa files, Tasheer appointments, Enjaz payments, flight/hotel bookings, and document clearances are completed seamlessly online via WhatsApp.',
+    },
+    {
+      question: 'What payment methods are accepted by Masarik Tourism?',
+      answer: 'We accept instant InstaPay transfers to our official link, bank transfers (NBE / Banque Misr), or cash payments at our registered headquarters.',
+    },
+    {
+      question: 'Is Masarik Tourism officially licensed and registered?',
+      answer: 'Yes. Masarik Lil-Injaz Al-Siyahi LLC is officially licensed by the Egyptian Chamber of Commerce under Commercial Record No. 7839 and Unified No. 110900100007839, headquartered in El Senbellawein, Dakahlia, operating since 2022.',
+    },
+  ] as FaqItem[],
+
+  reviews: [
+    {
+      id: '1',
+      author: 'Ahmed Mahmoud El-Awady',
+      tripType: 'Visa & VFS Tasheer',
+      year: '2023',
+      comment: 'Masarik Tourism saved my schedule by securing a Tasheer slot and completing Enjaz payment in record time. Fast WhatsApp replies and follow-up until passport pickup.',
+      rating: 5,
+    },
+    {
+      id: '2',
+      author: 'Sara Abdelrahman',
+      tripType: 'Visa File, Flight & Hotel Booking',
+      year: '2024',
+      comment: 'Outstanding service preparing my complete visa file along with flight and hotel reservations at great rates. Everything was completed online smoothly.',
+      rating: 5,
+    },
+    {
+      id: '3',
+      author: 'Eng. Tarek Mansour',
+      tripType: 'Document Clearance & Attestation',
+      year: '2025',
+      comment: 'Very professional team. They handled official Chamber & MOFA attestations, work contracts, and flight tickets without any hassle. Highly recommended.',
+      rating: 5,
+    },
+    {
+      id: '4',
+      author: 'Mahmoud Kamal El-Badry',
+      tripType: 'Enjaz & Medical Insurance',
+      year: '2026',
+      comment: 'Enjaz fees and mandatory medical insurance were completed within 15 minutes, with receipts and barcodes sent straight to WhatsApp. Truly fast and trustworthy.',
+      rating: 5,
+    },
+  ] as ClientReview[],
+};
+
+export function getLocalizedTravelContent(lang: AppLanguage) {
+  if (lang === 'en') {
+    return EnglishTravelContent;
+  }
+  return {
+    companyName: TravelRepository.COMPANY_NAME_AR,
+    shortCompanyName: 'مسارك للسياحة',
+    tagline: TravelRepository.TAGLINE,
+    certificationTitle: TravelRepository.CERTIFICATION_TITLE,
+    commercialRecordStatement: TravelRepository.COMMERCIAL_RECORD_STATEMENT,
+    address: TravelRepository.ADDRESS,
+    workingHours: TravelRepository.WORKING_HOURS,
+    experienceText: TravelRepository.EXPERIENCE_TEXT,
+    copyright: TravelRepository.COPYRIGHT,
+    categories: TravelRepository.categories,
+    services: TravelRepository.services,
+    whyChooseUs: TravelRepository.whyChooseUs,
+    faqs: TravelRepository.faqs,
+    reviews: TravelRepository.reviews,
+  };
+}
+
+export function translateOrderStatus(status: VisaOrderStatus, lang: AppLanguage): string {
+  if (lang === 'ar') return status;
+  switch (status) {
+    case 'تم استلام الأوراق':
+      return 'Documents Received';
+    case 'تم حجز موعد تساهيل':
+      return 'Tasheer Booked';
+    case 'تحت المراجعة':
+      return 'Under Review';
+    case 'صدرت التأشيرة':
+      return 'Visa Issued';
+    default:
+      return status;
+  }
+}

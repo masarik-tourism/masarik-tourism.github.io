@@ -1,23 +1,28 @@
 import React, { useState } from 'react';
-import { Check, ArrowLeft, ShieldCheck, PhoneCall, Clock } from 'lucide-react';
-import { TravelRepository } from '../data/travelData';
+import { Check, ArrowLeft, ArrowRight, ShieldCheck, PhoneCall, Clock } from 'lucide-react';
+import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { ServiceRequestModal } from '../components/ServiceRequestModal';
+import { useLanguage } from '../contexts/LanguageContext';
 
 interface ServicesScreenProps {
   onNavigateToContact: (serviceTitle?: string) => void;
 }
 
 export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToContact }) => {
+  const { lang, isAr, t } = useLanguage();
+  const localized = getLocalizedTravelContent(lang);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedServiceForModal, setSelectedServiceForModal] = useState<string | undefined>(undefined);
 
+  const ForwardArrow = isAr ? ArrowLeft : ArrowRight;
+
   const filteredServices =
     selectedCategory === 'all'
-      ? TravelRepository.services
-      : TravelRepository.services.filter((s) => s.categoryId === selectedCategory);
+      ? localized.services
+      : localized.services.filter((s) => s.categoryId === selectedCategory);
 
   const handleOpenOrder = (title: string) => {
     setSelectedServiceForModal(title);
@@ -33,28 +38,36 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
             <div>
               <div className="flex items-center gap-2 text-xs font-bold text-[#C6A052] mb-1">
                 <ShieldCheck className="w-4 h-4" />
-                <span>خدمات معتمدة بسجل تجاري رقم {TravelRepository.COMMERCIAL_RECORD}</span>
+                <span>
+                  {t(
+                    `خدمات معتمدة بسجل تجاري رقم ${TravelRepository.COMMERCIAL_RECORD}`,
+                    `Certified Services • CR No. ${TravelRepository.COMMERCIAL_RECORD}`
+                  )}
+                </span>
               </div>
               <h1 className="text-xl md:text-3xl font-black text-[#0F2438]">
-                دليل الخدمات والمعاملات الحكومية
+                {t('دليل الخدمات والمعاملات الحكومية', 'Services & Visa Directory')}
               </h1>
               <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
-                اختر معاملتك المطلوبة للاطلاع على المتطلبات والبدء في الإجراءات فوراً عبر الواتساب أو النموذج المباشر.
+                {t(
+                  'اختر معاملتك المطلوبة للاطلاع على المتطلبات والبدء في الإجراءات فوراً عبر الواتساب أو النموذج المباشر.',
+                  'Choose your required service to review specifications and start processing immediately via WhatsApp or direct form.'
+                )}
               </p>
             </div>
 
             <button
               onClick={() => onNavigateToContact()}
-              className="py-2 px-3.5 bg-slate-100 hover:bg-slate-200 text-[#0F2438] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition self-start sm:self-auto cursor-pointer"
+              className="py-2 px-3.5 bg-slate-100 hover:bg-slate-200 text-[#0F2438] rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition self-start sm:self-auto cursor-pointer whitespace-nowrap"
             >
               <PhoneCall className="w-3.5 h-3.5" />
-              <span>طلب استشارة أو معاملة خاصة</span>
+              <span>{t('طلب استشارة أو معاملة خاصة', 'Request Custom Consultation')}</span>
             </button>
           </div>
 
           {/* Category Tabs */}
           <div className="flex gap-2 overflow-x-auto pt-4 pb-1 hide-scrollbar">
-            {TravelRepository.categories.map((cat) => {
+            {localized.categories.map((cat) => {
               const isSelected = selectedCategory === cat.id;
               return (
                 <button
@@ -115,18 +128,21 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
                   onClick={() => handleOpenOrder(service.title)}
                   className="flex-1 min-h-[44px] bg-[#0F2438] hover:bg-[#163B65] text-white py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold shadow-xs transition active:scale-[0.99] flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  <span>اطلب الخدمة الآن</span>
-                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>{t('اطلب الخدمة الآن', 'Request Service')}</span>
+                  <ForwardArrow className="w-3.5 h-3.5" />
                 </button>
 
                 <button
                   onClick={() => {
-                    const msg = `السلام عليكم، أود حجز والبدء في معاملة: ${service.title} من وكالة مسارك للإنجاز السياحي.`;
+                    const msg =
+                      lang === 'en'
+                        ? `Hello Masarik Tourism, I would like to book and start processing: ${service.title}.`
+                        : `السلام عليكم، أود حجز والبدء في معاملة: ${service.title} من وكالة مسارك للإنجاز السياحي.`;
                     openWhatsApp(msg);
                   }}
                   className="min-w-[44px] min-h-[44px] p-2.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl shadow-xs transition cursor-pointer active:scale-95 flex items-center justify-center shrink-0"
-                  title="تواصل مباشر عبر واتساب"
-                  aria-label={`طلب ${service.title} عبر واتساب`}
+                  title={t('تواصل مباشر عبر واتساب', 'Order via WhatsApp')}
+                  aria-label={`${t('طلب', 'Request')} ${service.title}`}
                 >
                   <WhatsAppIcon className="w-5 h-5" variant="white" />
                 </button>
