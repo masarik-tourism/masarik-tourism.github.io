@@ -442,7 +442,9 @@ export const CmsDynamicGridItems: React.FC<CmsDynamicGridProps> = ({
                 type="submit"
                 className="px-5 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black cursor-pointer"
               >
-                {editingItem ? t('حفظ التعديلات', 'Save Changes') : t('إضافة للموقع فوراً', 'Publish Item')}
+                {editingItem
+                  ? t('تطبيق على المسودة', 'Apply to Draft')
+                  : t('إضافة للمعاينة', 'Stage in Preview')}
               </button>
             </div>
           </form>

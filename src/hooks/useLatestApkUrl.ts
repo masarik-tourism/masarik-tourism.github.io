@@ -57,24 +57,18 @@ export const useLatestApkInfo = (): LatestApkInfo => {
       };
 
       const timestamp = Date.now();
-      const [releaseResult, commitResult] = await Promise.allSettled([
-        fetch(
-          `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest?t=${timestamp}`,
-          requestInit
-        ),
-        fetch(
-          `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/apk-cdn?t=${timestamp}`,
-          requestInit
-        ),
-      ]);
-
       let tagName = 'v1.0.0';
       let sizeLabel: string | null = null;
       let resolvedDownloadUrl = FALLBACK_PAGES_APK_URL;
 
       try {
-        if (releaseResult.status === 'fulfilled' && releaseResult.value.ok) {
-          const data = await releaseResult.value.json();
+        const releaseResponse = await fetch(
+          `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest?t=${timestamp}`,
+          requestInit
+        );
+
+        if (releaseResponse.ok) {
+          const data = await releaseResponse.json();
           const apkAsset = data.assets?.find(
             (asset: { name?: string; browser_download_url?: string; size?: number }) =>
               asset.name?.toLowerCase().endsWith('.apk')
@@ -84,25 +78,19 @@ export const useLatestApkInfo = (): LatestApkInfo => {
             tagName = data.tag_name.trim();
           }
 
+          if (
+            typeof apkAsset?.browser_download_url === 'string' &&
+            apkAsset.browser_download_url.startsWith('https://')
+          ) {
+            resolvedDownloadUrl = apkAsset.browser_download_url;
+          }
+
           if (typeof apkAsset?.size === 'number' && apkAsset.size > 0) {
             sizeLabel = `${(apkAsset.size / (1024 * 1024)).toFixed(1)} MB`;
           }
         }
       } catch {
-        // Keep default metadata on JSON parse error
-      }
-
-      try {
-        if (commitResult.status === 'fulfilled' && commitResult.value.ok) {
-          const commitData = await commitResult.value.json();
-          const sha = typeof commitData.sha === 'string' ? commitData.sha.trim() : '';
-          // Pin to exact immutable apk-cdn commit SHA so jsDelivr never serves a stale APK
-          if (/^[a-f0-9]{40}$/i.test(sha)) {
-            resolvedDownloadUrl = `https://cdn.jsdelivr.net/gh/${REPO_OWNER}/${REPO_NAME}@${sha}/downloads/Masarik-Tourism.apk`;
-          }
-        }
-      } catch {
-        // Keep GitHub Pages fallback URL if commit lookup fails
+        // Keep GitHub Releases direct fallback URL on network/parse error
       }
 
       if (isMounted) {
@@ -115,7 +103,7 @@ export const useLatestApkInfo = (): LatestApkInfo => {
       }
     };
 
-    fetchLatestReleaseMetadata();
+    void fetchLatestReleaseMetadata();
 
     return () => {
       isMounted = false;

@@ -23,6 +23,22 @@ const EMPTY_CMS: CmsDataState = {
   customItems: [],
 };
 
+// In-memory Draft Staging Layer for Live Site Editor Mode
+let draftActive = false;
+let draftState: CmsDataState | null = null;
+
+function cloneCmsState(state: CmsDataState): CmsDataState {
+  return {
+    textOverrides: { ...(state.textOverrides || {}) },
+    deletedKeys: [...(state.deletedKeys || [])],
+    customItems: (state.customItems || []).map((item) => ({
+      ...item,
+      featuresAr: [...(item.featuresAr || [])],
+      featuresEn: [...(item.featuresEn || [])],
+    })),
+  };
+}
+
 function emitCmsUpdate(): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(CMS_UPDATED_EVENT));
@@ -99,32 +115,7 @@ async function syncCmsToCloud(state: CmsDataState): Promise<void> {
   }
 }
 
-export function subscribeCmsCloud(): () => void {
-  const ref = doc(db, 'site_config', 'cms');
-  return onSnapshot(
-    ref,
-    (snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data() as Partial<CmsDataState>;
-      const next: CmsDataState = {
-        textOverrides:
-          data.textOverrides && typeof data.textOverrides === 'object' ? data.textOverrides : {},
-        deletedKeys: Array.isArray(data.deletedKeys) ? data.deletedKeys : [],
-        customItems: Array.isArray(data.customItems) ? data.customItems : [],
-      };
-      writeCmsLocalOnly(next);
-    },
-    (error) => {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (msg.toLowerCase().includes('permission')) {
-        handleFirestoreError(error, OperationType.GET, CMS_DOC_PATH);
-      }
-      console.warn('CMS cloud listener warning:', msg);
-    }
-  );
-}
-
-export function getCmsState(): CmsDataState {
+export function getCommittedCmsState(): CmsDataState {
   if (typeof window === 'undefined') return EMPTY_CMS;
   try {
     const raw = window.localStorage.getItem(CMS_STORAGE_KEY);
@@ -143,7 +134,122 @@ export function getCmsState(): CmsDataState {
   }
 }
 
+export function getCmsState(): CmsDataState {
+  if (draftActive && draftState) {
+    return draftState;
+  }
+  return getCommittedCmsState();
+}
+
+export function isCmsDraftActive(): boolean {
+  return draftActive;
+}
+
+export function getCmsDraftChangeCount(): number {
+  if (!draftActive || !draftState) return 0;
+  const committed = getCommittedCmsState();
+  let count = 0;
+
+  const overrideKeys = new Set([
+    ...Object.keys(committed.textOverrides || {}),
+    ...Object.keys(draftState.textOverrides || {}),
+  ]);
+  overrideKeys.forEach((key) => {
+    if (committed.textOverrides[key] !== draftState!.textOverrides[key]) {
+      count += 1;
+    }
+  });
+
+  const committedDeleted = new Set(committed.deletedKeys || []);
+  const draftDeleted = new Set(draftState.deletedKeys || []);
+  const allDeletedKeys = new Set([...committedDeleted, ...draftDeleted]);
+  allDeletedKeys.forEach((key) => {
+    if (committedDeleted.has(key) !== draftDeleted.has(key)) {
+      count += 1;
+    }
+  });
+
+  const committedItemsMap = new Map(
+    (committed.customItems || []).map((it) => [it.id, JSON.stringify(it)])
+  );
+  const draftItemsMap = new Map(
+    (draftState.customItems || []).map((it) => [it.id, JSON.stringify(it)])
+  );
+  const allItemIds = new Set([...committedItemsMap.keys(), ...draftItemsMap.keys()]);
+  allItemIds.forEach((id) => {
+    if (committedItemsMap.get(id) !== draftItemsMap.get(id)) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
+export function hasUnsavedCmsChanges(): boolean {
+  return getCmsDraftChangeCount() > 0;
+}
+
+export function beginCmsDraftSession(): void {
+  if (!draftActive) {
+    draftActive = true;
+    draftState = cloneCmsState(getCommittedCmsState());
+    emitCmsUpdate();
+  }
+}
+
+export function discardCmsDraftSession(): void {
+  if (draftActive || draftState) {
+    draftActive = false;
+    draftState = null;
+    emitCmsUpdate();
+  }
+}
+
+export async function commitCmsDraftSession(): Promise<void> {
+  if (!draftActive || !draftState) return;
+  const committed = cloneCmsState(draftState);
+  writeCmsLocalOnly(committed);
+  draftState = cloneCmsState(committed);
+  emitCmsUpdate();
+  await syncCmsToCloud(committed);
+}
+
+export function subscribeCmsCloud(): () => void {
+  const ref = doc(db, 'site_config', 'cms');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as Partial<CmsDataState>;
+      const next: CmsDataState = {
+        textOverrides:
+          data.textOverrides && typeof data.textOverrides === 'object' ? data.textOverrides : {},
+        deletedKeys: Array.isArray(data.deletedKeys) ? data.deletedKeys : [],
+        customItems: Array.isArray(data.customItems) ? data.customItems : [],
+      };
+      const wasDirty = draftActive && hasUnsavedCmsChanges();
+      writeCmsLocalOnly(next);
+      if (draftActive && !wasDirty) {
+        draftState = cloneCmsState(next);
+        emitCmsUpdate();
+      }
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, CMS_DOC_PATH);
+      }
+      console.warn('CMS cloud listener warning:', msg);
+    }
+  );
+}
+
 function saveCmsState(next: CmsDataState): CmsDataState {
+  if (draftActive) {
+    draftState = cloneCmsState(next);
+    emitCmsUpdate();
+    return draftState;
+  }
   writeCmsLocalOnly(next);
   void syncCmsToCloud(next);
   return next;
@@ -223,6 +329,8 @@ export function deleteCmsCustomItem(id: string): void {
 }
 
 export function resetAllCmsOverrides(): void {
+  draftActive = false;
+  draftState = null;
   if (typeof window !== 'undefined') {
     window.localStorage.removeItem(CMS_STORAGE_KEY);
     emitCmsUpdate();

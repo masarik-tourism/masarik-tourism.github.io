@@ -4,6 +4,7 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 import { useLatestApkInfo, handleApkDownload, FAST_CDN_APK_URL } from '../hooks/useLatestApkUrl';
 import { TravelRepository } from '../data/travelData';
 import { useLanguage } from '../contexts/LanguageContext';
+import { isRunningInApp } from '../utils/appEnvironment';
 
 interface PWAInstallButtonProps {
   className?: string;
@@ -20,7 +21,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const apkInfo = useLatestApkInfo();
 
-  if (isInstalled) {
+  if (isInstalled || isRunningInApp()) {
     return null;
   }
 

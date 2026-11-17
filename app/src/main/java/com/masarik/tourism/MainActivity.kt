@@ -170,27 +170,19 @@ private suspend fun checkLatestGitHubRelease(installedVersion: String): AppRelea
                 if (tagName.isNotEmpty() && isRemoteVersionNewer(tagName, installedVersion)) {
                     var resolvedUrl =
                         "https://github.com/masarik-tourism/masarik-tourism.github.io/releases/latest/download/Masarik-Tourism.apk"
-                    try {
-                        val commitUrl =
-                            "https://api.github.com/repos/masarik-tourism/masarik-tourism.github.io/commits/apk-cdn?t=${System.currentTimeMillis()}"
-                        val commitConn = (URL(commitUrl).openConnection() as HttpURLConnection).apply {
-                            requestMethod = "GET"
-                            connectTimeout = 8000
-                            readTimeout = 8000
-                            useCaches = false
-                            setRequestProperty("Accept", "application/vnd.github.v3+json")
-                        }
-                        if (commitConn.responseCode == HttpURLConnection.HTTP_OK) {
-                            val commitBody = commitConn.inputStream.bufferedReader().use { it.readText() }
-                            val sha = JSONObject(commitBody).optString("sha", "").trim()
-                            if (sha.length == 40) {
-                                resolvedUrl =
-                                    "https://cdn.jsdelivr.net/gh/masarik-tourism/masarik-tourism.github.io@$sha/downloads/Masarik-Tourism.apk"
+                    val assets = json.optJSONArray("assets")
+                    if (assets != null) {
+                        for (i in 0 until assets.length()) {
+                            val asset = assets.optJSONObject(i) ?: continue
+                            val assetName = asset.optString("name", "")
+                            val assetUrl = asset.optString("browser_download_url", "")
+                            if (assetName.endsWith(".apk", ignoreCase = true) && assetUrl.startsWith("https://")) {
+                                resolvedUrl = assetUrl
+                                break
                             }
                         }
-                        commitConn.disconnect()
-                    } catch (_: Exception) {
                     }
+                    conn.disconnect()
                     return@withContext AppReleaseUpdate(
                         latestVersion = tagName,
                         downloadUrl = resolvedUrl,
@@ -198,6 +190,7 @@ private suspend fun checkLatestGitHubRelease(installedVersion: String): AppRelea
                     )
                 }
             }
+            conn.disconnect()
         } catch (_: Exception) {
         }
         null

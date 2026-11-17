@@ -526,47 +526,6 @@ export const AdminDashboardWorkspace: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Add Client (requires manage_clients or activate_otp) */}
-            <form
-              onSubmit={handleAdminAddClient}
-              className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
-            >
-              <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#0F2438]">
-                <UserPlus className="w-4 h-4 text-[#C6A052]" />
-                <span>
-                  {t(
-                    'إضافة عميل جديد وتوليد كود OTP ورابط تفعيل مباشر',
-                    'Add Client & Generate OTP + Magic Activation Link'
-                  )}
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <input
-                  type="text"
-                  required
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder={t('اسم العميل الكامل', 'Client Full Name')}
-                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438]"
-                />
-                <input
-                  type="tel"
-                  required
-                  dir="ltr"
-                  value={newPhone}
-                  onChange={(e) => setNewPhone(e.target.value)}
-                  placeholder="01012345678"
-                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438] tabular-nums"
-                />
-                <button
-                  type="submit"
-                  className="min-h-[42px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs sm:text-sm font-black transition cursor-pointer"
-                >
-                  {t('إضافة وتوليد OTP', 'Add & Generate OTP')}
-                </button>
-              </div>
-            </form>
-
             {/* Search */}
             <div className="relative">
               <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
@@ -594,7 +553,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   return (
                     <div
                       key={client.phone}
-                      className="bg-white border border-slate-200 hover:border-[#C6A052]/80 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs transition flex flex-col justify-between"
+                      onClick={() => {
+                        if (canManageClients) setSelectedClientPhone(client.phone);
+                      }}
+                      className={`bg-white border border-slate-200 hover:border-[#C6A052]/80 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs transition flex flex-col justify-between ${
+                        canManageClients ? 'cursor-pointer hover:shadow-md' : ''
+                      }`}
                     >
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -657,7 +621,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => handleDirectWhatsAppChat(client)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDirectWhatsAppChat(client);
+                            }}
                             className="px-3 py-2 rounded-xl bg-[#25D366]/15 hover:bg-[#25D366]/25 text-[#128C7E] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
                           >
                             <MessageCircle className="w-3.5 h-3.5" />
@@ -667,7 +634,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
                           {canManageClients ? (
                             <button
                               type="button"
-                              onClick={() => setSelectedClientPhone(client.phone)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedClientPhone(client.phone);
+                              }}
                               className="flex-1 px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
                             >
                               <FolderOpen className="w-3.5 h-3.5" />
@@ -682,14 +652,20 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         </div>
 
                         {!client.verified && canActivateOtp && (
-                          <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200/80 px-3 py-2 rounded-xl">
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200/80 px-3 py-2 rounded-xl"
+                          >
                             <span className="text-[11px] font-bold text-amber-900 tabular-nums">
                               OTP: {client.otp}
                             </span>
                             <div className="flex flex-wrap items-center gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => handleOneClickVerifyAndSendOtp(client)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOneClickVerifyAndSendOtp(client);
+                                }}
                                 className="px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
                               >
                                 <Send className="w-3 h-3" />
@@ -697,7 +673,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleToggleVerified(client)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleVerified(client);
+                                }}
                                 className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-950 text-[11px] font-bold cursor-pointer"
                               >
                                 {t('توثيق فوري', 'Verify Now')}
@@ -711,6 +690,47 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 })}
               </div>
             )}
+
+            {/* Quick Add Client Form placed cleanly below Registered Clients Directory */}
+            <form
+              onSubmit={handleAdminAddClient}
+              className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
+            >
+              <div className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#0F2438]">
+                <UserPlus className="w-4 h-4 text-[#C6A052]" />
+                <span>
+                  {t(
+                    'إضافة عميل جديد وتوليد كود OTP ورابط تفعيل مباشر',
+                    'Add Client & Generate OTP + Magic Activation Link'
+                  )}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <input
+                  type="text"
+                  required
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder={t('اسم العميل الكامل', 'Client Full Name')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438]"
+                />
+                <input
+                  type="tel"
+                  required
+                  dir="ltr"
+                  value={newPhone}
+                  onChange={(e) => setNewPhone(e.target.value)}
+                  placeholder="01012345678"
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438] tabular-nums"
+                />
+                <button
+                  type="submit"
+                  className="min-h-[42px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs sm:text-sm font-black transition cursor-pointer"
+                >
+                  {t('إضافة وتوليد OTP', 'Add & Generate OTP')}
+                </button>
+              </div>
+            </form>
           </div>
         )}
 

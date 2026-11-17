@@ -8,6 +8,11 @@ import {
   updateAdminSessionMode,
 } from '../utils/adminAuthStore';
 
+import {
+  beginCmsDraftSession,
+  discardCmsDraftSession,
+} from '../utils/cmsStore';
+
 interface AdminContextValue {
   session: AdminSession | null;
   isAdminActive: boolean;
@@ -39,6 +44,14 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
   }, []);
 
+  useEffect(() => {
+    if (session?.mode === 'live_editor') {
+      beginCmsDraftSession();
+    } else {
+      discardCmsDraftSession();
+    }
+  }, [session?.mode]);
+
   const openAdminLoginModal = useCallback(() => {
     setLoginModalOpen(true);
   }, []);
@@ -57,11 +70,17 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   const logoutAdmin = useCallback(() => {
+    discardCmsDraftSession();
     logoutAdminSession();
     setSession(null);
   }, []);
 
   const setAdminMode = useCallback((mode: AdminSession['mode']) => {
+    if (mode !== 'live_editor') {
+      discardCmsDraftSession();
+    } else {
+      beginCmsDraftSession();
+    }
     updateAdminSessionMode(mode);
     setSession((prev) => (prev ? { ...prev, mode } : null));
   }, []);
