@@ -39,11 +39,19 @@ export interface FaqItem {
   answer: string;
 }
 
-export type VisaOrderStatus =
+export type CanonicalVisaOrderStatus =
+  | 'تم استلام الطلب'
+  | 'قيد المراجعة والتنفيذ'
+  | 'تم الحجز / الإصدار'
+  | 'مكتمل';
+
+export type LegacyVisaOrderStatus =
   | 'تم استلام الأوراق'
   | 'تم حجز موعد تساهيل'
   | 'تحت المراجعة'
   | 'صدرت التأشيرة';
+
+export type VisaOrderStatus = CanonicalVisaOrderStatus | LegacyVisaOrderStatus;
 
 export interface TravelerDocument {
   id: string;

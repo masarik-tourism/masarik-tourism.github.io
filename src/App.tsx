@@ -6,7 +6,11 @@ import { ServicesScreen } from './screens/ServicesScreen';
 import { PaymentScreen } from './screens/PaymentScreen';
 import { ContactScreen } from './screens/ContactScreen';
 import { TravelRepository, getLocalizedTravelContent } from './data/travelData';
-import { dialPhoneNumber, openWhatsApp } from './utils/communication';
+import {
+  CUSTOMER_SERVICE_WHATSAPP_NUMBER,
+  dialPhoneNumber,
+  openCustomerServiceWhatsApp,
+} from './utils/communication';
 import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight, ShieldAlert, X } from 'lucide-react';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
@@ -20,6 +24,7 @@ import { AdminLoginModal } from './components/AdminLoginModal';
 import { AdminDashboardWorkspace } from './components/AdminDashboardWorkspace';
 import { LiveInlineEditorEngine } from './components/LiveInlineEditorEngine';
 import {
+  OTP_ACTIVATION_WHATSAPP_NUMBER,
   TRAVELERS_UPDATED_EVENT,
   TravelerProfileDraft,
   activateViaMagicLinkCloud,
@@ -517,14 +522,23 @@ export const App: React.FC = () => {
               </button>
 
               <button
-                onClick={() => openWhatsApp()}
-                className="flex items-center gap-2 hover:text-[#25D366] transition cursor-pointer text-start w-full"
+                onClick={() => openCustomerServiceWhatsApp()}
+                className="flex items-center gap-2 hover:text-[#25D366] transition cursor-pointer text-start w-full tabular-nums"
               >
                 <WhatsAppIcon className="w-4 h-4 shrink-0" variant="colored" />
                 <span>
-                  {t('واتساب:', 'WhatsApp:')} {siteConfig.phoneNumber}
+                  {t('خدمة العملاء واتساب:', 'Support WhatsApp:')}{' '}
+                  <span dir="ltr">{CUSTOMER_SERVICE_WHATSAPP_NUMBER}</span>
                 </span>
               </button>
+
+              <div className="flex items-center gap-2 text-slate-400 text-[11px] tabular-nums">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
+                <span>
+                  {t('خط أكواد التفعيل (OTP):', 'OTP Activation Line:')}{' '}
+                  <span dir="ltr">{OTP_ACTIVATION_WHATSAPP_NUMBER}</span>
+                </span>
+              </div>
 
               <div className="flex items-center gap-2 text-slate-300">
                 <Mail className="w-4 h-4 text-[#C6A052] shrink-0" />
@@ -600,6 +614,23 @@ export const App: React.FC = () => {
         onOpenTravelerProfile={() => handleSelectTravelerSection('account')}
         isTravelerOpen={Boolean(travelerSection)}
       />
+
+      {/* Floating Customer Service WhatsApp Action Button (201128440008 ONLY) */}
+      {!isDashboardMode && (
+        <button
+          type="button"
+          data-no-admin-edit="true"
+          onClick={() => openCustomerServiceWhatsApp()}
+          className="fixed bottom-20 md:bottom-6 end-3 sm:end-5 z-30 w-12 h-12 rounded-full bg-[#25D366] hover:bg-[#128C7E] text-white border-2 border-white shadow-xl flex items-center justify-center transition-transform active:scale-95 cursor-pointer animate-pulse-float-a"
+          title={t(
+            `خدمة العملاء واتساب (${CUSTOMER_SERVICE_WHATSAPP_NUMBER})`,
+            `Customer Support WhatsApp (${CUSTOMER_SERVICE_WHATSAPP_NUMBER})`
+          )}
+          aria-label={t('واتساب خدمة العملاء', 'Customer Support WhatsApp')}
+        >
+          <WhatsAppIcon className="w-6 h-6" variant="white" />
+        </button>
+      )}
     </div>
   );
 };

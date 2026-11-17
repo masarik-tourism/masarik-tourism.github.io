@@ -10,6 +10,7 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  CanonicalVisaOrderStatus,
   FamilyMember,
   FamilyRelationship,
   TravelerDocument,
@@ -18,7 +19,7 @@ import {
   TrustedDevice,
   VisaOrderStatus,
 } from '../types/travel';
-import { TravelRepository } from '../data/travelData';
+import { TravelRepository, normalizeOrderStatusValue } from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
   TEMPORARY_SESSION_DURATION_MS,
@@ -47,12 +48,20 @@ export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
 export const COMPANY_WHATSAPP_NUMBER = '201128440008';
 export const OTP_ACTIVATION_WHATSAPP_NUMBER = '201119227270';
 
-export const VISA_ORDER_STATUSES: VisaOrderStatus[] = [
-  'تم استلام الأوراق',
-  'تم حجز موعد تساهيل',
-  'تحت المراجعة',
-  'صدرت التأشيرة',
+export const VISA_ORDER_STATUSES: CanonicalVisaOrderStatus[] = [
+  'تم استلام الطلب',
+  'قيد المراجعة والتنفيذ',
+  'تم الحجز / الإصدار',
+  'مكتمل',
 ];
+
+export function getOrderStatusStageIndex(status?: string): number {
+  const canonical = normalizeOrderStatusValue(status);
+  const idx = VISA_ORDER_STATUSES.indexOf(canonical);
+  return idx >= 0 ? idx : 0;
+}
+
+export { normalizeOrderStatusValue };
 
 export const TRAVELERS_UPDATED_EVENT = 'masarik-travelers-updated';
 
@@ -307,9 +316,7 @@ function saveAllTravelersLocalOnly(map: Record<string, TravelerProfile>): void {
 }
 
 function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, unknown> {
-  const safeStatus: VisaOrderStatus = VISA_ORDER_STATUSES.includes(profile.orderStatus)
-    ? profile.orderStatus
-    : 'تم استلام الأوراق';
+  const safeStatus: VisaOrderStatus = normalizeOrderStatusValue(profile.orderStatus);
 
   const safeOtp = /^\d{6}$/.test(String(profile.otp || ''))
     ? String(profile.otp)
@@ -870,7 +877,7 @@ export async function initiateTravelerOtpLoginCloud(
     trustedDevices: [],
     verified: false,
     createdAt: new Date().toISOString(),
-    orderStatus: 'تم استلام الأوراق',
+    orderStatus: 'تم استلام الطلب',
     documents: [],
   };
 
@@ -1232,7 +1239,7 @@ export async function adminCreateClientCloud(
         otp: generateSixDigitOtp(),
         verified: false,
         createdAt: new Date().toISOString(),
-        orderStatus: 'تم استلام الأوراق',
+        orderStatus: 'تم استلام الطلب',
         documents: [],
       };
 
@@ -1274,7 +1281,7 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     otp: generateSixDigitOtp(),
     verified: false,
     createdAt: new Date().toISOString(),
-    orderStatus: 'تم استلام الأوراق',
+    orderStatus: 'تم استلام الطلب',
     documents: [],
   };
   all[phone] = created;
@@ -1394,7 +1401,7 @@ export function activateViaMagicLink(
     verified: true,
     verifiedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
-    orderStatus: 'تم استلام الأوراق',
+    orderStatus: 'تم استلام الطلب',
     documents: [],
   };
   all[phone] = restored;

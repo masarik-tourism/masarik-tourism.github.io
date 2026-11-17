@@ -139,7 +139,7 @@ export const CmsDynamicGridItems: React.FC<CmsDynamicGridProps> = ({
           <div
             key={item.id}
             data-admin-custom-card="true"
-            className="bg-white border-2 border-[#C6A052]/50 hover:border-[#0284C7]/60 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between relative"
+            className="bg-white border-2 border-[#C6A052]/55 hover:border-[#C6A052] rounded-2xl p-5 sm:p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between relative"
           >
             {/* Floating Edit / Delete controls in Live Editor mode */}
             {(canEdit || canDelete) && (
@@ -194,19 +194,19 @@ export const CmsDynamicGridItems: React.FC<CmsDynamicGridProps> = ({
             )}
 
             <div>
-              <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-center justify-between gap-2 mb-3.5">
                 <div className="w-11 h-11 rounded-xl bg-[#C6A052]/15 text-[#9E7B33] flex items-center justify-center shrink-0">
                   <FileCheck2 className="w-5 h-5" />
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap justify-end">
                   {priceOffer && (
-                    <span className="inline-flex items-center gap-1 text-[10.5px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                    <span className="inline-flex items-center gap-1 text-[10.5px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md">
                       <Tag className="w-3 h-3 shrink-0" />
                       <span>{priceOffer}</span>
                     </span>
                   )}
                   {badge && (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#9E7B33] bg-[#C6A052]/10 px-2 py-0.5 rounded-md">
+                    <span className="inline-flex items-center gap-1 text-[11px] font-black text-[#9E7B33]">
                       <Clock className="w-3 h-3 shrink-0" />
                       <span>{badge}</span>
                     </span>
@@ -214,18 +214,18 @@ export const CmsDynamicGridItems: React.FC<CmsDynamicGridProps> = ({
                 </div>
               </div>
 
-              <h3 className="text-sm sm:text-base font-bold text-[#0F2438] mb-2 leading-snug">
+              <h3 className="text-[15px] sm:text-base font-black text-[#0F2438] mb-2.5 leading-snug">
                 {title}
               </h3>
 
               {features.length > 0 && (
-                <ul className="space-y-2 mb-5">
+                <ul className="space-y-2.5 mb-5">
                   {features.map((feat, idx) => (
                     <li
                       key={idx}
-                      className="flex items-start gap-2 text-xs text-slate-600 leading-relaxed"
+                      className="flex items-start gap-2 text-xs sm:text-[13px] text-slate-600 leading-relaxed"
                     >
-                      <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-1" />
                       <span>{feat}</span>
                     </li>
                   ))}
@@ -233,12 +233,12 @@ export const CmsDynamicGridItems: React.FC<CmsDynamicGridProps> = ({
               )}
             </div>
 
-            <div className="pt-3 border-t border-slate-100 flex items-center gap-2">
+            <div className="pt-3.5 border-t border-slate-100 flex items-center gap-2.5">
               {onRequestService && (
                 <button
                   type="button"
                   onClick={() => onRequestService(title)}
-                  className="flex-1 min-h-[44px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition active:scale-[0.98] cursor-pointer whitespace-nowrap"
+                  className="flex-1 min-h-[44px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-xs sm:text-[13px] font-black flex items-center justify-center gap-1.5 shadow-xs transition active:scale-[0.98] cursor-pointer whitespace-nowrap"
                 >
                   <span>{t('اطلب الخدمة الآن', 'Request Service')}</span>
                 </button>

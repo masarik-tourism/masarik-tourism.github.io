@@ -91,6 +91,10 @@
           "type": "string",
           "description": "Current processing stage for Visa or VFS Tasheer appointment.",
           "enum": [
+            "تم استلام الطلب",
+            "قيد المراجعة والتنفيذ",
+            "تم الحجز / الإصدار",
+            "مكتمل",
             "تم استلام الأوراق",
             "تم حجز موعد تساهيل",
             "تحت المراجعة",

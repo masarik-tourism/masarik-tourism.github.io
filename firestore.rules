@@ -85,6 +85,10 @@ service cloud.firestore {
       && data.createdAt.size() <= 64
       && data.orderStatus is string
       && data.orderStatus in [
+        'تم استلام الطلب',
+        'قيد المراجعة والتنفيذ',
+        'تم الحجز / الإصدار',
+        'مكتمل',
         'تم استلام الأوراق',
         'تم حجز موعد تساهيل',
         'تحت المراجعة',

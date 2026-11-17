@@ -725,6 +725,8 @@ I would like to proceed with reviewing my documents and completing the applicati
                     <img
                       src={previewDataUrl}
                       alt={t('معاينة الجواز أو المستند', 'Passport or Document Preview')}
+                      loading="lazy"
+                      decoding="async"
                       className="max-h-44 rounded-xl object-contain border border-slate-200"
                     />
                   ) : (

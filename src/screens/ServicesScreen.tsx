@@ -6,6 +6,7 @@ import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { ServiceRequestModal } from '../components/ServiceRequestModal';
 import { useLanguage } from '../contexts/LanguageContext';
 import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
+import { OfficialTrustFooter } from '../components/OfficialTrustFooter';
 
 interface ServicesScreenProps {
   onNavigateToContact: (serviceTitle?: string) => void;
@@ -88,37 +89,37 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
         </div>
 
         {/* Services List */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4" data-admin-grid="services-directory">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5" data-admin-grid="services-directory">
           {filteredServices.map((service) => (
             <div
               key={service.id}
               data-admin-card="true"
               data-admin-editable={`services-dir-card-${service.id}`}
-              className="bg-white border border-slate-200 hover:border-[#0284C7]/60 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
+              className="bg-white border border-slate-200/90 hover:border-[#C6A052]/80 rounded-2xl p-5 sm:p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
             >
               <div>
-                <div className="flex justify-between items-start gap-2 mb-3">
-                  <h3 className="text-sm sm:text-base font-bold text-[#0F2438] leading-snug">
+                <div className="flex justify-between items-start gap-2.5 mb-3.5">
+                  <h3 className="text-[15px] sm:text-base font-black text-[#0F2438] leading-snug">
                     {service.title}
                   </h3>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
                     {service.speedBadge && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2 py-0.5 rounded-md">
+                      <span className="inline-flex items-center gap-1 text-[10.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-md">
                         <Clock className="w-3 h-3 shrink-0" />
                         <span>{service.speedBadge}</span>
                       </span>
                     )}
                     {service.badge && (
-                      <span className="bg-[#C6A052]/10 text-[#9E7B33] px-2.5 py-0.5 rounded-md text-[11px] font-bold shrink-0">
+                      <span className="text-[#9E7B33] text-[11px] font-black shrink-0">
                         {service.badge}
                       </span>
                     )}
                   </div>
                 </div>
 
-                <ul className="space-y-2 mb-5">
+                <ul className="space-y-2.5 mb-5">
                   {service.features.map((feat, i) => (
-                    <li key={i} className="flex items-start gap-2 text-xs sm:text-sm text-slate-600">
+                    <li key={i} className="flex items-start gap-2 text-xs sm:text-[13px] text-slate-600 leading-relaxed">
                       <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                       <span>{feat}</span>
                     </li>
@@ -126,10 +127,10 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
                 </ul>
               </div>
 
-              <div className="flex items-center gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center gap-2.5 pt-3.5 border-t border-slate-100">
                 <button
                   onClick={() => handleOpenOrder(service.title)}
-                  className="flex-1 min-h-[44px] bg-[#0F2438] hover:bg-[#163B65] text-white py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold shadow-xs transition active:scale-[0.99] flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="flex-1 min-h-[44px] bg-[#0F2438] hover:bg-[#163B65] text-white py-2.5 px-3 rounded-xl text-xs sm:text-sm font-black shadow-xs transition active:scale-[0.99] flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <span>{t('اطلب الخدمة الآن', 'Request Service')}</span>
                   <ForwardArrow className="w-3.5 h-3.5" />
@@ -158,6 +159,9 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
             onRequestService={handleOpenOrder}
           />
         </div>
+
+        {/* Official Trust Footer */}
+        <OfficialTrustFooter />
       </div>
 
       <ServiceRequestModal

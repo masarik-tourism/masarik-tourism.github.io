@@ -30,6 +30,8 @@ import {
   Lock,
   Smartphone,
   ShieldAlert,
+  CalendarCheck2,
+  Check,
 } from 'lucide-react';
 import {
   FamilyMember,
@@ -49,6 +51,7 @@ import {
   compressImageToDataUrl,
   deleteFamilyMemberCloud,
   formatPhoneForDisplay,
+  getOrderStatusStageIndex,
   getRelationshipLabel,
   getTravelerDisplayNames,
   initiateTravelerOtpLoginCloud,
@@ -1364,7 +1367,7 @@ Please advise on the next steps for my application.`
 • رقم الجواز: ${draft.passportNumber || activeTraveler.passportNumber || 'غير مسجل'}
 • انتهاء الجواز: ${draft.passportExpiryDate || activeTraveler.passportExpiryDate || 'غير مسجل'}
 • المستندات بالمحفظة: ${combinedDocuments.length}
-• الحالة الحالية: ${activeTraveler.orderStatus}
+• الحالة الحالية: ${translateOrderStatus(activeTraveler.orderStatus, 'ar')}
 أرجو متابعة طلبي وإفادتي بالخطوات القادمة.`;
     openWhatsApp(msg);
   };
@@ -2011,7 +2014,7 @@ Please advise on the next steps for my application.`
   const headerDisplayName =
     `${draft.firstName || names.firstName} ${draft.lastName || names.lastName}`.trim() ||
     activeTraveler.name;
-  const currentStatusIdx = Math.max(0, VISA_ORDER_STATUSES.indexOf(activeTraveler.orderStatus));
+  const currentStatusIdx = getOrderStatusStageIndex(activeTraveler.orderStatus);
 
   const familyMembers = activeTraveler.familyMembers || [];
 
@@ -2126,6 +2129,8 @@ Please advise on the next steps for my application.`
                   <img
                     src={memberPassportPhotoUrl}
                     alt="Passport"
+                    loading="lazy"
+                    decoding="async"
                     className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
                     onClick={() =>
                       setPreviewLightbox({
@@ -2187,6 +2192,8 @@ Please advise on the next steps for my application.`
                   <img
                     src={memberPersonalPhotoUrl}
                     alt="Avatar"
+                    loading="lazy"
+                    decoding="async"
                     className="w-16 h-16 rounded-full object-cover border-2 border-[#C6A052] shrink-0 cursor-pointer"
                     onClick={() =>
                       setPreviewLightbox({
@@ -2386,6 +2393,8 @@ Please advise on the next steps for my application.`
                       <img
                         src={member.personalPhotoUrl}
                         alt={fullName}
+                        loading="lazy"
+                        decoding="async"
                         onClick={() =>
                           setPreviewLightbox({
                             label: `${fullName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
@@ -2588,6 +2597,8 @@ Please advise on the next steps for my application.`
                 <img
                   src={effectiveAvatarUrl}
                   alt={headerDisplayName}
+                  loading="lazy"
+                  decoding="async"
                   className="w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover border-2 border-[#C6A052] bg-white shadow-sm"
                 />
               ) : (
@@ -2756,6 +2767,8 @@ Please advise on the next steps for my application.`
                     <img
                       src={effectiveAvatarUrl}
                       alt={headerDisplayName}
+                      loading="lazy"
+                      decoding="async"
                       className="w-28 h-28 rounded-full object-cover border-4 border-[#C6A052] shadow-sm bg-slate-100"
                     />
                   ) : (
@@ -2866,6 +2879,8 @@ Please advise on the next steps for my application.`
                         <img
                           src={latestPassportScan.dataUrl}
                           alt={latestPassportScan.label}
+                          loading="lazy"
+                          decoding="async"
                           className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 cursor-pointer"
                           onClick={() =>
                             setPreviewLightbox({
@@ -3558,26 +3573,109 @@ Please advise on the next steps for my application.`
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* Visual Progress Bar Header */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-bold text-slate-500">
+                  <span>{t('تقدم الطلب الحالي', 'Order Progress')}</span>
+                  <span className="text-[#0F2438] font-black tabular-nums">
+                    {Math.round(((currentStatusIdx + 1) / VISA_ORDER_STATUSES.length) * 100)}%
+                  </span>
+                </div>
+                <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200/80">
+                  <div
+                    className="h-full bg-gradient-to-l from-emerald-500 to-[#0284C7] rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.round(
+                        ((currentStatusIdx + 1) / VISA_ORDER_STATUSES.length) * 100
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* 4-Stage Visual Order Timeline */}
+              <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 sm:gap-2.5">
                 {VISA_ORDER_STATUSES.map((st, idx) => {
-                  const done = idx <= currentStatusIdx;
+                  const completed = idx < currentStatusIdx;
                   const current = idx === currentStatusIdx;
+                  const StepArrow = isAr ? ArrowLeft : ArrowRight;
+                  const StageIcon =
+                    idx === 0
+                      ? FileText
+                      : idx === 1
+                      ? Clock
+                      : idx === 2
+                      ? CalendarCheck2
+                      : CheckCircle2;
+
                   return (
-                    <div
-                      key={st}
-                      className={`p-3.5 rounded-2xl border text-center transition ${
-                        current
-                          ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438] shadow-sm'
-                          : done
-                          ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
-                          : 'bg-slate-50 text-slate-400 border-slate-200'
-                      }`}
-                    >
-                      <span className="text-xs font-black block tabular-nums mb-1">0{idx + 1}</span>
-                      <span className="text-xs font-bold leading-snug block">
-                        {translateOrderStatus(st, lang)}
-                      </span>
-                    </div>
+                    <React.Fragment key={st}>
+                      <div
+                        className={`flex-1 p-3.5 sm:p-4 rounded-2xl border transition-all flex md:flex-col items-center md:text-center gap-3 md:gap-2 ${
+                          current
+                            ? 'bg-[#0F2438] text-white border-[#C6A052] ring-2 ring-[#C6A052]/35 shadow-md'
+                            : completed
+                            ? 'bg-emerald-50 text-emerald-950 border-emerald-300'
+                            : 'bg-slate-50 text-slate-400 border-slate-200'
+                        }`}
+                      >
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border font-black text-xs tabular-nums ${
+                            current
+                              ? 'bg-[#C6A052] text-[#0A1926] border-[#E5C887]'
+                              : completed
+                              ? 'bg-emerald-600 text-white border-emerald-500'
+                              : 'bg-white text-slate-400 border-slate-200'
+                          }`}
+                        >
+                          {completed ? (
+                            <Check className="w-5 h-5 stroke-[2.75]" />
+                          ) : (
+                            <StageIcon className="w-5 h-5" />
+                          )}
+                        </div>
+
+                        <div className="min-w-0 flex-1 md:flex-initial">
+                          <span
+                            className={`text-[10.5px] font-black block tabular-nums ${
+                              current
+                                ? 'text-[#E5C887]'
+                                : completed
+                                ? 'text-emerald-700'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {t(`المرحلة ${idx + 1}`, `Stage ${idx + 1}`)}
+                          </span>
+                          <span
+                            className={`text-xs sm:text-sm font-black leading-snug block ${
+                              current
+                                ? 'text-white'
+                                : completed
+                                ? 'text-emerald-950'
+                                : 'text-slate-500'
+                            }`}
+                          >
+                            {translateOrderStatus(st, lang)}
+                          </span>
+                          {current && (
+                            <span className="inline-block mt-1 text-[10px] font-bold text-[#E5C887]">
+                              {t('● الحالة الحالية', '● Current Stage')}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {idx < VISA_ORDER_STATUSES.length - 1 && (
+                        <div className="hidden md:flex items-center justify-center shrink-0">
+                          <StepArrow
+                            className={`w-4 h-4 ${
+                              idx < currentStatusIdx ? 'text-emerald-600' : 'text-slate-300'
+                            }`}
+                          />
+                        </div>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </div>
@@ -3651,6 +3749,8 @@ Please advise on the next steps for my application.`
                       <img
                         src={effectiveAvatarUrl}
                         alt={headerDisplayName}
+                        loading="lazy"
+                        decoding="async"
                         className="w-12 h-12 rounded-full object-cover border-2 border-[#C6A052] shrink-0 cursor-pointer"
                         onClick={() =>
                           setPreviewLightbox({
@@ -3721,6 +3821,8 @@ Please advise on the next steps for my application.`
                       <img
                         src={latestPassportScan.dataUrl}
                         alt={latestPassportScan.label}
+                        loading="lazy"
+                        decoding="async"
                         className="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
                         onClick={() =>
                           setPreviewLightbox({
@@ -3878,6 +3980,8 @@ Please advise on the next steps for my application.`
                       <img
                         src={doc.dataUrl}
                         alt={doc.label}
+                        loading="lazy"
+                        decoding="async"
                         className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 bg-white cursor-pointer"
                         onClick={() => setPreviewLightbox({ label: doc.label, dataUrl: doc.dataUrl })}
                       />
@@ -4087,6 +4191,8 @@ Please advise on the next steps for my application.`
               <img
                 src={previewLightbox.dataUrl}
                 alt={previewLightbox.label}
+                loading="lazy"
+                decoding="async"
                 className="max-h-[68vh] w-auto object-contain rounded-xl shadow-xs"
               />
             </div>

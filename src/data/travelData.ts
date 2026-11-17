@@ -437,18 +437,41 @@ export function getLocalizedTravelContent(lang: AppLanguage) {
   };
 }
 
-export function translateOrderStatus(status: VisaOrderStatus, lang: AppLanguage): string {
-  if (lang === 'ar') return status;
+export function normalizeOrderStatusValue(status?: string):
+  | 'تم استلام الطلب'
+  | 'قيد المراجعة والتنفيذ'
+  | 'تم الحجز / الإصدار'
+  | 'مكتمل' {
   switch (status) {
-    case 'تم استلام الأوراق':
-      return 'Documents Received';
-    case 'تم حجز موعد تساهيل':
-      return 'Tasheer Booked';
+    case 'قيد المراجعة والتنفيذ':
     case 'تحت المراجعة':
-      return 'Under Review';
+      return 'قيد المراجعة والتنفيذ';
+    case 'تم الحجز / الإصدار':
+    case 'تم حجز موعد تساهيل':
+      return 'تم الحجز / الإصدار';
+    case 'مكتمل':
     case 'صدرت التأشيرة':
-      return 'Visa Issued';
+      return 'مكتمل';
+    case 'تم استلام الطلب':
+    case 'تم استلام الأوراق':
     default:
-      return status;
+      return 'تم استلام الطلب';
+  }
+}
+
+export function translateOrderStatus(status: VisaOrderStatus | string, lang: AppLanguage): string {
+  const canonical = normalizeOrderStatusValue(status);
+  if (lang === 'ar') return canonical;
+  switch (canonical) {
+    case 'تم استلام الطلب':
+      return 'Order Received';
+    case 'قيد المراجعة والتنفيذ':
+      return 'Under Review & Processing';
+    case 'تم الحجز / الإصدار':
+      return 'Booked / Issued';
+    case 'مكتمل':
+      return 'Completed';
+    default:
+      return canonical;
   }
 }

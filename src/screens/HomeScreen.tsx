@@ -33,6 +33,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useSiteConfig } from '../utils/siteConfigStore';
 import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
 import { isRunningInApp } from '../utils/appEnvironment';
+import { OfficialTrustFooter } from '../components/OfficialTrustFooter';
 
 interface HomeScreenProps {
   onNavigateToServices: () => void;
@@ -259,53 +260,53 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" data-admin-grid="home-services">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5" data-admin-grid="home-services">
             {localized.services.map((service) => (
               <div
                 key={service.id}
                 id={`service-${service.id}`}
                 data-admin-card="true"
                 data-admin-editable={`home-service-card-${service.id}`}
-                className="scroll-mt-24 bg-white border border-slate-200 hover:border-[#0284C7]/60 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between group"
+                className="scroll-mt-24 bg-white border border-slate-200/90 hover:border-[#C6A052]/80 rounded-2xl p-5 sm:p-6 shadow-xs hover:shadow-md transition-all flex flex-col justify-between group"
               >
                 <div>
-                  <div className="flex items-center justify-between gap-2 mb-3">
-                    <div className="w-11 h-11 rounded-xl bg-slate-100 group-hover:bg-[#0284C7]/10 flex items-center justify-center transition-colors shrink-0">
+                  <div className="flex items-center justify-between gap-2 mb-3.5">
+                    <div className="w-11 h-11 rounded-xl bg-[#F8FAFC] border border-slate-200/80 group-hover:border-[#C6A052]/50 group-hover:bg-[#C6A052]/10 flex items-center justify-center transition-colors shrink-0">
                       {getServiceIcon(service.id)}
                     </div>
-                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
                       {service.speedBadge && (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2 py-0.5 rounded-md">
+                        <span className="inline-flex items-center gap-1 text-[10.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-md">
                           <Clock className="w-3 h-3 shrink-0" />
                           <span>{service.speedBadge}</span>
                         </span>
                       )}
                       {service.badge && (
-                        <span className="text-[11px] font-bold text-[#9E7B33]">
+                        <span className="text-[11px] font-black text-[#9E7B33]">
                           {service.badge}
                         </span>
                       )}
                     </div>
                   </div>
 
-                  <h3 className="text-sm sm:text-base font-bold text-[#0F2438] mb-2 leading-snug">
+                  <h3 className="text-[15px] sm:text-base font-black text-[#0F2438] mb-2.5 leading-snug">
                     {service.title}
                   </h3>
 
-                  <ul className="space-y-2 mb-5">
+                  <ul className="space-y-2.5 mb-5">
                     {service.features.map((feat, i) => (
-                      <li key={i} className="flex items-start gap-2 text-xs text-slate-600 leading-relaxed">
-                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      <li key={i} className="flex items-start gap-2 text-xs sm:text-[13px] text-slate-600 leading-relaxed">
+                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-1" />
                         <span>{feat}</span>
                       </li>
                     ))}
                   </ul>
                 </div>
 
-                <div className="pt-3 border-t border-slate-100 flex items-center gap-2">
+                <div className="pt-3.5 border-t border-slate-100 flex items-center gap-2.5">
                   <button
                     onClick={() => handleOpenModal(service.title)}
-                    className="flex-1 min-h-[44px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition active:scale-[0.98] cursor-pointer whitespace-nowrap"
+                    className="flex-1 min-h-[44px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-xs sm:text-[13px] font-black flex items-center justify-center gap-1.5 shadow-xs transition active:scale-[0.98] cursor-pointer whitespace-nowrap"
                   >
                     <span>{t('اطلب الخدمة الآن', 'Request Service')}</span>
                   </button>
@@ -484,6 +485,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </div>
           </div>
         )}
+
+        {/* 8. Official Trust Footer */}
+        <OfficialTrustFooter />
       </div>
 
       {/* Service Request Modal */}

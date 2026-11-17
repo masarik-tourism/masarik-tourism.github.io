@@ -19,7 +19,12 @@ import {
   Briefcase,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
-import { dialPhoneNumber } from '../utils/communication';
+import {
+  CUSTOMER_SERVICE_WHATSAPP_NUMBER,
+  dialPhoneNumber,
+  openCustomerServiceWhatsApp,
+} from '../utils/communication';
+import { WhatsAppIcon } from './WhatsAppIcon';
 import masarikLogoImg from '../assets/images/masarik_logo.jpg';
 import {
   formatFirstLastName,
@@ -175,16 +180,33 @@ export const Navbar: React.FC<NavbarProps> = ({
       <AnnouncementBanner />
 
       {/* Official Top Bar */}
-      <div className="bg-[#0A1926] text-white px-3 sm:px-4 py-1.5 text-xs font-semibold flex justify-center items-center text-center border-b border-[#C6A052]/40">
-        <div className="flex items-center justify-center gap-1.5 sm:gap-2">
-          <ShieldCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#E5C887] shrink-0" />
-          <span className="text-[10.5px] sm:text-xs leading-tight">
-            {localized.certificationTitle} •{' '}
-            {t(
-              `سجل تجاري رقم: ${TravelRepository.COMMERCIAL_RECORD}`,
-              `CR No: ${TravelRepository.COMMERCIAL_RECORD}`
-            )}
-          </span>
+      <div className="bg-[#0A1926] text-white px-3 sm:px-4 py-1.5 text-xs font-semibold border-b border-[#C6A052]/40">
+        <div className="max-w-6xl mx-auto flex flex-wrap justify-center sm:justify-between items-center gap-x-4 gap-y-1 text-center">
+          <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+            <ShieldCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#E5C887] shrink-0" />
+            <span className="text-[10.5px] sm:text-xs leading-tight">
+              {localized.certificationTitle} •{' '}
+              {t(
+                `سجل تجاري رقم: ${TravelRepository.COMMERCIAL_RECORD}`,
+                `CR No: ${TravelRepository.COMMERCIAL_RECORD}`
+              )}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => openCustomerServiceWhatsApp()}
+            className="inline-flex items-center gap-1.5 text-[10.5px] sm:text-xs text-[#E5C887] hover:text-white transition cursor-pointer tabular-nums"
+            title={t('واتساب خدمة العملاء والاستفسارات', 'Customer Service WhatsApp')}
+          >
+            <WhatsAppIcon className="w-3.5 h-3.5 shrink-0" variant="colored" />
+            <span>
+              {t('خدمة العملاء:', 'Support:')}{' '}
+              <strong dir="ltr" className="text-white">
+                {CUSTOMER_SERVICE_WHATSAPP_NUMBER}
+              </strong>
+            </span>
+          </button>
         </div>
       </div>
 
@@ -338,6 +360,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <img
                   src={activeTraveler.avatarUrl}
                   alt={travelerShortFullName}
+                  loading="lazy"
+                  decoding="async"
                   className="w-6 h-6 sm:w-6.5 sm:h-6.5 rounded-full object-cover border border-[#C6A052] shrink-0 bg-white"
                 />
               ) : activeTraveler?.verified ? (
@@ -555,6 +579,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <img
                   src={activeTraveler.avatarUrl}
                   alt={travelerShortFullName}
+                  loading="lazy"
+                  decoding="async"
                   className="w-6 h-6 rounded-full object-cover border border-[#C6A052] shrink-0"
                 />
               ) : (

@@ -377,6 +377,8 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
                         <img
                           src={activeTraveler.avatarUrl}
                           alt={getTravelerDisplayNames(activeTraveler).fullDisplayName}
+                          loading="lazy"
+                          decoding="async"
                           className="w-9 h-9 rounded-full object-cover border border-[#C6A052] shrink-0"
                         />
                       ) : (
@@ -425,6 +427,8 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
                             <img
                               src={member.personalPhotoUrl}
                               alt={mName}
+                              loading="lazy"
+                              decoding="async"
                               className="w-9 h-9 rounded-full object-cover border border-[#C6A052] shrink-0"
                             />
                           ) : (

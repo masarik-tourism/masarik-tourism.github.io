@@ -44,8 +44,10 @@ import {
   exportAllDataBackupJson,
   formatPhoneForDisplay,
   getAllTravelers,
+  getOrderStatusStageIndex,
   getRelationshipLabel,
   getTravelerDisplayNames,
+  normalizeOrderStatusValue,
   normalizePhone,
   updateAdminPin,
   updateTravelerProfileDetails,
@@ -116,9 +118,10 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const [editPassportNumber, setEditPassportNumber] = useState('');
   const [editPassportExpiry, setEditPassportExpiry] = useState('');
   const [editNationality, setEditNationality] = useState('');
-  const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('تم استلام الأوراق');
+  const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('تم استلام الطلب');
   const [editAdminNotes, setEditAdminNotes] = useState('');
   const [folderSavedMsg, setFolderSavedMsg] = useState('');
+  const [stageUpdatedPhone, setStageUpdatedPhone] = useState<string | null>(null);
   const [confirmDeletePhone, setConfirmDeletePhone] = useState<string | null>(null);
   const [previewDocImage, setPreviewDocImage] = useState<{
     label: string;
@@ -183,7 +186,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setEditPassportNumber(selectedClient.passportNumber || '');
       setEditPassportExpiry(selectedClient.passportExpiryDate || '');
       setEditNationality(selectedClient.nationality || '');
-      setEditOrderStatus(selectedClient.orderStatus || 'تم استلام الأوراق');
+      setEditOrderStatus(normalizeOrderStatusValue(selectedClient.orderStatus));
       setEditAdminNotes(selectedClient.adminNotes || '');
       setFolderSavedMsg('');
       setConfirmDeletePhone(null);
@@ -247,6 +250,32 @@ export const AdminDashboardWorkspace: React.FC = () => {
       verified: !client.verified,
       verifiedAt: !client.verified ? new Date().toISOString() : undefined,
     });
+    loadTravelers();
+  };
+
+  const handleOneClickOrderStageUpdate = (
+    client: TravelerProfile,
+    nextStatus: VisaOrderStatus
+  ) => {
+    if (!canManageClients) return;
+    const normalized = normalizeOrderStatusValue(nextStatus);
+    updateTravelerProfileDetails(client.phone, {
+      orderStatus: normalized,
+    });
+    if (selectedClientPhone === client.phone) {
+      setEditOrderStatus(normalized);
+      setFolderSavedMsg(
+        t(
+          `تم تحديث مرحلة الطلب إلى: ${translateOrderStatus(normalized, lang)}`,
+          `Stage updated to: ${translateOrderStatus(normalized, lang)}`
+        )
+      );
+      setTimeout(() => setFolderSavedMsg(''), 2500);
+    }
+    setStageUpdatedPhone(client.phone);
+    setTimeout(() => {
+      setStageUpdatedPhone((prev) => (prev === client.phone ? null : prev));
+    }, 1800);
     loadTravelers();
   };
 
@@ -586,6 +615,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               <img
                                 src={client.avatarUrl}
                                 alt={clientDisplayName}
+                                loading="lazy"
+                                decoding="async"
                                 className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
                               />
                             ) : (
@@ -665,6 +696,52 @@ export const AdminDashboardWorkspace: React.FC = () => {
                       </div>
 
                       <div className="space-y-2 pt-2 border-t border-slate-100">
+                        {canManageClients && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="bg-slate-50 border border-slate-200/90 rounded-xl p-2 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-2 px-1">
+                              <span className="text-[10.5px] font-black text-slate-600">
+                                {t('تحديث حالة الطلب بضغطة واحدة:', '1-Click Stage Update:')}
+                              </span>
+                              {stageUpdatedPhone === client.phone && (
+                                <span className="text-[10.5px] font-black text-emerald-700">
+                                  {t('تم التحديث ✓', 'Updated ✓')}
+                                </span>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                              {VISA_ORDER_STATUSES.map((st, idx) => {
+                                const activeIdx = getOrderStatusStageIndex(client.orderStatus);
+                                const isCurrent = idx === activeIdx;
+                                const isPast = idx < activeIdx;
+                                return (
+                                  <button
+                                    key={st}
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleOneClickOrderStageUpdate(client, st);
+                                    }}
+                                    className={`px-2 py-1.5 rounded-lg text-[10.5px] font-bold border transition cursor-pointer text-center leading-tight min-h-[34px] ${
+                                      isCurrent
+                                        ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438] shadow-xs'
+                                        : isPast
+                                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                                        : 'bg-white text-slate-600 border-slate-200 hover:border-[#C6A052] hover:text-[#0F2438]'
+                                    }`}
+                                  >
+                                    <span className="block tabular-nums">
+                                      {idx + 1}. {translateOrderStatus(st, lang)}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
                         <div className="flex flex-wrap items-center gap-2">
                           <button
                             type="button"
@@ -819,6 +896,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
                     <img
                       src={selectedClient.avatarUrl}
                       alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
+                      loading="lazy"
+                      decoding="async"
                       className="w-10 h-10 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
                     />
                   ) : (
@@ -1008,21 +1087,30 @@ export const AdminDashboardWorkspace: React.FC = () => {
                       className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                     />
                   </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('مرحلة طلب التأشيرة / تساهيل', 'Order Stage')}
+                  <div className="sm:col-span-2">
+                    <label className="block font-bold text-slate-600 mb-1.5">
+                      {t('مرحلة طلب التأشيرة / تساهيل (تحديث فوري بضغطة واحدة)', 'Order Stage (1-Click Live Update)')}
                     </label>
-                    <select
-                      value={editOrderStatus}
-                      onChange={(e) => setEditOrderStatus(e.target.value as VisaOrderStatus)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white font-bold text-[#0F2438]"
-                    >
-                      {VISA_ORDER_STATUSES.map((st) => (
-                        <option key={st} value={st}>
-                          {translateOrderStatus(st, lang)}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {VISA_ORDER_STATUSES.map((st, idx) => {
+                        const isActive =
+                          normalizeOrderStatusValue(editOrderStatus) === st;
+                        return (
+                          <button
+                            key={st}
+                            type="button"
+                            onClick={() => handleOneClickOrderStageUpdate(selectedClient, st)}
+                            className={`px-2.5 py-2.5 rounded-xl border text-[11px] font-black transition cursor-pointer text-center min-h-[42px] ${
+                              isActive
+                                ? 'bg-[#0F2438] text-[#E5C887] border-[#C6A052] shadow-xs'
+                                : 'bg-white text-slate-700 border-slate-300 hover:border-[#0F2438]'
+                            }`}
+                          >
+                            {idx + 1}. {translateOrderStatus(st, lang)}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 
@@ -1167,6 +1255,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
                             <img
                               src={docItem.dataUrl}
                               alt={docItem.label}
+                              loading="lazy"
+                              decoding="async"
                               className="w-16 h-16 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
                             />
                             <div className="min-w-0 flex-1">
@@ -1263,6 +1353,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
                             <img
                               src={member.personalPhotoUrl}
                               alt={memberName}
+                              loading="lazy"
+                              decoding="async"
                               onClick={() =>
                                 setPreviewDocImage({
                                   label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
@@ -2131,6 +2223,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
               <img
                 src={previewDocImage.dataUrl}
                 alt={previewDocImage.label}
+                loading="lazy"
+                decoding="async"
                 className="max-h-[68vh] rounded-xl object-contain"
               />
             </div>
