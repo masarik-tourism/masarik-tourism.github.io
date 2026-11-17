@@ -16,6 +16,7 @@ import { dialPhoneNumber, openWhatsApp, launchEmail } from '../utils/communicati
 import { FacebookIcon } from '../components/FacebookIcon';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useSiteConfig } from '../utils/siteConfigStore';
 
 interface ContactScreenProps {
   initialService?: string | null;
@@ -23,6 +24,7 @@ interface ContactScreenProps {
 
 export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) => {
   const { lang, dir, t } = useLanguage();
+  const siteConfig = useSiteConfig();
   const localized = getLocalizedTravelContent(lang);
 
   const serviceOptions =
@@ -278,7 +280,7 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
                 dir="ltr"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder={TravelRepository.PHONE_NUMBER}
+                placeholder={siteConfig.phoneNumber}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium tabular-nums"
               />
             </div>
@@ -363,7 +365,8 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
             <div className="flex items-center gap-2 text-[#678093]">
               <Clock className="w-4 h-4 shrink-0" />
               <span>
-                {localized.workingHours} • {localized.experienceText}
+                {lang === 'en' ? siteConfig.workingHoursEn : siteConfig.workingHoursAr} •{' '}
+                {localized.experienceText}
               </span>
             </div>
           </div>

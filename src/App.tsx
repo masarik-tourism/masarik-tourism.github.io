@@ -17,9 +17,11 @@ import { activateViaMagicLink } from './utils/travelerStore';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
+import { useSiteConfig } from './utils/siteConfigStore';
 
 export const App: React.FC = () => {
   const { lang, dir, t } = useLanguage();
+  const siteConfig = useSiteConfig();
   const localized = getLocalizedTravelContent(lang);
 
   const [currentTab, setCurrentTab] = useState<number>(0);
@@ -33,6 +35,13 @@ export const App: React.FC = () => {
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
+      const adminParam = url.searchParams.get('admin');
+      if (adminParam === '1') {
+        setAdminModalOpen(true);
+        url.searchParams.delete('admin');
+        window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+      }
+
       const activatePhone = url.searchParams.get('activate_phone');
       const otp = url.searchParams.get('otp');
       const nameParam = url.searchParams.get('name');
@@ -64,7 +73,7 @@ export const App: React.FC = () => {
     }
   }, [lang]);
 
-  const handleCopyrightTap = () => {
+  const handleSecretAdminTap = () => {
     adminTapCountRef.current += 1;
     if (adminTapTimerRef.current) {
       window.clearTimeout(adminTapTimerRef.current);
@@ -117,6 +126,7 @@ export const App: React.FC = () => {
         onSelectTab={handleSelectTab}
         onSelectService={handleSelectServiceFromNavbar}
         onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+        onSecretAdminTap={handleSecretAdminTap}
       />
 
       {/* Main Content Viewport */}
@@ -126,6 +136,7 @@ export const App: React.FC = () => {
             onNavigateToServices={() => handleSelectTab(1)}
             onNavigateToContact={handleNavigateToContact}
             onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+            onSecretAdminTap={handleSecretAdminTap}
           />
         )}
         {currentTab === 1 && (
@@ -222,7 +233,7 @@ export const App: React.FC = () => {
               >
                 <Phone className="w-4 h-4 text-[#C6A052] shrink-0" />
                 <span>
-                  {t('الهاتف:', 'Phone:')} {TravelRepository.PHONE_NUMBER}
+                  {t('الهاتف:', 'Phone:')} {siteConfig.phoneNumber}
                 </span>
               </button>
 
@@ -232,7 +243,7 @@ export const App: React.FC = () => {
               >
                 <WhatsAppIcon className="w-4 h-4 shrink-0" variant="colored" />
                 <span>
-                  {t('واتساب:', 'WhatsApp:')} {TravelRepository.PHONE_NUMBER}
+                  {t('واتساب:', 'WhatsApp:')} {siteConfig.phoneNumber}
                 </span>
               </button>
 
@@ -245,7 +256,7 @@ export const App: React.FC = () => {
 
               <div className="flex items-center gap-2 text-slate-300">
                 <Clock className="w-4 h-4 text-[#C6A052] shrink-0" />
-                <span>{localized.workingHours}</span>
+                <span>{lang === 'en' ? siteConfig.workingHoursEn : siteConfig.workingHoursAr}</span>
               </div>
 
               <div className="flex items-start gap-2 text-slate-300">
@@ -275,7 +286,7 @@ export const App: React.FC = () => {
             {t('مسارك للإنجاز السياحي', 'Masarik Tourism LLC')}{' '}
             <button
               type="button"
-              onClick={handleCopyrightTap}
+              onClick={handleSecretAdminTap}
               className="text-slate-300 hover:text-white cursor-default focus:outline-none"
               aria-label={t('عام التأسيس', 'Founding Year')}
             >

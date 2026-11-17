@@ -13,8 +13,10 @@ import {
   Clock,
   Save,
   ScanLine,
+  Loader2,
+  Sparkles,
 } from 'lucide-react';
-import { TravelerDocument, TravelerProfile } from '../types/travel';
+import { PassportAiCheckResult, TravelerDocument, TravelerProfile } from '../types/travel';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
@@ -75,6 +77,11 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
   const [docLabel, setDocLabel] = useState(t('صورة جواز السفر', 'Passport Copy'));
   const [docType, setDocType] = useState<TravelerDocument['docType']>('passport');
   const [profileSavedMsg, setProfileSavedMsg] = useState('');
+  const [isExtractingPassport, setIsExtractingPassport] = useState(false);
+  const [passportExtractFeedback, setPassportExtractFeedback] = useState<{
+    type: 'success' | 'info';
+    text: string;
+  } | null>(null);
   const walletFileInputRef = useRef<HTMLInputElement>(null);
 
   const syncFromStore = () => {
@@ -99,6 +106,7 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
       setVerifyError('');
       setVerifySuccessMsg('');
       setProfileSavedMsg('');
+      setPassportExtractFeedback(null);
     }
   }, [isOpen, lang]);
 
@@ -198,11 +206,100 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
     setTimeout(() => setProfileSavedMsg(''), 3000);
   };
 
+  const runAutoPassportExtraction = async (
+    phone: string,
+    base64: string,
+    mimeType: string
+  ) => {
+    setIsExtractingPassport(true);
+    setPassportExtractFeedback(null);
+    try {
+      const response = await fetch('/api/passport-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          visaType: preferredVisaType,
+          lang,
+        }),
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!response.ok || !contentType.includes('application/json')) {
+        setPassportExtractFeedback({
+          type: 'info',
+          text: t(
+            'تم حفظ صورة الجواز في محفظتك. يمكنك كتابة رقم جواز السفر يدوياً أعلاه إذا لم يتوفر المسح السحابي.',
+            'Passport image saved to your wallet. You can enter your passport number manually above if cloud OCR is offline.'
+          ),
+        });
+        return;
+      }
+
+      const data = (await response.json()) as { result?: PassportAiCheckResult };
+      const extracted = data.result;
+      if (!extracted) return;
+
+      const cleanPassportNo = (extracted.passportNumber || '').trim().toUpperCase();
+      const updates: Partial<TravelerProfile> = {};
+      if (cleanPassportNo) {
+        updates.passportNumber = cleanPassportNo;
+        setPassportNumber(cleanPassportNo);
+      }
+      if (extracted.fullName && extracted.fullName.trim()) {
+        updates.passportFullName = extracted.fullName.trim();
+        setPassportFullName(extracted.fullName.trim());
+      }
+      if (extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)) {
+        updates.passportExpiryDate = extracted.expiryDate;
+        setPassportExpiryDate(extracted.expiryDate);
+      }
+      if (extracted.nationality && extracted.nationality.trim()) {
+        updates.nationality = extracted.nationality.trim();
+        setNationality(extracted.nationality.trim());
+      }
+
+      if (Object.keys(updates).length > 0) {
+        updateTravelerProfileDetails(phone, updates);
+        syncFromStore();
+      }
+
+      if (cleanPassportNo) {
+        setPassportExtractFeedback({
+          type: 'success',
+          text: t(
+            `تم قراءة وتحديث رقم جواز السفر تلقائياً من الصورة: ${cleanPassportNo}`,
+            `Passport number auto-extracted & synced: ${cleanPassportNo}`
+          ),
+        });
+      } else {
+        setPassportExtractFeedback({
+          type: 'info',
+          text: t(
+            'تم حفظ صورة الجواز، ولم يظهر رقم الجواز بوضوح كافٍ. يرجى إدخاله يدوياً أو رفع صورة أوضح.',
+            'Passport image saved, but the passport number was not clearly legible. Please enter it manually or upload a clearer photo.'
+          ),
+        });
+      }
+    } catch {
+      setPassportExtractFeedback({
+        type: 'info',
+        text: t(
+          'تم حفظ صورة الجواز في محفظتك. يمكنك كتابة رقم الجواز يدوياً أعلاه.',
+          'Passport image saved to your wallet. You can type your passport number manually above.'
+        ),
+      });
+    } finally {
+      setIsExtractingPassport(false);
+    }
+  };
+
   const handleUploadWalletDoc = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !activeTraveler) return;
     try {
-      const compressed = await compressImageToDataUrl(file, 1000, 0.72);
+      const compressed = await compressImageToDataUrl(file, 1100, 0.76);
       addDocumentToTraveler(activeTraveler.phone, {
         label: docLabel.trim() || t('مستند مسافر', 'Traveler Document'),
         docType,
@@ -216,6 +313,14 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
         )
       );
       setTimeout(() => setProfileSavedMsg(''), 3000);
+
+      if (docType === 'passport') {
+        void runAutoPassportExtraction(
+          activeTraveler.phone,
+          compressed.base64,
+          compressed.mimeType
+        );
+      }
     } catch {
       setProfileSavedMsg(
         t(
@@ -491,13 +596,13 @@ I would like to proceed with my application. Thank you.`
                   </div>
                   <div>
                     <label className="block font-bold text-slate-600 mb-1">
-                      {t('رقم جواز السفر', 'Passport Number')}
+                      {t('رقم جواز السفر (اختياري — يتحدث تلقائياً عند رفع الجواز)', 'Passport Number (Optional — auto-fills on upload)')}
                     </label>
                     <input
                       type="text"
                       value={passportNumber}
-                      onChange={(e) => setPassportNumber(e.target.value)}
-                      placeholder="A12345678"
+                      onChange={(e) => setPassportNumber(e.target.value.toUpperCase())}
+                      placeholder={t('مثال: A12345678 (أو اتركه فارغاً)', 'e.g. A12345678 (or leave blank)')}
                       className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums uppercase"
                     />
                   </div>
@@ -599,6 +704,31 @@ I would like to proceed with my application. Thank you.`
                   </button>
                 </div>
 
+                {isExtractingPassport && (
+                  <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 text-xs font-bold text-sky-900 flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 text-[#0284C7] animate-spin shrink-0" />
+                    <span>
+                      {t(
+                        'جاري قراءة رقم جواز السفر والبيانات تلقائياً بالذكاء الاصطناعي...',
+                        'Auto-reading passport number & details via AI...'
+                      )}
+                    </span>
+                  </div>
+                )}
+
+                {passportExtractFeedback && !isExtractingPassport && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                      passportExtractFeedback.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}
+                  >
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span>{passportExtractFeedback.text}</span>
+                  </div>
+                )}
+
                 {profileSavedMsg && (
                   <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
                     {profileSavedMsg}
@@ -624,6 +754,26 @@ I would like to proceed with my application. Thank you.`
                           <span className="text-[11px] text-slate-400 block truncate">
                             {doc.fileName}
                           </span>
+                          {doc.docType === 'passport' && (
+                            <button
+                              type="button"
+                              disabled={isExtractingPassport}
+                              onClick={() => {
+                                const b64 = doc.dataUrl.includes(',')
+                                  ? doc.dataUrl.split(',')[1]
+                                  : doc.dataUrl;
+                                void runAutoPassportExtraction(
+                                  activeTraveler.phone,
+                                  b64,
+                                  'image/jpeg'
+                                );
+                              }}
+                              className="mt-1 text-[10.5px] font-bold text-[#0284C7] hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <Sparkles className="w-3 h-3" />
+                              <span>{t('تحديث رقم الجواز من الصورة', 'Extract Passport No.')}</span>
+                            </button>
+                          )}
                         </div>
                         <button
                           type="button"

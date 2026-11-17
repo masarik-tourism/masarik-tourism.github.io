@@ -30,18 +30,22 @@ import masarikLogoImg from '../assets/images/masarik_logo.jpg';
 import masarikHeroBgImg from '../assets/images/masarik_hero_bg.jpg';
 import { useLatestApkInfo, handleApkDownload, FAST_CDN_APK_URL } from '../hooks/useLatestApkUrl';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useSiteConfig } from '../utils/siteConfigStore';
 
 interface HomeScreenProps {
   onNavigateToServices: () => void;
   onNavigateToContact: (serviceTitle?: string) => void;
   onOpenTravelerProfile: () => void;
+  onSecretAdminTap?: () => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
   onNavigateToServices,
   onOpenTravelerProfile,
+  onSecretAdminTap,
 }) => {
   const { lang, isAr, t } = useLanguage();
+  const siteConfig = useSiteConfig();
   const localized = getLocalizedTravelContent(lang);
   const [logoError, setLogoError] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -113,8 +117,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         <div className="absolute inset-0 bg-gradient-to-t from-[#0A1926] via-[#0F2438]/65 to-black/35" />
 
         <div className="relative max-w-5xl mx-auto px-4 pt-8 pb-12 sm:pt-12 sm:pb-16 text-center flex flex-col items-center">
-          {/* Logo with verified seal */}
-          <div className="relative mb-4">
+          {/* Logo with verified seal (5 quick taps opens admin dashboard) */}
+          <div
+            onClick={onSecretAdminTap}
+            className="relative mb-4 select-none cursor-default"
+          >
             {!logoError ? (
               <img
                 src={masarikLogoImg}
@@ -142,10 +149,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               {t('مسارك للإنجاز السياحي', 'Masarik Tourism LLC')}
             </span>
             <span className="block text-sm sm:text-lg md:text-2xl font-medium text-[#E5C887] leading-snug max-w-2xl">
-              {t(
-                'منصتك لجميع إجراءات التأشيرات والسفر للسعودية',
-                'Your Trusted Portal for Saudi Visas, Tasheer & Global Travel'
-              )}
+              {isAr ? siteConfig.heroHighlightAr : siteConfig.heroHighlightEn}
             </span>
           </h1>
 

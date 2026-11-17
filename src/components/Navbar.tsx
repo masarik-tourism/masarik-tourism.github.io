@@ -10,12 +10,15 @@ import {
 } from '../utils/travelerStore';
 import { TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
+import { AnnouncementBanner } from './AnnouncementBanner';
+import { useSiteConfig } from '../utils/siteConfigStore';
 
 interface NavbarProps {
   currentTab: number;
   onSelectTab: (tab: number) => void;
   onSelectService?: (serviceTitle: string) => void;
   onOpenTravelerProfile: () => void;
+  onSecretAdminTap?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -23,8 +26,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectTab,
   onSelectService,
   onOpenTravelerProfile,
+  onSecretAdminTap,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
+  const siteConfig = useSiteConfig();
   const localized = getLocalizedTravelContent(lang);
   const [logoError, setLogoError] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -110,6 +115,9 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-xs">
+      {/* Live Admin Announcement Banner (shown when enabled) */}
+      <AnnouncementBanner />
+
       {/* Official Top Bar */}
       <div className="bg-[#0A1926] text-white px-3 sm:px-4 py-1.5 text-xs font-semibold flex justify-center items-center text-center border-b border-[#C6A052]/40">
         <div className="flex items-center justify-center gap-1.5 sm:gap-2">
@@ -128,7 +136,10 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-6xl mx-auto px-2.5 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-2">
         {/* Start Side: Company Logo + Full Non-Truncating Company Name */}
         <div
-          onClick={() => handleTabClick(0)}
+          onClick={() => {
+            onSecretAdminTap?.();
+            handleTabClick(0);
+          }}
           className="flex items-center gap-1.5 min-[390px]:gap-2 sm:gap-2.5 cursor-pointer select-none group shrink-0"
         >
           <div className="relative shrink-0">
@@ -282,7 +293,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={() => dialPhoneNumber()}
             className="pointer-events-auto w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#0F2438]/95 hover:bg-[#163B65] text-[#E5C887] border border-[#C6A052]/70 shadow-md backdrop-blur-md flex items-center justify-center transition-all active:scale-95 cursor-pointer"
-            title={t('اتصال هاتفي مباشر 01128440008', 'Call 01128440008')}
+            title={t(`اتصال هاتفي مباشر ${siteConfig.phoneNumber}`, `Call ${siteConfig.phoneNumber}`)}
             aria-label={t('اتصال هاتفي مباشر', 'Direct Phone Call')}
           >
             <Phone className="w-4 h-4" />
@@ -371,7 +382,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span>{t(`خدمة العملاء: ${TravelRepository.PHONE_NUMBER}`, `Support: ${TravelRepository.PHONE_NUMBER}`)}</span>
+            <span>{t(`خدمة العملاء: ${siteConfig.phoneNumber}`, `Support: ${siteConfig.phoneNumber}`)}</span>
             <span className="text-[#0284C7] font-semibold">{t('متاح 24 ساعة', 'Available 24/7')}</span>
           </div>
         </div>

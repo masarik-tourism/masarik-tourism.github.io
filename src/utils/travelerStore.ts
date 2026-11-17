@@ -1,9 +1,12 @@
 import { TravelerDocument, TravelerProfile, VisaOrderStatus } from '../types/travel';
 import { TravelRepository } from '../data/travelData';
 
+import { getSiteConfig } from './siteConfigStore';
+
 const TRAVELERS_STORAGE_KEY = 'masarik_travelers_v1';
 const ACTIVE_PHONE_STORAGE_KEY = 'masarik_active_phone_v1';
-const ADMIN_PIN_CODE = '7839';
+const ADMIN_PIN_STORAGE_KEY = 'masarik_admin_pin_v1';
+const DEFAULT_ADMIN_PIN = '202200';
 
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
 export const COMPANY_WHATSAPP_NUMBER = '201128440008';
@@ -325,13 +328,31 @@ export function updateTravelerProfileDetails(
   const existing = all[phone];
   if (!existing) return null;
 
+  const cleanUpdates = { ...updates };
+  if (typeof cleanUpdates.passportNumber === 'string') {
+    cleanUpdates.passportNumber = cleanUpdates.passportNumber.trim().toUpperCase();
+  }
+
   const updated: TravelerProfile = {
     ...existing,
-    ...updates,
+    ...cleanUpdates,
   };
   all[phone] = updated;
   saveAllTravelers(all);
   return updated;
+}
+
+export function deleteTravelerProfile(rawPhone: string): boolean {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  if (!all[phone]) return false;
+
+  delete all[phone];
+  saveAllTravelers(all);
+  if (getActivePhone() === phone) {
+    setActiveTravelerPhone(null);
+  }
+  return true;
 }
 
 export function addDocumentToTraveler(
@@ -375,8 +396,59 @@ export function removeDocumentFromTraveler(
   return updated;
 }
 
+export function getAdminPin(): string {
+  if (typeof window === 'undefined') return DEFAULT_ADMIN_PIN;
+  try {
+    const saved = window.localStorage.getItem(ADMIN_PIN_STORAGE_KEY);
+    if (saved && saved.trim().length >= 4) {
+      return saved.trim();
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return DEFAULT_ADMIN_PIN;
+}
+
 export function verifyAdminPin(pin: string): boolean {
-  return normalizeArabicDigits(pin).trim() === ADMIN_PIN_CODE;
+  return normalizeArabicDigits(pin).trim() === getAdminPin();
+}
+
+export function updateAdminPin(
+  currentPin: string,
+  newPin: string,
+  lang: 'ar' | 'en' = 'ar'
+): { ok: boolean; error?: string } {
+  if (!verifyAdminPin(currentPin)) {
+    return {
+      ok: false,
+      error: lang === 'en' ? 'Current Admin PIN is incorrect.' : 'الرمز السري الحالي غير صحيح.',
+    };
+  }
+  const cleanNew = normalizeArabicDigits(newPin).trim();
+  if (cleanNew.length < 4) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'New PIN must be at least 4 characters or digits.'
+          : 'يجب أن يتكون الرمز السري الجديد من 4 أرقام أو أحرف على الأقل.',
+    };
+  }
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(ADMIN_PIN_STORAGE_KEY, cleanNew);
+  }
+  return { ok: true };
+}
+
+export function exportAllDataBackupJson(): string {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    platform: 'Masarik Tourism LLC',
+    version: '1.0.0',
+    clients: Object.values(getAllTravelers()),
+    siteConfig: getSiteConfig(),
+  };
+  return JSON.stringify(payload, null, 2);
 }
 
 export async function compressImageToDataUrl(

@@ -285,6 +285,27 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
       if (data.result.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(data.result.expiryDate)) {
         setPassportExpiry(data.result.expiryDate);
       }
+
+      // Automatically sync extracted passport number & details to active traveler profile
+      const active = getActiveTraveler();
+      if (active) {
+        const autoUpdates: Record<string, string> = {};
+        if (data.result.passportNumber && data.result.passportNumber.trim()) {
+          autoUpdates.passportNumber = data.result.passportNumber.trim().toUpperCase();
+        }
+        if (data.result.fullName && data.result.fullName.trim()) {
+          autoUpdates.passportFullName = data.result.fullName.trim();
+        }
+        if (data.result.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(data.result.expiryDate)) {
+          autoUpdates.passportExpiryDate = data.result.expiryDate;
+        }
+        if (data.result.nationality && data.result.nationality.trim()) {
+          autoUpdates.nationality = data.result.nationality.trim();
+        }
+        if (Object.keys(autoUpdates).length > 0) {
+          updateTravelerProfileDetails(active.phone, autoUpdates);
+        }
+      }
     } catch {
       setStaticFallbackNote(
         t(
