@@ -15,10 +15,10 @@ import {
 } from 'lucide-react';
 import { PassportAiCheckResult } from '../types/travel';
 import {
-  addDocumentToTraveler,
   compressImageToDataUrl,
   getActiveTraveler,
   updateTravelerProfileDetails,
+  uploadAndAddDocumentToTraveler,
 } from '../utils/travelerStore';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
@@ -318,7 +318,7 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     }
   };
 
-  const handleSaveScanToWallet = () => {
+  const handleSaveScanToWallet = async () => {
     const active = getActiveTraveler();
     if (!active) {
       onOpenTravelerProfile();
@@ -336,7 +336,7 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     }
 
     if (compressedPayload) {
-      addDocumentToTraveler(active.phone, {
+      await uploadAndAddDocumentToTraveler(active.phone, {
         label: aiResult?.documentType || `${t('مستند', 'Document')} ${selectedVisaLabel}`,
         docType: 'passport',
         fileName: compressedPayload.fileName,
@@ -346,8 +346,8 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
 
     setSavedToWalletFeedback(
       t(
-        'تم حفظ بيانات المستند والصورة في محفظة المسافر بنجاح.',
-        'Document details and scan saved to your Traveler Wallet.'
+        'تم حفظ ورفع بيانات المستند والصورة سحابياً في محفظة المسافر بنجاح.',
+        'Document details and scan uploaded & saved to your Traveler Wallet.'
       )
     );
   };

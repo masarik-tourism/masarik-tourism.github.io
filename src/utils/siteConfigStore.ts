@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { TravelRepository } from '../data/travelData';
+import { OperationType, db, handleFirestoreError } from '../firebase';
 
 export type AnnouncementStyle = 'gold' | 'red' | 'green';
 
@@ -17,6 +19,7 @@ export interface SiteConfig {
 
 const SITE_CONFIG_STORAGE_KEY = 'masarik_site_config_v1';
 export const SITE_CONFIG_UPDATED_EVENT = 'masarik-site-config-updated';
+const SITE_GENERAL_DOC_PATH = 'site_config/general';
 
 export const DEFAULT_SITE_CONFIG: SiteConfig = {
   announcementEnabled: false,
@@ -34,6 +37,85 @@ function emitSiteConfigUpdate(): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(SITE_CONFIG_UPDATED_EVENT));
   }
+}
+
+function sanitizeSiteConfigPayload(cfg: SiteConfig) {
+  const style: AnnouncementStyle =
+    cfg.announcementStyle === 'red' || cfg.announcementStyle === 'green'
+      ? cfg.announcementStyle
+      : 'gold';
+
+  return {
+    announcementEnabled: Boolean(cfg.announcementEnabled),
+    announcementTextAr: String(cfg.announcementTextAr || '').slice(0, 500),
+    announcementTextEn: String(cfg.announcementTextEn || '').slice(0, 500),
+    announcementStyle: style,
+    phoneNumber: String(cfg.phoneNumber || TravelRepository.PHONE_NUMBER).slice(0, 40),
+    workingHoursAr: String(cfg.workingHoursAr || TravelRepository.WORKING_HOURS).slice(0, 200),
+    workingHoursEn: String(cfg.workingHoursEn || '').slice(0, 200),
+    heroHighlightAr: String(cfg.heroHighlightAr || '').slice(0, 500),
+    heroHighlightEn: String(cfg.heroHighlightEn || '').slice(0, 500),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function writeSiteConfigLocalOnly(next: SiteConfig): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(SITE_CONFIG_STORAGE_KEY, JSON.stringify(next));
+    emitSiteConfigUpdate();
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+async function syncSiteConfigToCloud(cfg: SiteConfig): Promise<void> {
+  const payload = sanitizeSiteConfigPayload(cfg);
+  try {
+    await setDoc(doc(db, 'site_config', 'general'), payload);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, SITE_GENERAL_DOC_PATH);
+    }
+    console.warn('Site config cloud sync deferred (offline/cache active):', msg);
+  }
+}
+
+export function subscribeSiteConfigCloud(): () => void {
+  const ref = doc(db, 'site_config', 'general');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as Partial<SiteConfig>;
+      const merged: SiteConfig = {
+        announcementEnabled:
+          typeof data.announcementEnabled === 'boolean'
+            ? data.announcementEnabled
+            : DEFAULT_SITE_CONFIG.announcementEnabled,
+        announcementTextAr: data.announcementTextAr ?? DEFAULT_SITE_CONFIG.announcementTextAr,
+        announcementTextEn: data.announcementTextEn ?? DEFAULT_SITE_CONFIG.announcementTextEn,
+        announcementStyle:
+          data.announcementStyle === 'red' || data.announcementStyle === 'green'
+            ? data.announcementStyle
+            : 'gold',
+        phoneNumber: data.phoneNumber ?? DEFAULT_SITE_CONFIG.phoneNumber,
+        workingHoursAr: data.workingHoursAr ?? DEFAULT_SITE_CONFIG.workingHoursAr,
+        workingHoursEn: data.workingHoursEn ?? DEFAULT_SITE_CONFIG.workingHoursEn,
+        heroHighlightAr: data.heroHighlightAr ?? DEFAULT_SITE_CONFIG.heroHighlightAr,
+        heroHighlightEn: data.heroHighlightEn ?? DEFAULT_SITE_CONFIG.heroHighlightEn,
+      };
+      writeSiteConfigLocalOnly(merged);
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, SITE_GENERAL_DOC_PATH);
+      }
+      console.warn('Site config cloud listener warning:', msg);
+    }
+  );
 }
 
 export function getSiteConfig(): SiteConfig {
@@ -56,14 +138,8 @@ export function saveSiteConfig(partial: Partial<SiteConfig>): SiteConfig {
     ...getSiteConfig(),
     ...partial,
   };
-  if (typeof window !== 'undefined') {
-    try {
-      window.localStorage.setItem(SITE_CONFIG_STORAGE_KEY, JSON.stringify(next));
-      emitSiteConfigUpdate();
-    } catch {
-      // Ignore quota errors
-    }
-  }
+  writeSiteConfigLocalOnly(next);
+  void syncSiteConfigToCloud(next);
   return next;
 }
 
@@ -76,6 +152,7 @@ export function resetSiteConfig(): SiteConfig {
       // Ignore errors
     }
   }
+  void syncSiteConfigToCloud(DEFAULT_SITE_CONFIG);
   return DEFAULT_SITE_CONFIG;
 }
 

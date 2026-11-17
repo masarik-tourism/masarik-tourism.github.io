@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, ShieldCheck, Compass, Menu, X, ChevronDown, RotateCw, UserCheck, Globe } from 'lucide-react';
+import { Phone, ShieldCheck, Compass, Menu, X, ChevronDown, RotateCw, UserCheck, Globe, Sparkles, LayoutDashboard, LogOut, Crown } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber } from '../utils/communication';
 import masarikLogoImg from '../assets/images/masarik_logo.jpg';
@@ -10,6 +10,7 @@ import {
 } from '../utils/travelerStore';
 import { TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAdmin } from '../contexts/AdminContext';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useSiteConfig } from '../utils/siteConfigStore';
 
@@ -29,6 +30,16 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSecretAdminTap,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
+  const {
+    session,
+    isAdminActive,
+    isSuperAdmin,
+    isDashboardMode,
+    isLiveEditorMode,
+    setAdminMode,
+    logoutAdmin,
+    hasPermission,
+  } = useAdmin();
   const siteConfig = useSiteConfig();
   const localized = getLocalizedTravelContent(lang);
   const [logoError, setLogoError] = useState(false);
@@ -96,12 +107,18 @@ export const Navbar: React.FC<NavbarProps> = ({
   ];
 
   const handleTabClick = (index: number) => {
+    if (isDashboardMode) {
+      setAdminMode('live_editor');
+    }
     onSelectTab(index);
     setMobileMenuOpen(false);
     setServicesDropdownOpen(false);
   };
 
   const handleServiceSelect = (title: string) => {
+    if (isDashboardMode) {
+      setAdminMode('live_editor');
+    }
     if (onSelectService) {
       onSelectService(title);
     }
@@ -242,25 +259,45 @@ export const Navbar: React.FC<NavbarProps> = ({
           })}
         </nav>
 
-        {/* End Side: User Account Pill Button + Hamburger Menu ONLY */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenTravelerProfile}
-            className="bg-[#C6A052]/15 hover:bg-[#C6A052]/25 text-[#0F2438] font-bold text-[clamp(0.7rem,2.8vw,0.85rem)] px-2.5 sm:px-3 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border border-[#C6A052]/60 leading-none"
-            title={t('حسابي - ملف المسافر', 'My Account - Traveler Profile')}
-          >
-            {activeTraveler?.verified ? (
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-            ) : (
-              <UserCheck className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
-            )}
-            <span>
-              {activeTraveler
-                ? travelerShortFullName
-                : t('حسابي', 'My Account')}
-            </span>
-          </button>
+        {/* End Side: Admin Role Badge (when active) OR Traveler Account Button + Hamburger Menu */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0" data-no-admin-edit="true">
+          {isAdminActive ? (
+            <button
+              type="button"
+              onClick={() => setAdminMode(isDashboardMode ? 'live_editor' : 'dashboard')}
+              className="bg-gradient-to-r from-[#0F2438] to-[#163B65] hover:brightness-110 text-[#E5C887] font-black text-[clamp(0.7rem,2.8vw,0.85rem)] px-2.5 sm:px-3.5 h-8 sm:h-9 rounded-full flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border-2 border-[#C6A052] shadow-sm leading-none"
+              title={
+                isSuperAdmin
+                  ? t('المدير العام — اضغط للتبديل', 'General Manager — Click to switch mode')
+                  : t('مدير مساعد — اضغط للتبديل', 'Sub-Admin — Click to switch mode')
+              }
+            >
+              <Crown className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
+              <span>
+                {isSuperAdmin
+                  ? t('المدير العام', 'General Manager')
+                  : t('مدير مساعد', 'Sub-Admin')}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpenTravelerProfile}
+              className="bg-[#C6A052]/15 hover:bg-[#C6A052]/25 text-[#0F2438] font-bold text-[clamp(0.7rem,2.8vw,0.85rem)] px-2.5 sm:px-3 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border border-[#C6A052]/60 leading-none"
+              title={t('حسابي - ملف المسافر', 'My Account - Traveler Profile')}
+            >
+              {activeTraveler?.verified ? (
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              ) : (
+                <UserCheck className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
+              )}
+              <span>
+                {activeTraveler
+                  ? travelerShortFullName
+                  : t('حسابي', 'My Account')}
+              </span>
+            </button>
+          )}
 
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -271,6 +308,66 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Active Admin Session Control Bar */}
+      {isAdminActive && session && (
+        <div
+          data-no-admin-edit="true"
+          className="bg-[#0F2438] text-white px-2.5 sm:px-4 py-1.5 border-t border-[#C6A052]/50"
+        >
+          <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2 text-[11px] sm:text-xs">
+            <div className="flex items-center gap-1.5 font-bold text-[#E5C887]">
+              <Crown className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate max-w-[160px] sm:max-w-xs">
+                {isSuperAdmin
+                  ? t('جلسة المدير العام نشطة', 'General Manager Session')
+                  : t(`مدير مساعد: ${session.name}`, `Sub-Admin: ${session.name}`)}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setAdminMode('dashboard')}
+                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
+                  isDashboardMode
+                    ? 'bg-[#C6A052] text-[#0A1926]'
+                    : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              >
+                <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />
+                <span>{t('لوحة الإدارة الشاملة', 'Full Admin Dashboard')}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAdminMode('live_editor')}
+                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
+                  isLiveEditorMode
+                    ? 'bg-[#C6A052] text-[#0A1926]'
+                    : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {hasPermission('edit_content')
+                    ? t('معاينة الموقع والتعديل المباشر', 'Live Site Editor')
+                    : t('معاينة الموقع', 'Preview Website')}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={logoutAdmin}
+                className="px-2.5 py-1 rounded-lg bg-red-600/90 hover:bg-red-600 text-white font-bold flex items-center gap-1 transition cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+                <span>{t('خروج من الإدارة', 'Logout')}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Floating Circular Quick-Action Buttons Stacked Under Hamburger Menu Position */}
       {!mobileMenuOpen && (

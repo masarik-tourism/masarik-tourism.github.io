@@ -1,0 +1,256 @@
+{
+  "entities": {
+    "ClientProfile": {
+      "title": "Traveler Client Profile",
+      "description": "Cloud-synced traveler account with OTP verification state, Visa/Tasheer order tracking, passport metadata, and Firebase Storage document references.",
+      "type": "object",
+      "properties": {
+        "phone": {
+          "type": "string",
+          "description": "Normalized WhatsApp phone digits serving as unique client key.",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Client full display name.",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "otp": {
+          "type": "string",
+          "description": "6-digit WhatsApp verification OTP.",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[0-9]{6}$"
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "Whether the client account has been verified."
+        },
+        "verifiedAt": {
+          "type": "string",
+          "description": "ISO timestamp when verification succeeded.",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp when profile was created.",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of latest profile modification.",
+          "maxLength": 64
+        },
+        "orderStatus": {
+          "type": "string",
+          "description": "Current processing stage for Visa or VFS Tasheer appointment.",
+          "enum": [
+            "تم استلام الأوراق",
+            "تم حجز موعد تساهيل",
+            "تحت المراجعة",
+            "صدرت التأشيرة"
+          ]
+        },
+        "adminNotes": {
+          "type": "string",
+          "description": "Client-visible note written by General Manager or Sub-Admin.",
+          "maxLength": 1000
+        },
+        "preferredVisaType": {
+          "type": "string",
+          "description": "Selected visa or service label.",
+          "maxLength": 200
+        },
+        "passportNumber": {
+          "type": "string",
+          "description": "Uppercase passport number (manual or AI OCR extracted).",
+          "maxLength": 40
+        },
+        "passportFullName": {
+          "type": "string",
+          "description": "Full name matching the passport MRZ/data page.",
+          "maxLength": 200
+        },
+        "passportExpiryDate": {
+          "type": "string",
+          "description": "Passport expiry date (YYYY-MM-DD).",
+          "maxLength": 32
+        },
+        "nationality": {
+          "type": "string",
+          "description": "Traveler nationality.",
+          "maxLength": 100
+        },
+        "documents": {
+          "type": "array",
+          "description": "Bounded list (max 30) of uploaded document metadata with Firebase Storage download URLs."
+        }
+      },
+      "required": [
+        "phone",
+        "name",
+        "otp",
+        "verified",
+        "createdAt",
+        "orderStatus",
+        "documents"
+      ]
+    },
+    "SiteGeneralConfig": {
+      "title": "Site General Configuration",
+      "description": "Global announcement banner, dynamic phone number, working hours, and hero highlight overrides.",
+      "type": "object",
+      "properties": {
+        "announcementEnabled": {
+          "type": "boolean",
+          "description": "Controls visibility of the top urgent announcement banner."
+        },
+        "announcementTextAr": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "announcementTextEn": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "announcementStyle": {
+          "type": "string",
+          "enum": ["gold", "red", "green"]
+        },
+        "phoneNumber": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "workingHoursAr": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "workingHoursEn": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "heroHighlightAr": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "heroHighlightEn": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "announcementEnabled",
+        "announcementTextAr",
+        "announcementTextEn",
+        "announcementStyle",
+        "phoneNumber",
+        "workingHoursAr",
+        "workingHoursEn",
+        "heroHighlightAr",
+        "heroHighlightEn"
+      ]
+    },
+    "SiteCmsState": {
+      "title": "Site Live Inline CMS State",
+      "description": "Live inline editor text overrides, deleted block keys, and dynamically added custom service cards.",
+      "type": "object",
+      "properties": {
+        "textOverrides": {
+          "type": "object",
+          "description": "Map of scoped language:key text overrides."
+        },
+        "deletedKeys": {
+          "type": "array",
+          "description": "Bounded list of soft-deleted editable block keys."
+        },
+        "customItems": {
+          "type": "array",
+          "description": "Bounded list of dynamically added CmsCustomItem cards."
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "textOverrides",
+        "deletedKeys",
+        "customItems"
+      ]
+    },
+    "AdminAccount": {
+      "title": "Admin & Sub-Admin Account",
+      "description": "Master General Manager PIN hash and Sub-Admin accounts with granular role permissions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "sub_admin"]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "pinHash": {
+          "type": "string",
+          "description": "SHA-256 hex digest of the admin PIN.",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "pin": {
+          "type": "string",
+          "description": "Optional Sub-Admin PIN display value.",
+          "maxLength": 32
+        },
+        "permissions": {
+          "type": "array",
+          "description": "Assigned granular admin permissions."
+        },
+        "createdAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "name",
+        "pinHash",
+        "permissions"
+      ]
+    }
+  },
+  "firestore": {
+    "/clients/{phoneId}": {
+      "schema": { "$ref": "#/entities/ClientProfile" },
+      "description": "Traveler profiles keyed by normalized WhatsApp phone digits."
+    },
+    "/site_config/{configId}": {
+      "schema": { "$ref": "#/entities/SiteGeneralConfig" },
+      "description": "Public site configuration documents ('general' for SiteGeneralConfig, 'cms' for SiteCmsState)."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminAccount" },
+      "description": "Master General Manager config ('master') and Sub-Admin permission accounts."
+    }
+  }
+}

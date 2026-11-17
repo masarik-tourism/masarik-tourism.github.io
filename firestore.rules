@@ -1,0 +1,236 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Shared Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPhoneId(phoneId) {
+      return phoneId is string && phoneId.size() >= 8 && phoneId.size() <= 20 && phoneId.matches('^[0-9]{8,20}$');
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // Validation Blueprint: ClientProfile (/clients/{phoneId})
+    function isValidClient(data, phoneId) {
+      return data.keys().hasAll([
+        'phone',
+        'name',
+        'otp',
+        'verified',
+        'createdAt',
+        'orderStatus',
+        'documents'
+      ])
+      && data.keys().hasOnly([
+        'phone',
+        'name',
+        'otp',
+        'verified',
+        'verifiedAt',
+        'createdAt',
+        'updatedAt',
+        'orderStatus',
+        'adminNotes',
+        'preferredVisaType',
+        'passportNumber',
+        'passportFullName',
+        'passportExpiryDate',
+        'nationality',
+        'documents'
+      ])
+      && data.phone is string
+      && data.phone == phoneId
+      && data.phone.matches('^[0-9]{8,20}$')
+      && data.name is string
+      && data.name.size() >= 1
+      && data.name.size() <= 160
+      && data.otp is string
+      && data.otp.matches('^[0-9]{6}$')
+      && data.verified is bool
+      && data.createdAt is string
+      && data.createdAt.size() >= 10
+      && data.createdAt.size() <= 64
+      && data.orderStatus is string
+      && data.orderStatus in [
+        'تم استلام الأوراق',
+        'تم حجز موعد تساهيل',
+        'تحت المراجعة',
+        'صدرت التأشيرة'
+      ]
+      && isOptionalString(data, 'verifiedAt', 64)
+      && isOptionalString(data, 'updatedAt', 64)
+      && isOptionalString(data, 'adminNotes', 1000)
+      && isOptionalString(data, 'preferredVisaType', 200)
+      && isOptionalString(data, 'passportNumber', 40)
+      && isOptionalString(data, 'passportFullName', 200)
+      && isOptionalString(data, 'passportExpiryDate', 32)
+      && isOptionalString(data, 'nationality', 100)
+      && data.documents is list
+      && data.documents.size() <= 30
+      && (
+        data.documents.size() == 0
+        || (
+          data.documents[0] is map
+          && data.documents[0].id is string
+          && data.documents[0].id.size() <= 80
+          && data.documents[0].dataUrl is string
+          && data.documents[0].dataUrl.size() <= 4096
+        )
+      );
+    }
+
+    // Validation Blueprint: SiteGeneralConfig (/site_config/general)
+    function isValidSiteGeneral(data) {
+      return data.keys().hasAll([
+        'announcementEnabled',
+        'announcementTextAr',
+        'announcementTextEn',
+        'announcementStyle',
+        'phoneNumber',
+        'workingHoursAr',
+        'workingHoursEn',
+        'heroHighlightAr',
+        'heroHighlightEn'
+      ])
+      && data.keys().hasOnly([
+        'announcementEnabled',
+        'announcementTextAr',
+        'announcementTextEn',
+        'announcementStyle',
+        'phoneNumber',
+        'workingHoursAr',
+        'workingHoursEn',
+        'heroHighlightAr',
+        'heroHighlightEn',
+        'updatedAt'
+      ])
+      && data.announcementEnabled is bool
+      && data.announcementTextAr is string && data.announcementTextAr.size() <= 500
+      && data.announcementTextEn is string && data.announcementTextEn.size() <= 500
+      && data.announcementStyle is string && data.announcementStyle in ['gold', 'red', 'green']
+      && data.phoneNumber is string && data.phoneNumber.size() <= 40
+      && data.workingHoursAr is string && data.workingHoursAr.size() <= 200
+      && data.workingHoursEn is string && data.workingHoursEn.size() <= 200
+      && data.heroHighlightAr is string && data.heroHighlightAr.size() <= 500
+      && data.heroHighlightEn is string && data.heroHighlightEn.size() <= 500
+      && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    // Validation Blueprint: SiteCmsState (/site_config/cms)
+    function isValidSiteCms(data) {
+      return data.keys().hasAll(['textOverrides', 'deletedKeys', 'customItems'])
+      && data.keys().hasOnly(['textOverrides', 'deletedKeys', 'customItems', 'updatedAt'])
+      && data.textOverrides is map
+      && data.textOverrides.size() <= 500
+      && data.deletedKeys is list
+      && data.deletedKeys.size() <= 200
+      && (data.deletedKeys.size() == 0 || (data.deletedKeys[0] is string && data.deletedKeys[0].size() <= 200))
+      && data.customItems is list
+      && data.customItems.size() <= 100
+      && (data.customItems.size() == 0 || (data.customItems[0] is map && data.customItems[0].id is string && data.customItems[0].id.size() <= 80))
+      && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    // Validation Blueprint: AdminAccount (/admins/{adminId})
+    function isValidAdminAccount(data, adminId) {
+      return data.keys().hasAll(['id', 'role', 'name', 'pinHash', 'permissions'])
+      && data.keys().hasOnly(['id', 'role', 'name', 'pinHash', 'pin', 'permissions', 'createdAt', 'updatedAt'])
+      && data.id is string
+      && data.id == adminId
+      && isValidId(data.id)
+      && data.role is string
+      && data.role in ['super_admin', 'sub_admin']
+      && data.name is string
+      && data.name.size() >= 1
+      && data.name.size() <= 120
+      && data.pinHash is string
+      && data.pinHash.matches('^[a-f0-9]{64}$')
+      && isOptionalString(data, 'pin', 32)
+      && isOptionalString(data, 'createdAt', 64)
+      && isOptionalString(data, 'updatedAt', 64)
+      && data.permissions is list
+      && data.permissions.size() <= 10
+      && (data.permissions.size() == 0 || data.permissions[0] is string);
+    }
+
+    // Startup Connectivity Check (/test/connection)
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+    }
+
+    // Traveler Clients Collection
+    match /clients/{phoneId} {
+      allow get: if isValidPhoneId(phoneId);
+      allow list: if resource.data.verified in [true, false];
+      allow create: if isValidPhoneId(phoneId) && isValidClient(incoming(), phoneId);
+      allow update: if isValidPhoneId(phoneId)
+        && isValidClient(incoming(), phoneId)
+        && incoming().phone == existing().phone
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'otp',
+          'verified',
+          'verifiedAt',
+          'updatedAt',
+          'orderStatus',
+          'adminNotes',
+          'preferredVisaType',
+          'passportNumber',
+          'passportFullName',
+          'passportExpiryDate',
+          'nationality',
+          'documents'
+        ]);
+      allow delete: if isValidPhoneId(phoneId) && resource != null;
+    }
+
+    // Public Site Configuration & Live Inline CMS
+    match /site_config/{configId} {
+      allow get: if configId in ['general', 'cms'];
+      allow list: if resource.data.updatedAt is string;
+      allow create, update: if (
+        (configId == 'general' && isValidSiteGeneral(incoming()))
+        || (configId == 'cms' && isValidSiteCms(incoming()))
+      );
+      allow delete: if false;
+    }
+
+    // Admin & Sub-Admin Accounts
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId);
+      allow list: if resource.data.role in ['super_admin', 'sub_admin'];
+      allow create: if isValidId(adminId) && isValidAdminAccount(incoming(), adminId);
+      allow update: if isValidId(adminId)
+        && isValidAdminAccount(incoming(), adminId)
+        && incoming().id == existing().id
+        && incoming().role == existing().role
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'pinHash',
+          'pin',
+          'permissions',
+          'updatedAt'
+        ]);
+      allow delete: if isValidId(adminId) && adminId != 'master' && resource != null;
+    }
+  }
+}

@@ -1,11 +1,28 @@
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 import { TravelerDocument, TravelerProfile, VisaOrderStatus } from '../types/travel';
 import { TravelRepository } from '../data/travelData';
-
+import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
+import {
+  deleteTravelerDocumentFromStorage,
+  uploadTravelerDocumentToStorage,
+} from './firebaseStorageHelper';
 import { getSiteConfig } from './siteConfigStore';
+import { getCmsState } from './cmsStore';
 
 const TRAVELERS_STORAGE_KEY = 'masarik_travelers_v1';
 const ACTIVE_PHONE_STORAGE_KEY = 'masarik_active_phone_v1';
 const ADMIN_PIN_STORAGE_KEY = 'masarik_admin_pin_v1';
+const ADMIN_PIN_HASH_STORAGE_KEY = 'masarik_admin_pin_hash_v1';
 const DEFAULT_ADMIN_PIN = '202200';
 
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
@@ -142,7 +159,7 @@ export function getAllTravelers(): Record<string, TravelerProfile> {
   }
 }
 
-function saveAllTravelers(map: Record<string, TravelerProfile>): void {
+function saveAllTravelersLocalOnly(map: Record<string, TravelerProfile>): void {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(TRAVELERS_STORAGE_KEY, JSON.stringify(map));
@@ -150,6 +167,155 @@ function saveAllTravelers(map: Record<string, TravelerProfile>): void {
   } catch {
     // Handle storage quota gracefully if needed
   }
+}
+
+function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, unknown> {
+  const safeStatus: VisaOrderStatus = VISA_ORDER_STATUSES.includes(profile.orderStatus)
+    ? profile.orderStatus
+    : 'تم استلام الأوراق';
+
+  const safeOtp = /^\d{6}$/.test(String(profile.otp || ''))
+    ? String(profile.otp)
+    : generateSixDigitOtp();
+
+  const safeDocs = Array.isArray(profile.documents)
+    ? profile.documents.slice(0, 30).map((d) => ({
+        id: String(d.id || `${Date.now()}`).slice(0, 80),
+        label: String(d.label || 'مستند مسافر').slice(0, 160),
+        docType: d.docType || 'other',
+        fileName: String(d.fileName || 'document.jpg').slice(0, 200),
+        // Never push multi-KB raw base64 blobs into Firestore; store Storage URLs only
+        dataUrl: d.dataUrl && d.dataUrl.length <= 4096 ? d.dataUrl : '',
+        ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
+        uploadedAt: String(d.uploadedAt || new Date().toISOString()).slice(0, 64),
+      }))
+    : [];
+
+  const payload: Record<string, unknown> = {
+    phone: normalizePhone(profile.phone).slice(0, 20),
+    name: String(profile.name || 'مسافر').trim().slice(0, 160) || 'مسافر',
+    otp: safeOtp,
+    verified: Boolean(profile.verified),
+    createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
+    updatedAt: new Date().toISOString(),
+    orderStatus: safeStatus,
+    documents: safeDocs,
+  };
+
+  if (profile.verifiedAt) payload.verifiedAt = String(profile.verifiedAt).slice(0, 64);
+  if (profile.adminNotes !== undefined) payload.adminNotes = String(profile.adminNotes).slice(0, 1000);
+  if (profile.preferredVisaType !== undefined)
+    payload.preferredVisaType = String(profile.preferredVisaType).slice(0, 200);
+  if (profile.passportNumber !== undefined)
+    payload.passportNumber = String(profile.passportNumber).trim().toUpperCase().slice(0, 40);
+  if (profile.passportFullName !== undefined)
+    payload.passportFullName = String(profile.passportFullName).slice(0, 200);
+  if (profile.passportExpiryDate !== undefined)
+    payload.passportExpiryDate = String(profile.passportExpiryDate).slice(0, 32);
+  if (profile.nationality !== undefined)
+    payload.nationality = String(profile.nationality).slice(0, 100);
+
+  return payload;
+}
+
+function mergeCloudClientWithLocal(
+  cloudData: TravelerProfile,
+  localExisting?: TravelerProfile
+): TravelerProfile {
+  const localDocsById = new Map<string, TravelerDocument>();
+  if (localExisting?.documents) {
+    localExisting.documents.forEach((d) => localDocsById.set(d.id, d));
+  }
+
+  const mergedDocs: TravelerDocument[] = Array.isArray(cloudData.documents)
+    ? cloudData.documents.map((d) => {
+        const localDoc = localDocsById.get(d.id);
+        return {
+          ...d,
+          dataUrl: d.dataUrl || localDoc?.dataUrl || '',
+        };
+      })
+    : localExisting?.documents || [];
+
+  return {
+    ...cloudData,
+    documents: mergedDocs,
+  };
+}
+
+export async function syncTravelerToCloud(profile: TravelerProfile): Promise<void> {
+  const phone = normalizePhone(profile.phone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return;
+
+  const path = `clients/${phone}`;
+  const payload = sanitizeClientForFirestore({ ...profile, phone });
+  try {
+    await setDoc(doc(db, 'clients', phone), payload);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+    console.warn('Client cloud sync deferred (offline/cache active):', msg);
+  }
+}
+
+export function subscribeActiveTravelerCloud(phone: string | null): () => void {
+  const normalized = phone ? normalizePhone(phone) : '';
+  if (!/^[0-9]{8,20}$/.test(normalized)) {
+    return () => {};
+  }
+
+  const path = `clients/${normalized}`;
+  return onSnapshot(
+    doc(db, 'clients', normalized),
+    (snap) => {
+      if (!snap.exists()) return;
+      const cloudProfile = snap.data() as TravelerProfile;
+      const all = getAllTravelers();
+      all[normalized] = mergeCloudClientWithLocal(cloudProfile, all[normalized]);
+      saveAllTravelersLocalOnly(all);
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
+      console.warn('Active traveler listener warning:', msg);
+    }
+  );
+}
+
+export function subscribeAllClientsCloud(): () => void {
+  const path = 'clients';
+  const clientsQuery = query(
+    collection(db, 'clients'),
+    where('verified', 'in', [true, false])
+  );
+  return onSnapshot(
+    clientsQuery,
+    (snapshot) => {
+      const currentLocal = getAllTravelers();
+      const nextMap: Record<string, TravelerProfile> = {};
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as TravelerProfile;
+        const key = normalizePhone(data.phone || docSnap.id);
+        if (key) {
+          nextMap[key] = mergeCloudClientWithLocal({ ...data, phone: key }, currentLocal[key]);
+        }
+      });
+
+      saveAllTravelersLocalOnly(nextMap);
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.LIST, path);
+      }
+      console.warn('Clients collection listener warning:', msg);
+    }
+  );
 }
 
 export function getActivePhone(): string | null {
@@ -187,8 +353,9 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
       otp: existing.verified ? existing.otp : existing.otp || generateSixDigitOtp(),
     };
     all[phone] = updated;
-    saveAllTravelers(all);
+    saveAllTravelersLocalOnly(all);
     setActiveTravelerPhone(phone);
+    void syncTravelerToCloud(updated);
     return updated;
   }
 
@@ -202,9 +369,49 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     documents: [],
   };
   all[phone] = created;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
   setActiveTravelerPhone(phone);
+  void syncTravelerToCloud(created);
   return created;
+}
+
+export async function registerOrLoginTravelerCloud(
+  name: string,
+  rawPhone: string
+): Promise<TravelerProfile> {
+  const phone = normalizePhone(rawPhone);
+  const cleanName = name.trim();
+  const path = `clients/${phone}`;
+
+  try {
+    if (/^[0-9]{8,20}$/.test(phone)) {
+      const snap = await getDoc(doc(db, 'clients', phone));
+      if (snap.exists()) {
+        const cloud = snap.data() as TravelerProfile;
+        const all = getAllTravelers();
+        const merged: TravelerProfile = {
+          ...mergeCloudClientWithLocal(cloud, all[phone]),
+          name: cleanName || cloud.name,
+          otp: cloud.verified ? cloud.otp : cloud.otp || generateSixDigitOtp(),
+        };
+        all[phone] = merged;
+        saveAllTravelersLocalOnly(all);
+        setActiveTravelerPhone(phone);
+        if (cleanName && cleanName !== cloud.name) {
+          await syncTravelerToCloud(merged);
+        }
+        return merged;
+      }
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+    console.warn('Cloud lookup skipped (offline fallback):', msg);
+  }
+
+  return registerOrLoginTraveler(name, rawPhone);
 }
 
 export function verifyManualOtp(
@@ -252,8 +459,9 @@ export function verifyManualOtp(
     verifiedAt: new Date().toISOString(),
   };
   all[phone] = verifiedProfile;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
   setActiveTravelerPhone(phone);
+  void syncTravelerToCloud(verifiedProfile);
   return { ok: true, profile: verifiedProfile };
 }
 
@@ -283,12 +491,12 @@ export function activateViaMagicLink(
       verifiedAt: existing.verifiedAt || new Date().toISOString(),
     };
     all[phone] = updated;
-    saveAllTravelers(all);
+    saveAllTravelersLocalOnly(all);
     setActiveTravelerPhone(phone);
+    void syncTravelerToCloud(updated);
     return { ok: true, profile: updated };
   }
 
-  // If opened from WhatsApp on a fresh browser session / WebView, restore & verify profile
   const restored: TravelerProfile = {
     phone,
     name: nameFromUrl?.trim() || `مسافر (${formatPhoneForDisplay(phone)})`,
@@ -300,9 +508,56 @@ export function activateViaMagicLink(
     documents: [],
   };
   all[phone] = restored;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
   setActiveTravelerPhone(phone);
+  void syncTravelerToCloud(restored);
   return { ok: true, profile: restored };
+}
+
+export async function activateViaMagicLinkCloud(
+  rawPhone: string,
+  rawOtp: string,
+  nameFromUrl?: string | null
+): Promise<{ ok: boolean; error?: string; profile?: TravelerProfile }> {
+  const phone = normalizePhone(rawPhone);
+  const cleanOtp = normalizeArabicDigits(rawOtp).replace(/\D/g, '');
+
+  if (!phone || cleanOtp.length !== 6) {
+    return { ok: false, error: 'رابط التفعيل غير مكتمل أو يحتوي على كود غير صالح.' };
+  }
+
+  const path = `clients/${phone}`;
+  try {
+    if (/^[0-9]{8,20}$/.test(phone)) {
+      const snap = await getDoc(doc(db, 'clients', phone));
+      if (snap.exists()) {
+        const cloud = snap.data() as TravelerProfile;
+        if (cloud.otp !== cleanOtp) {
+          return { ok: false, error: 'كود التفعيل في الرابط غير مطابق لهذا الحساب.' };
+        }
+        const updated: TravelerProfile = {
+          ...mergeCloudClientWithLocal(cloud, getAllTravelers()[phone]),
+          name: nameFromUrl?.trim() || cloud.name,
+          verified: true,
+          verifiedAt: cloud.verifiedAt || new Date().toISOString(),
+        };
+        const all = getAllTravelers();
+        all[phone] = updated;
+        saveAllTravelersLocalOnly(all);
+        setActiveTravelerPhone(phone);
+        await syncTravelerToCloud(updated);
+        return { ok: true, profile: updated };
+      }
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+    console.warn('Cloud magic-link lookup deferred:', msg);
+  }
+
+  return activateViaMagicLink(rawPhone, rawOtp, nameFromUrl);
 }
 
 export function updateTravelerProfileDetails(
@@ -338,26 +593,48 @@ export function updateTravelerProfileDetails(
     ...cleanUpdates,
   };
   all[phone] = updated;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
+  void syncTravelerToCloud(updated);
   return updated;
 }
 
 export function deleteTravelerProfile(rawPhone: string): boolean {
   const phone = normalizePhone(rawPhone);
   const all = getAllTravelers();
-  if (!all[phone]) return false;
+  const existing = all[phone];
+  if (!existing) return false;
 
+  const docs = existing.documents || [];
   delete all[phone];
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
   if (getActivePhone() === phone) {
     setActiveTravelerPhone(null);
   }
+
+  // Cleanup Storage assets + Firestore document
+  docs.forEach((d) => {
+    if (d.storagePath) {
+      void deleteTravelerDocumentFromStorage(d.storagePath);
+    }
+  });
+
+  if (/^[0-9]{8,20}$/.test(phone)) {
+    const path = `clients/${phone}`;
+    void deleteDoc(doc(db, 'clients', phone)).catch((error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.DELETE, path);
+      }
+      console.warn('Cloud delete client deferred:', msg);
+    });
+  }
+
   return true;
 }
 
 export function addDocumentToTraveler(
   rawPhone: string,
-  doc: Omit<TravelerDocument, 'id' | 'uploadedAt'>
+  docInput: Omit<TravelerDocument, 'id' | 'uploadedAt'>
 ): TravelerProfile | null {
   const phone = normalizePhone(rawPhone);
   const all = getAllTravelers();
@@ -365,7 +642,7 @@ export function addDocumentToTraveler(
   if (!existing) return null;
 
   const newDoc: TravelerDocument = {
-    ...doc,
+    ...docInput,
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     uploadedAt: new Date().toISOString(),
   };
@@ -374,7 +651,43 @@ export function addDocumentToTraveler(
     documents: [newDoc, ...(existing.documents || [])],
   };
   all[phone] = updated;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
+  void syncTravelerToCloud(updated);
+  return updated;
+}
+
+export async function uploadAndAddDocumentToTraveler(
+  rawPhone: string,
+  docInput: Omit<TravelerDocument, 'id' | 'uploadedAt' | 'storagePath'>
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const uploaded = await uploadTravelerDocumentToStorage(phone, docId, docInput.dataUrl);
+
+  const newDoc: TravelerDocument = {
+    id: docId,
+    label: docInput.label,
+    docType: docInput.docType,
+    fileName: docInput.fileName,
+    dataUrl: uploaded ? uploaded.downloadUrl : docInput.dataUrl,
+    ...(uploaded ? { storagePath: uploaded.storagePath } : {}),
+    uploadedAt: new Date().toISOString(),
+  };
+
+  // Re-read latest map in case snapshot updated while uploading
+  const latestAll = getAllTravelers();
+  const latestExisting = latestAll[phone] || existing;
+  const updated: TravelerProfile = {
+    ...latestExisting,
+    documents: [newDoc, ...(latestExisting.documents || [])],
+  };
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
   return updated;
 }
 
@@ -387,12 +700,18 @@ export function removeDocumentFromTraveler(
   const existing = all[phone];
   if (!existing) return null;
 
+  const target = (existing.documents || []).find((d) => d.id === docId);
+  if (target?.storagePath) {
+    void deleteTravelerDocumentFromStorage(target.storagePath);
+  }
+
   const updated: TravelerProfile = {
     ...existing,
     documents: (existing.documents || []).filter((d) => d.id !== docId),
   };
   all[phone] = updated;
-  saveAllTravelers(all);
+  saveAllTravelersLocalOnly(all);
+  void syncTravelerToCloud(updated);
   return updated;
 }
 
@@ -409,8 +728,34 @@ export function getAdminPin(): string {
   return DEFAULT_ADMIN_PIN;
 }
 
+export function getMasterAdminPinHash(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const savedHash = window.localStorage.getItem(ADMIN_PIN_HASH_STORAGE_KEY);
+      if (savedHash && /^[a-f0-9]{64}$/.test(savedHash)) {
+        return savedHash;
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
+  return sha256Hex(getAdminPin());
+}
+
+export function setSyncedMasterPinHash(pinHash: string): void {
+  if (typeof window === 'undefined') return;
+  if (!/^[a-f0-9]{64}$/.test(pinHash)) return;
+  try {
+    window.localStorage.setItem(ADMIN_PIN_HASH_STORAGE_KEY, pinHash);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export function verifyAdminPin(pin: string): boolean {
-  return normalizeArabicDigits(pin).trim() === getAdminPin();
+  const clean = normalizeArabicDigits(pin).trim();
+  if (!clean) return false;
+  return sha256Hex(clean) === getMasterAdminPinHash();
 }
 
 export function updateAdminPin(
@@ -434,9 +779,44 @@ export function updateAdminPin(
           : 'يجب أن يتكون الرمز السري الجديد من 4 أرقام أو أحرف على الأقل.',
     };
   }
+  const nextHash = sha256Hex(cleanNew);
   if (typeof window !== 'undefined') {
     window.localStorage.setItem(ADMIN_PIN_STORAGE_KEY, cleanNew);
+    window.localStorage.setItem(ADMIN_PIN_HASH_STORAGE_KEY, nextHash);
   }
+
+  const path = 'admins/master';
+  void updateDoc(doc(db, 'admins', 'master'), {
+    pinHash: nextHash,
+    updatedAt: new Date().toISOString(),
+  }).catch(async (error) => {
+    const code = (error as { code?: string })?.code;
+    if (code === 'not-found') {
+      try {
+        await setDoc(doc(db, 'admins', 'master'), {
+          id: 'master',
+          role: 'super_admin',
+          name: 'المدير العام',
+          pinHash: nextHash,
+          permissions: ['manage_clients', 'activate_otp', 'edit_content', 'delete_records'],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        return;
+      } catch (innerErr) {
+        const innerMsg = innerErr instanceof Error ? innerErr.message : String(innerErr);
+        if (innerMsg.toLowerCase().includes('permission')) {
+          handleFirestoreError(innerErr, OperationType.WRITE, path);
+        }
+      }
+    }
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+    console.warn('Master PIN cloud sync deferred:', msg);
+  });
+
   return { ok: true };
 }
 
@@ -447,6 +827,7 @@ export function exportAllDataBackupJson(): string {
     version: '1.0.0',
     clients: Object.values(getAllTravelers()),
     siteConfig: getSiteConfig(),
+    cmsData: getCmsState(),
   };
   return JSON.stringify(payload, null, 2);
 }

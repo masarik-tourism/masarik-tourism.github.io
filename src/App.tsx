@@ -12,66 +12,120 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
 import { InAppVersionBanner } from './components/InAppVersionBanner';
 import { TravelerProfileModal } from './components/TravelerProfileModal';
-import { AdminDashboardModal } from './components/AdminDashboardModal';
-import { activateViaMagicLink } from './utils/travelerStore';
+import { AdminLoginModal } from './components/AdminLoginModal';
+import { AdminDashboardWorkspace } from './components/AdminDashboardWorkspace';
+import { LiveInlineEditorEngine } from './components/LiveInlineEditorEngine';
+import {
+  TRAVELERS_UPDATED_EVENT,
+  activateViaMagicLinkCloud,
+  getActivePhone,
+  subscribeActiveTravelerCloud,
+  subscribeAllClientsCloud,
+} from './utils/travelerStore';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
-import { useSiteConfig } from './utils/siteConfigStore';
+import { subscribeSiteConfigCloud, useSiteConfig } from './utils/siteConfigStore';
+import { subscribeCmsCloud } from './utils/cmsStore';
+import { subscribeAdminsCloud } from './utils/adminAuthStore';
+import { useAdmin } from './contexts/AdminContext';
 
 export const App: React.FC = () => {
   const { lang, dir, t } = useLanguage();
   const siteConfig = useSiteConfig();
+  const { isDashboardMode, openAdminLoginModal, isAdminActive, setAdminMode } = useAdmin();
   const localized = getLocalizedTravelContent(lang);
 
   const [currentTab, setCurrentTab] = useState<number>(0);
   const [selectedServiceForContact, setSelectedServiceForContact] = useState<string | null>(null);
   const [travelerModalOpen, setTravelerModalOpen] = useState<boolean>(false);
   const [magicLinkFeedback, setMagicLinkFeedback] = useState<string | null>(null);
-  const [adminModalOpen, setAdminModalOpen] = useState<boolean>(false);
+  const [activeTravelerPhone, setActiveTravelerPhoneState] = useState<string | null>(() =>
+    getActivePhone()
+  );
   const adminTapCountRef = useRef<number>(0);
   const adminTapTimerRef = useRef<number | null>(null);
 
+  // Global real-time cloud subscriptions (site_config, cms, admins)
   useEffect(() => {
-    try {
-      const url = new URL(window.location.href);
-      const adminParam = url.searchParams.get('admin');
-      if (adminParam === '1') {
-        setAdminModalOpen(true);
-        url.searchParams.delete('admin');
-        window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
-      }
+    const unsubConfig = subscribeSiteConfigCloud();
+    const unsubCms = subscribeCmsCloud();
+    const unsubAdmins = subscribeAdminsCloud();
+    const syncActivePhone = () => setActiveTravelerPhoneState(getActivePhone());
+    window.addEventListener(TRAVELERS_UPDATED_EVENT, syncActivePhone);
+    return () => {
+      unsubConfig();
+      unsubCms();
+      unsubAdmins();
+      window.removeEventListener(TRAVELERS_UPDATED_EVENT, syncActivePhone);
+    };
+  }, []);
 
-      const activatePhone = url.searchParams.get('activate_phone');
-      const otp = url.searchParams.get('otp');
-      const nameParam = url.searchParams.get('name');
+  // Real-time cloud subscription for currently signed-in traveler
+  useEffect(() => {
+    if (!activeTravelerPhone) return;
+    return subscribeActiveTravelerCloud(activeTravelerPhone);
+  }, [activeTravelerPhone]);
 
-      if (activatePhone && otp) {
-        const res = activateViaMagicLink(activatePhone, otp, nameParam);
-        if (res.ok && res.profile) {
-          setMagicLinkFeedback(
-            t(
-              `تم تفعيل حسابك (${res.profile.name}) بنجاح وتوثيقه عبر رابط الواتساب المباشر!`,
-              `Your account (${res.profile.name}) has been verified ✓ via your WhatsApp activation link!`
-            )
-          );
-          setTravelerModalOpen(true);
-        } else {
-          setMagicLinkFeedback(
-            res.error || t('رابط التفعيل غير صالح.', 'Invalid activation link.')
-          );
-          setTravelerModalOpen(true);
+  // Real-time cloud subscription for all clients when Admin/Sub-Admin session is active
+  useEffect(() => {
+    if (!isAdminActive) return;
+    return subscribeAllClientsCloud();
+  }, [isAdminActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const handleUrlActions = async () => {
+      try {
+        const url = new URL(window.location.href);
+        const adminParam = url.searchParams.get('admin');
+        if (adminParam === '1') {
+          if (isAdminActive) {
+            setAdminMode('dashboard');
+          } else {
+            openAdminLoginModal();
+          }
+          url.searchParams.delete('admin');
+          window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
         }
 
-        url.searchParams.delete('activate_phone');
-        url.searchParams.delete('otp');
-        url.searchParams.delete('name');
-        window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+        const activatePhone = url.searchParams.get('activate_phone');
+        const otp = url.searchParams.get('otp');
+        const nameParam = url.searchParams.get('name');
+
+        if (activatePhone && otp) {
+          url.searchParams.delete('activate_phone');
+          url.searchParams.delete('otp');
+          url.searchParams.delete('name');
+          window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+
+          const res = await activateViaMagicLinkCloud(activatePhone, otp, nameParam);
+          if (cancelled) return;
+          if (res.ok && res.profile) {
+            setMagicLinkFeedback(
+              t(
+                `تم تفعيل حسابك (${res.profile.name}) بنجاح وتوثيقه عبر رابط الواتساب المباشر!`,
+                `Your account (${res.profile.name}) has been verified ✓ via your WhatsApp activation link!`
+              )
+            );
+            setTravelerModalOpen(true);
+          } else {
+            setMagicLinkFeedback(
+              res.error || t('رابط التفعيل غير صالح.', 'Invalid activation link.')
+            );
+            setTravelerModalOpen(true);
+          }
+        }
+      } catch {
+        // Ignore malformed URLs
       }
-    } catch {
-      // Ignore malformed URLs
-    }
-  }, [lang]);
+    };
+
+    void handleUrlActions();
+    return () => {
+      cancelled = true;
+    };
+  }, [lang, isAdminActive, openAdminLoginModal, setAdminMode]);
 
   const handleSecretAdminTap = () => {
     adminTapCountRef.current += 1;
@@ -80,7 +134,11 @@ export const App: React.FC = () => {
     }
     if (adminTapCountRef.current >= 5) {
       adminTapCountRef.current = 0;
-      setAdminModalOpen(true);
+      if (isAdminActive) {
+        setAdminMode('dashboard');
+      } else {
+        openAdminLoginModal();
+      }
       return;
     }
     adminTapTimerRef.current = window.setTimeout(() => {
@@ -117,6 +175,8 @@ export const App: React.FC = () => {
 
   return (
     <div
+      id="masarik-site-viewport"
+      key={lang}
       dir={dir}
       className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F2438] selection:bg-[#0284C7]/20"
     >
@@ -129,26 +189,32 @@ export const App: React.FC = () => {
         onSecretAdminTap={handleSecretAdminTap}
       />
 
-      {/* Main Content Viewport */}
-      <main className="flex-1">
-        {currentTab === 0 && (
-          <HomeScreen
-            onNavigateToServices={() => handleSelectTab(1)}
-            onNavigateToContact={handleNavigateToContact}
-            onOpenTravelerProfile={() => setTravelerModalOpen(true)}
-            onSecretAdminTap={handleSecretAdminTap}
-          />
-        )}
-        {currentTab === 1 && (
-          <ServicesScreen onNavigateToContact={handleNavigateToContact} />
-        )}
-        {currentTab === 2 && (
-          <PaymentScreen onNavigateToContact={() => handleSelectTab(3)} />
-        )}
-        {currentTab === 3 && (
-          <ContactScreen initialService={selectedServiceForContact} />
-        )}
-      </main>
+      {/* Full-Page Admin Workspace OR Live Site Viewport */}
+      {isDashboardMode ? (
+        <main className="flex-1" data-no-admin-edit="true">
+          <AdminDashboardWorkspace />
+        </main>
+      ) : (
+        <main className="flex-1">
+          {currentTab === 0 && (
+            <HomeScreen
+              onNavigateToServices={() => handleSelectTab(1)}
+              onNavigateToContact={handleNavigateToContact}
+              onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+              onSecretAdminTap={handleSecretAdminTap}
+            />
+          )}
+          {currentTab === 1 && (
+            <ServicesScreen onNavigateToContact={handleNavigateToContact} />
+          )}
+          {currentTab === 2 && (
+            <PaymentScreen onNavigateToContact={() => handleSelectTab(3)} />
+          )}
+          {currentTab === 3 && (
+            <ContactScreen initialService={selectedServiceForContact} />
+          )}
+        </main>
+      )}
 
       {/* Professional Portal Footer */}
       <footer className="bg-[#0A1926] text-white pt-12 pb-24 md:pb-10 border-t-2 border-[#C6A052]">
@@ -308,11 +374,11 @@ export const App: React.FC = () => {
         onNavigateToAiScanner={handleNavigateToAiScanner}
       />
 
-      {/* Hidden Admin Panel (Triggered by 5 taps on 2022) */}
-      <AdminDashboardModal
-        isOpen={adminModalOpen}
-        onClose={() => setAdminModalOpen(false)}
-      />
+      {/* PIN-Only Admin Entry Modal (Unlocks Full-Page Admin Session) */}
+      <AdminLoginModal />
+
+      {/* Universal Live Inline Site Editor & Persistent CMS Observer */}
+      {!isDashboardMode && <LiveInlineEditorEngine rootId="masarik-site-viewport" />}
 
       {/* Self-Updating Website Notification Banner */}
       <SiteUpdateBanner />

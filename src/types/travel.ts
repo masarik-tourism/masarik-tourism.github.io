@@ -51,6 +51,7 @@ export interface TravelerDocument {
   docType: 'passport' | 'photo' | 'visa' | 'contract' | 'other';
   fileName: string;
   dataUrl: string;
+  storagePath?: string;
   uploadedAt: string;
 }
 
@@ -85,3 +86,42 @@ export interface PassportAiCheckResult {
   missingRequirements: string[];
   confidenceNote: string;
 }
+
+export type AdminPermission =
+  | 'manage_clients'
+  | 'activate_otp'
+  | 'edit_content'
+  | 'delete_records';
+
+export interface SubAdminAccount {
+  id: string;
+  name: string;
+  pin: string;
+  permissions: AdminPermission[];
+  createdAt: string;
+}
+
+export interface AdminSession {
+  role: 'super_admin' | 'sub_admin';
+  adminId: string;
+  name: string;
+  permissions: AdminPermission[];
+  loggedInAt: string;
+  mode: 'dashboard' | 'live_editor';
+}
+
+export interface CmsCustomItem {
+  id: string;
+  gridId: string;
+  categoryId?: string;
+  titleAr: string;
+  titleEn: string;
+  badgeAr?: string;
+  badgeEn?: string;
+  priceOfferAr?: string;
+  priceOfferEn?: string;
+  featuresAr: string[];
+  featuresEn: string[];
+  createdAt: string;
+}
+

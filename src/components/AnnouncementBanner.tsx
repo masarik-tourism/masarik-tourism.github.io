@@ -33,10 +33,13 @@ export const AnnouncementBanner: React.FC = () => {
   return (
     <div
       role="status"
+      data-announcement-bar="true"
       className={`px-3 sm:px-4 py-1.5 text-[11px] sm:text-xs font-black flex items-center justify-center gap-2 text-center ${styleClasses}`}
     >
       <Icon className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-      <span className="leading-snug">{text}</span>
+      <span data-admin-editable="site-announcement-banner-text" className="leading-snug">
+        {text}
+      </span>
     </div>
   );
 };

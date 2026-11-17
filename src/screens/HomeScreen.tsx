@@ -31,6 +31,7 @@ import masarikHeroBgImg from '../assets/images/masarik_hero_bg.jpg';
 import { useLatestApkInfo, handleApkDownload, FAST_CDN_APK_URL } from '../hooks/useLatestApkUrl';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSiteConfig } from '../utils/siteConfigStore';
+import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
 
 interface HomeScreenProps {
   onNavigateToServices: () => void;
@@ -145,16 +146,25 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
           {/* Main Title */}
           <h1 className="flex flex-col items-center justify-center gap-1.5 sm:gap-2.5 max-w-4xl mx-auto mb-3 text-center text-balance">
-            <span className="block text-[1.75rem] sm:text-4xl md:text-5xl lg:text-6xl font-black text-white tracking-tight leading-tight">
+            <span
+              data-admin-editable="home-hero-title"
+              className="block text-[1.75rem] sm:text-4xl md:text-5xl lg:text-6xl font-black text-white tracking-tight leading-tight"
+            >
               {t('مسارك للإنجاز السياحي', 'Masarik Tourism LLC')}
             </span>
-            <span className="block text-sm sm:text-lg md:text-2xl font-medium text-[#E5C887] leading-snug max-w-2xl">
+            <span
+              data-admin-editable="home-hero-subtitle"
+              className="block text-sm sm:text-lg md:text-2xl font-medium text-[#E5C887] leading-snug max-w-2xl"
+            >
               {isAr ? siteConfig.heroHighlightAr : siteConfig.heroHighlightEn}
             </span>
           </h1>
 
           {/* Concise two-line description */}
-          <p className="text-xs sm:text-sm md:text-base font-normal text-slate-200 max-w-xl mx-auto mb-5 sm:mb-6 leading-relaxed px-2">
+          <p
+            data-admin-editable="home-hero-description"
+            className="text-xs sm:text-sm md:text-base font-normal text-slate-200 max-w-xl mx-auto mb-5 sm:mb-6 leading-relaxed px-2"
+          >
             {t(
               'شريكك الموثوق لإنجاز معاملات السفر والتأشيرات وحجوزات الطيران والفنادق بكل سهولة واحترافية أينما كنت.',
               'Complete visa files, VFS Tasheer bookings, Enjaz payments, flight & hotel reservations, and official document clearance online.'
@@ -248,11 +258,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" data-admin-grid="home-services">
             {localized.services.map((service) => (
               <div
                 key={service.id}
                 id={`service-${service.id}`}
+                data-admin-card="true"
+                data-admin-editable={`home-service-card-${service.id}`}
                 className="scroll-mt-24 bg-white border border-slate-200 hover:border-[#0284C7]/60 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between group"
               >
                 <div>
@@ -314,6 +326,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </div>
               </div>
             ))}
+            <CmsDynamicGridItems gridId="home-services" onRequestService={handleOpenModal} />
           </div>
         </section>
 
@@ -341,6 +354,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             {localized.whyChooseUs.map((item) => (
               <div
                 key={item.id}
+                data-admin-card="true"
+                data-admin-editable={`home-why-card-${item.id}`}
                 className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col justify-between text-start"
               >
                 <div>
@@ -387,6 +402,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             {localized.reviews.map((rev) => (
               <div
                 key={rev.id}
+                data-admin-card="true"
+                data-admin-editable={`home-review-card-${rev.id}`}
                 className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-xs flex flex-col justify-between"
               >
                 <div>

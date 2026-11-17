@@ -1,6 +1,7 @@
 import React from 'react';
-import { Home, Briefcase, CreditCard, PhoneCall, UserCheck } from 'lucide-react';
+import { Home, Briefcase, CreditCard, PhoneCall, UserCheck, Crown } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAdmin } from '../contexts/AdminContext';
 
 interface BottomNavProps {
   currentTab: number;
@@ -16,26 +17,52 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   isTravelerOpen = false,
 }) => {
   const { t } = useLanguage();
+  const { isAdminActive, isDashboardMode, setAdminMode } = useAdmin();
 
   const tabs = [
     { label: t('الرئيسية', 'Home'), icon: Home, index: 0 },
     { label: t('الخدمات', 'Services'), icon: Briefcase, index: 1 },
-    { label: t('ملف المسافر', 'Profile'), icon: UserCheck, index: -1, isProfile: true },
+    {
+      label: isAdminActive ? t('الإدارة', 'Admin') : t('ملف المسافر', 'Profile'),
+      icon: isAdminActive ? Crown : UserCheck,
+      index: -1,
+      isProfile: true,
+    },
     { label: t('طرق الدفع', 'Payments'), icon: CreditCard, index: 2 },
     { label: t('اتصل بنا', 'Contact'), icon: PhoneCall, index: 3 },
   ];
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 shadow-lg">
+    <nav
+      data-no-admin-edit="true"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 shadow-lg"
+    >
       <div className="flex items-center justify-around py-1.5 px-1.5 max-w-md mx-auto">
         {tabs.map((tab) => {
           const Icon = tab.icon;
-          const isSelected = tab.isProfile ? isTravelerOpen : !isTravelerOpen && currentTab === tab.index;
+          const isSelected = tab.isProfile
+            ? isAdminActive
+              ? isDashboardMode
+              : isTravelerOpen
+            : !isTravelerOpen && !isDashboardMode && currentTab === tab.index;
           return (
             <button
               key={tab.index}
               type="button"
-              onClick={() => (tab.isProfile ? onOpenTravelerProfile() : onSelectTab(tab.index))}
+              onClick={() => {
+                if (tab.isProfile) {
+                  if (isAdminActive) {
+                    setAdminMode('dashboard');
+                  } else {
+                    onOpenTravelerProfile();
+                  }
+                } else {
+                  if (isDashboardMode) {
+                    setAdminMode('live_editor');
+                  }
+                  onSelectTab(tab.index);
+                }
+              }}
               className={`flex flex-col items-center justify-center flex-1 py-1.5 px-0.5 rounded-xl transition-all cursor-pointer min-h-[44px] min-w-0 ${
                 isSelected
                   ? 'text-[#0F2438]'

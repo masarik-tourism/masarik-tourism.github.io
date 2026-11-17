@@ -5,6 +5,7 @@ import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from '../components/WhatsAppIcon';
 import { ServiceRequestModal } from '../components/ServiceRequestModal';
 import { useLanguage } from '../contexts/LanguageContext';
+import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
 
 interface ServicesScreenProps {
   onNavigateToContact: (serviceTitle?: string) => void;
@@ -87,10 +88,12 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
         </div>
 
         {/* Services List */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4" data-admin-grid="services-directory">
           {filteredServices.map((service) => (
             <div
               key={service.id}
+              data-admin-card="true"
+              data-admin-editable={`services-dir-card-${service.id}`}
               className="bg-white border border-slate-200 hover:border-[#0284C7]/60 rounded-2xl p-5 shadow-xs hover:shadow-md transition-all flex flex-col justify-between"
             >
               <div>
@@ -149,6 +152,11 @@ export const ServicesScreen: React.FC<ServicesScreenProps> = ({ onNavigateToCont
               </div>
             </div>
           ))}
+          <CmsDynamicGridItems
+            gridId="services-directory"
+            selectedCategory={selectedCategory}
+            onRequestService={handleOpenOrder}
+          />
         </div>
       </div>
 

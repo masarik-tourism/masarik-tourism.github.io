@@ -20,18 +20,19 @@ import { PassportAiCheckResult, TravelerDocument, TravelerProfile } from '../typ
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
-  addDocumentToTraveler,
   buildClientWhatsAppRequestMessage,
   compressImageToDataUrl,
   formatPhoneForDisplay,
   getActiveTraveler,
   normalizePhone,
-  registerOrLoginTraveler,
+  registerOrLoginTravelerCloud,
   removeDocumentFromTraveler,
   setActiveTravelerPhone,
   updateTravelerProfileDetails,
+  uploadAndAddDocumentToTraveler,
   verifyManualOtp,
 } from '../utils/travelerStore';
+import { imageUrlToBase64 } from '../utils/firebaseStorageHelper';
 import { translateOrderStatus } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
@@ -59,6 +60,7 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
   const [nameInput, setNameInput] = useState('');
   const [phoneInput, setPhoneInput] = useState('');
   const [authError, setAuthError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Internal Verification Modal state (inside Traveler Profile)
   const [verifyModalOpen, setVerifyModalOpen] = useState(false);
@@ -77,6 +79,7 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
   const [docLabel, setDocLabel] = useState(t('صورة جواز السفر', 'Passport Copy'));
   const [docType, setDocType] = useState<TravelerDocument['docType']>('passport');
   const [profileSavedMsg, setProfileSavedMsg] = useState('');
+  const [isUploadingDoc, setIsUploadingDoc] = useState(false);
   const [isExtractingPassport, setIsExtractingPassport] = useState(false);
   const [passportExtractFeedback, setPassportExtractFeedback] = useState<{
     type: 'success' | 'info';
@@ -119,7 +122,7 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
   if (!isOpen) return null;
 
   // Clean Outer Login / Create Account (NO OTP asked outside)
-  const handleOuterLoginSubmit = (e: React.FormEvent) => {
+  const handleOuterLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
     const normalized = normalizePhone(phoneInput);
@@ -133,11 +136,16 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
       return;
     }
 
-    registerOrLoginTraveler(nameInput, phoneInput);
-    syncFromStore();
-    setVerifyModalOpen(false);
-    setVerifyError('');
-    setVerifySuccessMsg('');
+    setIsLoggingIn(true);
+    try {
+      await registerOrLoginTravelerCloud(nameInput, phoneInput);
+      syncFromStore();
+      setVerifyModalOpen(false);
+      setVerifyError('');
+      setVerifySuccessMsg('');
+    } finally {
+      setIsLoggingIn(false);
+    }
   };
 
   // Inside Profile: Open WhatsApp to get 6-digit code or direct activation link
@@ -298,18 +306,20 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
   const handleUploadWalletDoc = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !activeTraveler) return;
+    setIsUploadingDoc(true);
     try {
       const compressed = await compressImageToDataUrl(file, 1100, 0.76);
-      addDocumentToTraveler(activeTraveler.phone, {
+      await uploadAndAddDocumentToTraveler(activeTraveler.phone, {
         label: docLabel.trim() || t('مستند مسافر', 'Traveler Document'),
         docType,
         fileName: file.name || 'document.jpg',
         dataUrl: compressed.dataUrl,
       });
+      syncFromStore();
       setProfileSavedMsg(
         t(
-          'تم حفظ صورة المستند في محفظة المسافر.',
-          'Document image saved to your Traveler Wallet.'
+          'تم حفظ ورفع صورة المستند سحابياً في محفظة المسافر.',
+          'Document image uploaded & synced to your Traveler Wallet.'
         )
       );
       setTimeout(() => setProfileSavedMsg(''), 3000);
@@ -328,6 +338,8 @@ export const TravelerProfileModal: React.FC<TravelerProfileModalProps> = ({
           'Could not process image. Please select a valid JPG or PNG file.'
         )
       );
+    } finally {
+      setIsUploadingDoc(false);
     }
     if (walletFileInputRef.current) {
       walletFileInputRef.current.value = '';
@@ -497,9 +509,11 @@ I would like to proceed with my application. Thank you.`
 
               <button
                 type="submit"
-                className="w-full min-h-[46px] py-3 px-4 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs sm:text-sm font-black transition cursor-pointer shadow-xs"
+                disabled={isLoggingIn}
+                className="w-full min-h-[46px] py-3 px-4 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black transition cursor-pointer shadow-xs flex items-center justify-center gap-2"
               >
-                {t('دخول / إنشاء حساب', 'Login / Create Account')}
+                {isLoggingIn && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{t('دخول / إنشاء حساب', 'Login / Create Account')}</span>
               </button>
             </form>
           ) : (
@@ -696,11 +710,20 @@ I would like to proceed with my application. Thank you.`
 
                   <button
                     type="button"
+                    disabled={isUploadingDoc}
                     onClick={() => walletFileInputRef.current?.click()}
-                    className="min-h-[38px] px-3 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+                    className="min-h-[38px] px-3 py-2 bg-[#C6A052] hover:bg-[#d4b063] disabled:opacity-60 text-[#0A1926] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap"
                   >
-                    <Upload className="w-3.5 h-3.5" />
-                    <span>{t('إرفاق صورة للمحفظة', 'Attach Image to Wallet')}</span>
+                    {isUploadingDoc ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {isUploadingDoc
+                        ? t('جاري الرفع سحابياً...', 'Uploading...')
+                        : t('إرفاق صورة للمحفظة', 'Attach Image to Wallet')}
+                    </span>
                   </button>
                 </div>
 
@@ -754,19 +777,21 @@ I would like to proceed with my application. Thank you.`
                           <span className="text-[11px] text-slate-400 block truncate">
                             {doc.fileName}
                           </span>
-                          {doc.docType === 'passport' && (
+                          {doc.docType === 'passport' && doc.dataUrl && (
                             <button
                               type="button"
                               disabled={isExtractingPassport}
-                              onClick={() => {
-                                const b64 = doc.dataUrl.includes(',')
-                                  ? doc.dataUrl.split(',')[1]
-                                  : doc.dataUrl;
-                                void runAutoPassportExtraction(
-                                  activeTraveler.phone,
-                                  b64,
-                                  'image/jpeg'
-                                );
+                              onClick={async () => {
+                                try {
+                                  const b64 = await imageUrlToBase64(doc.dataUrl);
+                                  void runAutoPassportExtraction(
+                                    activeTraveler.phone,
+                                    b64,
+                                    'image/jpeg'
+                                  );
+                                } catch {
+                                  // Ignore unreadable remote image
+                                }
                               }}
                               className="mt-1 text-[10.5px] font-bold text-[#0284C7] hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-50"
                             >
