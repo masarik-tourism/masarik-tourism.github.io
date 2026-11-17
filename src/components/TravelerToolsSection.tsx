@@ -17,6 +17,7 @@ import { PassportAiCheckResult } from '../types/travel';
 import {
   compressImageToDataUrl,
   getActiveTraveler,
+  splitPassportName,
   updateTravelerProfileDetails,
   uploadAndAddDocumentToTraveler,
 } from '../utils/travelerStore';
@@ -295,6 +296,9 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
         }
         if (data.result.fullName && data.result.fullName.trim()) {
           autoUpdates.passportFullName = data.result.fullName.trim();
+          const split = splitPassportName(data.result.fullName);
+          if (split.firstName) autoUpdates.firstName = split.firstName;
+          if (split.lastName) autoUpdates.lastName = split.lastName;
         }
         if (data.result.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(data.result.expiryDate)) {
           autoUpdates.passportExpiryDate = data.result.expiryDate;
@@ -326,7 +330,10 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     }
 
     if (aiResult) {
+      const split = aiResult.fullName ? splitPassportName(aiResult.fullName) : null;
       updateTravelerProfileDetails(active.phone, {
+        ...(split?.firstName ? { firstName: split.firstName } : {}),
+        ...(split?.lastName ? { lastName: split.lastName } : {}),
         passportFullName: aiResult.fullName || active.passportFullName,
         passportNumber: aiResult.passportNumber || active.passportNumber,
         passportExpiryDate: aiResult.expiryDate || active.passportExpiryDate,
@@ -355,25 +362,25 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
   const handleSendScanToWhatsApp = () => {
     const details = aiResult
       ? lang === 'en'
-        ? `\n👤 *Name:* ${aiResult.fullName || 'N/A'}\n🛂 *Passport No:* ${
+        ? `\n• Name: ${aiResult.fullName || 'N/A'}\n• Passport No: ${
             aiResult.passportNumber || 'N/A'
-          }\n📅 *Expiry Date:* ${aiResult.expiryDate || 'N/A'}\n📊 *Status:* ${
-            aiResult.hasSixMonthsValidity ? 'Valid 6+ Months ✅' : 'Needs Review ⚠️'
+          }\n• Expiry Date: ${aiResult.expiryDate || 'N/A'}\n• Status: ${
+            aiResult.hasSixMonthsValidity ? 'Valid 6+ Months' : 'Needs Review'
           }`
-        : `\n👤 *الاسم:* ${aiResult.fullName || 'غير محدد'}\n🛂 *رقم الجواز:* ${
+        : `\n• الاسم: ${aiResult.fullName || 'غير محدد'}\n• رقم الجواز: ${
             aiResult.passportNumber || 'غير محدد'
-          }\n📅 *تاريخ الانتهاء:* ${aiResult.expiryDate || 'غير محدد'}\n📊 *حالة الصلاحية:* ${
-            aiResult.hasSixMonthsValidity ? 'صالح أكثر من 6 أشهر ✅' : 'يحتاج مراجعة ⚠️'
+          }\n• تاريخ الانتهاء: ${aiResult.expiryDate || 'غير محدد'}\n• حالة الصلاحية: ${
+            aiResult.hasSixMonthsValidity ? 'صالح أكثر من 6 أشهر' : 'يحتاج مراجعة'
           }`
       : '';
 
     const msg =
       lang === 'en'
         ? `Hello Masarik Tourism, I checked my travel documents via the portal:
-📌 *Service Type:* ${selectedVisaLabel}${details}
+• Service Type: ${selectedVisaLabel}${details}
 I would like to proceed with reviewing my documents and completing the application.`
         : `السلام عليكم، قمت بفحص مستنداتي عبر منصة مسارك:
-📌 *نوع المعاملة:* ${selectedVisaLabel}${details}
+• نوع المعاملة: ${selectedVisaLabel}${details}
 أرغب في استكمال الإجراءات ومراجعة المستندات معكم.`;
     openWhatsApp(msg);
   };

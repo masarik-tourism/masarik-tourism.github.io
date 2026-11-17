@@ -12,11 +12,38 @@
           "maxLength": 20,
           "pattern": "^[0-9]{8,20}$"
         },
+        "phoneNormalized": {
+          "type": "string",
+          "description": "International digits-only WhatsApp phone without + (e.g. 201125002428).",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "firstName": {
+          "type": "string",
+          "description": "Passport first name.",
+          "maxLength": 80
+        },
+        "lastName": {
+          "type": "string",
+          "description": "Passport last name.",
+          "maxLength": 80
+        },
         "name": {
           "type": "string",
           "description": "Client full display name.",
           "minLength": 1,
           "maxLength": 160
+        },
+        "avatarUrl": {
+          "type": "string",
+          "description": "Firebase Storage HTTPS download URL for personal profile avatar.",
+          "maxLength": 4096
+        },
+        "avatarStoragePath": {
+          "type": "string",
+          "description": "Firebase Storage path for client avatar cleanup.",
+          "maxLength": 300
         },
         "otp": {
           "type": "string",

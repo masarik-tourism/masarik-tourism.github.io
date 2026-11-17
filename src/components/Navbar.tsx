@@ -1,11 +1,30 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, ShieldCheck, Compass, Menu, X, ChevronDown, RotateCw, UserCheck, Globe, Sparkles, LayoutDashboard, LogOut, Crown } from 'lucide-react';
+import {
+  Phone,
+  ShieldCheck,
+  Compass,
+  Menu,
+  X,
+  ChevronDown,
+  RotateCw,
+  UserCheck,
+  Globe,
+  Sparkles,
+  LayoutDashboard,
+  LogOut,
+  Crown,
+  Home,
+  ClipboardList,
+  FolderOpen,
+  Briefcase,
+} from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber } from '../utils/communication';
 import masarikLogoImg from '../assets/images/masarik_logo.jpg';
 import {
   formatFirstLastName,
   getActiveTraveler,
+  getTravelerDisplayNames,
   TRAVELERS_UPDATED_EVENT,
 } from '../utils/travelerStore';
 import { TravelerProfile } from '../types/travel';
@@ -13,21 +32,28 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 import { AnnouncementBanner } from './AnnouncementBanner';
 import { useSiteConfig } from '../utils/siteConfigStore';
+import type { TravelerSubTab } from './TravelerWorkspaceScreen';
 
 interface NavbarProps {
   currentTab: number;
+  travelerSection: TravelerSubTab | null;
   onSelectTab: (tab: number) => void;
+  onSelectTravelerSection: (section: TravelerSubTab) => void;
   onSelectService?: (serviceTitle: string) => void;
   onOpenTravelerProfile: () => void;
   onSecretAdminTap?: () => void;
+  hasUnsavedTravelerDraft?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   currentTab,
+  travelerSection,
   onSelectTab,
+  onSelectTravelerSection,
   onSelectService,
   onOpenTravelerProfile,
   onSecretAdminTap,
+  hasUnsavedTravelerDraft = false,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
   const {
@@ -70,11 +96,14 @@ export const Navbar: React.FC<NavbarProps> = ({
     }
     if ('caches' in window) {
       try {
-        caches.keys().then((names) => {
-          names.forEach((name) => {
-            caches.delete(name);
-          });
-        }).catch(() => {});
+        caches
+          .keys()
+          .then((names) => {
+            names.forEach((name) => {
+              caches.delete(name);
+            });
+          })
+          .catch(() => {});
       } catch {}
     }
 
@@ -115,6 +144,15 @@ export const Navbar: React.FC<NavbarProps> = ({
     setServicesDropdownOpen(false);
   };
 
+  const handleTravelerTabClick = (section: TravelerSubTab) => {
+    if (isDashboardMode) {
+      setAdminMode('live_editor');
+    }
+    onSelectTravelerSection(section);
+    setMobileMenuOpen(false);
+    setServicesDropdownOpen(false);
+  };
+
   const handleServiceSelect = (title: string) => {
     if (isDashboardMode) {
       setAdminMode('live_editor');
@@ -126,8 +164,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     setMobileMenuOpen(false);
   };
 
+  const names = getTravelerDisplayNames(activeTraveler);
   const travelerShortFullName = activeTraveler
-    ? formatFirstLastName(activeTraveler.name)
+    ? formatFirstLastName(names.fullDisplayName)
     : '';
 
   return (
@@ -193,13 +232,14 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Center: Desktop Navigation Links */}
         <nav className="hidden lg:flex items-center gap-1 bg-slate-100/80 p-1.5 rounded-full border border-slate-200 text-xs sm:text-sm font-bold shrink-0">
           {tabs.map((tab) => {
+            const isTabSelected = !travelerSection && !isDashboardMode && currentTab === tab.index;
             if (tab.hasDropdown) {
               return (
                 <div key={tab.index} className="relative" ref={dropdownRef}>
                   <button
                     onClick={() => setServicesDropdownOpen(!servicesDropdownOpen)}
                     className={`px-3 py-1.5 rounded-full transition-all flex items-center gap-1 cursor-pointer whitespace-nowrap ${
-                      currentTab === tab.index
+                      isTabSelected
                         ? 'bg-[#0F2438] text-white shadow-xs'
                         : 'text-slate-700 hover:text-[#0F2438] hover:bg-white'
                     }`}
@@ -248,7 +288,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 key={tab.index}
                 onClick={() => handleTabClick(tab.index)}
                 className={`px-3 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap ${
-                  currentTab === tab.index
+                  isTabSelected
                     ? 'bg-[#0F2438] text-white shadow-xs'
                     : 'text-slate-700 hover:text-[#0F2438] hover:bg-white'
                 }`}
@@ -259,7 +299,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           })}
         </nav>
 
-        {/* End Side: Admin Role Badge (when active) OR Traveler Account Button + Hamburger Menu */}
+        {/* End Side: Admin Role Badge (when active) OR Traveler Account Button (with Avatar) + Hamburger Menu */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0" data-no-admin-edit="true">
           {isAdminActive ? (
             <button
@@ -282,19 +322,31 @@ export const Navbar: React.FC<NavbarProps> = ({
           ) : (
             <button
               type="button"
-              onClick={onOpenTravelerProfile}
-              className="bg-[#C6A052]/15 hover:bg-[#C6A052]/25 text-[#0F2438] font-bold text-[clamp(0.7rem,2.8vw,0.85rem)] px-2.5 sm:px-3 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border border-[#C6A052]/60 leading-none"
-              title={t('حسابي - ملف المسافر', 'My Account - Traveler Profile')}
+              onClick={() => {
+                if (activeTraveler) {
+                  handleTravelerTabClick('account');
+                } else {
+                  onOpenTravelerProfile();
+                }
+              }}
+              className={`bg-[#C6A052]/15 hover:bg-[#C6A052]/25 text-[#0F2438] font-bold text-[clamp(0.7rem,2.8vw,0.85rem)] ${
+                activeTraveler?.avatarUrl ? 'ps-1.5 pe-2.5 sm:ps-1.5 sm:pe-3' : 'px-2.5 sm:px-3'
+              } h-8 sm:h-9 rounded-full flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border border-[#C6A052]/60 leading-none`}
+              title={t('حسابي - بيانات الحساب', 'My Account - Account Info')}
             >
-              {activeTraveler?.verified ? (
+              {activeTraveler?.avatarUrl ? (
+                <img
+                  src={activeTraveler.avatarUrl}
+                  alt={travelerShortFullName}
+                  className="w-6 h-6 sm:w-6.5 sm:h-6.5 rounded-full object-cover border border-[#C6A052] shrink-0 bg-white"
+                />
+              ) : activeTraveler?.verified ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
               ) : (
                 <UserCheck className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
               )}
-              <span>
-                {activeTraveler
-                  ? travelerShortFullName
-                  : t('حسابي', 'My Account')}
+              <span className="max-w-[95px] sm:max-w-[140px] truncate">
+                {activeTraveler ? travelerShortFullName : t('حسابي', 'My Account')}
               </span>
             </button>
           )}
@@ -308,6 +360,87 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Slim Sleek Persistent Client Sub-Navbar (Visible Whenever Logged In & Not in Admin Workspace) */}
+      {activeTraveler && !isDashboardMode && (
+        <div
+          data-no-admin-edit="true"
+          className="bg-slate-50/95 border-t border-slate-200/90 px-2 sm:px-4"
+        >
+          <div className="max-w-6xl mx-auto flex items-center gap-1.5 overflow-x-auto py-1.5">
+            <button
+              type="button"
+              onClick={() => handleTabClick(0)}
+              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                !travelerSection && currentTab === 0
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+              }`}
+            >
+              <Home className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('الرئيسية', 'Home')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleTravelerTabClick('account')}
+              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                travelerSection === 'account'
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+              }`}
+            >
+              <UserCheck className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('بيانات الحساب', 'Account Info')}</span>
+              {hasUnsavedTravelerDraft && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleTravelerTabClick('orders')}
+              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                travelerSection === 'orders'
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+              }`}
+            >
+              <ClipboardList className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('طلباتي', 'My Orders')}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleTravelerTabClick('documents')}
+              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                travelerSection === 'documents'
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+              }`}
+            >
+              <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('محفظة المستندات', 'Documents')}</span>
+              {hasUnsavedTravelerDraft && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleTabClick(1)}
+              className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                !travelerSection && currentTab === 1
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+              }`}
+            >
+              <Briefcase className="w-3.5 h-3.5 shrink-0" />
+              <span>{t('الخدمات', 'Services')}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Active Admin Session Control Bar */}
       {isAdminActive && session && (
@@ -379,11 +512,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             title={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
             aria-label={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
           >
-            {isAr ? (
-              <span>EN</span>
-            ) : (
-              <span className="text-[10.5px]">عربي</span>
-            )}
+            {isAr ? <span>EN</span> : <span className="text-[10.5px]">عربي</span>}
           </button>
 
           <button
@@ -413,12 +542,24 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={() => {
               setMobileMenuOpen(false);
-              onOpenTravelerProfile();
+              if (activeTraveler) {
+                handleTravelerTabClick('account');
+              } else {
+                onOpenTravelerProfile();
+              }
             }}
             className="w-full text-start px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black text-[#0F2438] bg-[#C6A052]/20 hover:bg-[#C6A052]/30 transition flex items-center justify-between border border-[#C6A052]/60"
           >
             <span className="flex items-center gap-2">
-              <UserCheck className="w-4 h-4 text-[#9E7B33]" />
+              {activeTraveler?.avatarUrl ? (
+                <img
+                  src={activeTraveler.avatarUrl}
+                  alt={travelerShortFullName}
+                  className="w-6 h-6 rounded-full object-cover border border-[#C6A052] shrink-0"
+                />
+              ) : (
+                <UserCheck className="w-4 h-4 text-[#9E7B33]" />
+              )}
               <span>
                 {activeTraveler
                   ? t(`ملف المسافر: ${travelerShortFullName}`, `Traveler Profile: ${travelerShortFullName}`)
@@ -438,19 +579,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
           </button>
 
-          {tabs.map((tab) => (
-            <button
-              key={tab.index}
-              onClick={() => handleTabClick(tab.index)}
-              className={`w-full text-start px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-between ${
-                currentTab === tab.index
-                  ? 'bg-[#0F2438] text-white'
-                  : 'text-slate-700 hover:bg-slate-50'
-              }`}
-            >
-              <span>{tab.label}</span>
-            </button>
-          ))}
+          {tabs.map((tab) => {
+            const isTabSelected = !travelerSection && currentTab === tab.index;
+            return (
+              <button
+                key={tab.index}
+                onClick={() => handleTabClick(tab.index)}
+                className={`w-full text-start px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-between ${
+                  isTabSelected ? 'bg-[#0F2438] text-white' : 'text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
 
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button

@@ -42,17 +42,19 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
       lang === 'en'
         ? `Hello Masarik Tourism LLC,
 I would like to request a service:
-📌 *Service:* ${selectedService}
-👤 *Full Name:* ${fullName.trim() || 'Client'}
-📱 *Phone / WhatsApp:* ${phone.trim() || 'N/A'}
-${notes.trim() ? `📝 *Notes:* ${notes.trim()}` : ''}
+• Service: ${selectedService}
+• Full Name: ${fullName.trim() || 'Client'}
+• Phone / WhatsApp: ${phone.trim() || 'N/A'}${
+            notes.trim() ? `\n• Notes: ${notes.trim()}` : ''
+          }
 Please share requirements and next steps. Thank you.`
         : `السلام عليكم ورحمة الله وبركاته،
 أرغب في طلب خدمة من منصة مسارك للإنجاز السياحي:
-📌 *الخدمة المطلوبة:* ${selectedService}
-👤 *الاسم:* ${fullName.trim() || 'عميل مسارك'}
-📱 *رقم الهاتف:* ${phone.trim() || 'غير محدد'}
-${notes.trim() ? `📝 *تفاصيل إضافية:* ${notes.trim()}` : ''}
+• الخدمة المطلوبة: ${selectedService}
+• الاسم: ${fullName.trim() || 'عميل مسارك'}
+• رقم الهاتف: ${phone.trim() || 'غير محدد'}${
+            notes.trim() ? `\n• تفاصيل إضافية: ${notes.trim()}` : ''
+          }
 يرجى تزويدي بالمتطلبات والتفاصيل وسرعة المتابعة. شكراً لكم.`;
 
     openWhatsApp(message);

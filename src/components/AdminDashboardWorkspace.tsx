@@ -37,14 +37,15 @@ import {
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
+  adminCreateClientCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
   deleteTravelerProfile,
   exportAllDataBackupJson,
   formatPhoneForDisplay,
   getAllTravelers,
+  getTravelerDisplayNames,
   normalizePhone,
-  registerOrLoginTravelerCloud,
   updateAdminPin,
   updateTravelerProfileDetails,
 } from '../utils/travelerStore';
@@ -101,12 +102,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const [travelers, setTravelers] = useState<TravelerProfile[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
-  const [newName, setNewName] = useState('');
+  const [newFirstName, setNewFirstName] = useState('');
+  const [newLastName, setNewLastName] = useState('');
   const [newPhone, setNewPhone] = useState('');
 
   // Tab 1: Client Folder Detail
   const [selectedClientPhone, setSelectedClientPhone] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
   const [editPassportFullName, setEditPassportFullName] = useState('');
   const [editPassportNumber, setEditPassportNumber] = useState('');
   const [editPassportExpiry, setEditPassportExpiry] = useState('');
@@ -169,7 +172,9 @@ export const AdminDashboardWorkspace: React.FC = () => {
 
   useEffect(() => {
     if (selectedClient) {
-      setEditName(selectedClient.name || '');
+      const names = getTravelerDisplayNames(selectedClient);
+      setEditFirstName(names.firstName);
+      setEditLastName(names.lastName);
       setEditPassportFullName(selectedClient.passportFullName || '');
       setEditPassportNumber(selectedClient.passportNumber || '');
       setEditPassportExpiry(selectedClient.passportExpiryDate || '');
@@ -183,15 +188,17 @@ export const AdminDashboardWorkspace: React.FC = () => {
 
   const handleAdminAddClient = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim() || normalizePhone(newPhone).length < 8) return;
-    await registerOrLoginTravelerCloud(newName, newPhone);
-    setNewName('');
+    if (!newFirstName.trim() || normalizePhone(newPhone).length < 8) return;
+    await adminCreateClientCloud(newFirstName, newLastName, newPhone);
+    setNewFirstName('');
+    setNewLastName('');
     setNewPhone('');
     loadTravelers();
   };
 
   const handleCopyActivationMsg = async (client: TravelerProfile) => {
-    const msg = buildAdminForwardActivationMessage(client.name, client.phone, client.otp, lang);
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const msg = buildAdminForwardActivationMessage(displayName, client.phone, client.otp, lang);
     try {
       await navigator.clipboard.writeText(msg);
       setCopiedPhone(client.phone);
@@ -202,17 +209,19 @@ export const AdminDashboardWorkspace: React.FC = () => {
   };
 
   const handleSendActivationWhatsApp = (client: TravelerProfile) => {
-    const msg = buildAdminForwardActivationMessage(client.name, client.phone, client.otp, lang);
-    const phoneDigits = normalizePhone(client.phone);
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const msg = buildAdminForwardActivationMessage(displayName, client.phone, client.otp, lang);
+    const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
     openWhatsApp(`https://wa.me/${phoneDigits}?text=${encodeURIComponent(msg)}`);
   };
 
   const handleDirectWhatsAppChat = (client: TravelerProfile) => {
-    const phoneDigits = normalizePhone(client.phone);
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
     const hello =
       lang === 'en'
-        ? `Hello ${client.name}, Masarik Tourism team is reaching out regarding your file.`
-        : `السلام عليكم ${client.name}، معكم فريق مسارك للإنجاز السياحي بخصوص ملفكم.`;
+        ? `Hello ${displayName}, Masarik Tourism team is reaching out regarding your file.`
+        : `السلام عليكم ${displayName}، معكم فريق مسارك للإنجاز السياحي بخصوص ملفكم.`;
     openWhatsApp(`https://wa.me/${phoneDigits}?text=${encodeURIComponent(hello)}`);
   };
 
@@ -240,8 +249,13 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const handleSaveClientFolder = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedClient || !canManageClients) return;
+    const cleanFirst = editFirstName.trim();
+    const cleanLast = editLastName.trim();
+    const combinedName = `${cleanFirst} ${cleanLast}`.trim() || selectedClient.name;
     updateTravelerProfileDetails(selectedClient.phone, {
-      name: editName.trim() || selectedClient.name,
+      firstName: cleanFirst,
+      lastName: cleanLast,
+      name: combinedName,
       passportFullName: editPassportFullName.trim(),
       passportNumber: editPassportNumber.trim().toUpperCase(),
       passportExpiryDate: editPassportExpiry,
@@ -550,6 +564,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {filteredClients.map((client) => {
                   const docsCount = client.documents?.length || 0;
+                  const clientDisplayName = getTravelerDisplayNames(client).fullDisplayName;
                   return (
                     <div
                       key={client.phone}
@@ -562,52 +577,69 @@ export const AdminDashboardWorkspace: React.FC = () => {
                     >
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="space-y-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm sm:text-base font-black text-[#0F2438]">
-                                {client.name}
-                              </span>
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border ${
-                                  client.verified
-                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                                    : 'bg-amber-50 border-amber-200 text-amber-800'
-                                }`}
-                              >
-                                {client.verified ? (
-                                  <>
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    <span>{t('موثق', 'Verified')}</span>
-                                  </>
-                                ) : (
-                                  <span>{t('غير موثق', 'Unverified')}</span>
-                                )}
-                              </span>
-                            </div>
+                          <div className="flex items-start gap-3 min-w-0">
+                            {client.avatarUrl ? (
+                              <img
+                                src={client.avatarUrl}
+                                alt={clientDisplayName}
+                                className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
+                              />
+                            ) : (
+                              <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-sm font-black shrink-0">
+                                {clientDisplayName.slice(0, 1) || 'م'}
+                              </div>
+                            )}
 
-                            <div className="text-xs text-slate-600 tabular-nums flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                              <span>
-                                {t('واتساب:', 'WhatsApp:')}{' '}
-                                <strong className="text-[#0F2438]">
-                                  {formatPhoneForDisplay(client.phone)}
-                                </strong>
-                              </span>
-                              {canManageClients && (
-                                <>
-                                  <span>·</span>
-                                  <span>
-                                    {t('الجواز:', 'Passport:')}{' '}
-                                    <strong className="text-[#0F2438] uppercase">
-                                      {client.passportNumber || t('غير مسجل', 'Not set')}
-                                    </strong>
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-sm sm:text-base font-black text-[#0F2438]">
+                                  {clientDisplayName}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border ${
+                                    client.verified
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                      : 'bg-amber-50 border-amber-200 text-amber-800'
+                                  }`}
+                                >
+                                  {client.verified ? (
+                                    <>
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      <span>{t('موثق', 'Verified')}</span>
+                                    </>
+                                  ) : (
+                                    <span>{t('غير موثق', 'Unverified')}</span>
+                                  )}
+                                </span>
+                              </div>
+
+                              <div className="text-xs text-slate-600 tabular-nums flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                                <span>
+                                  {t('واتساب:', 'WhatsApp:')}{' '}
+                                  <strong className="text-[#0F2438]">
+                                    {formatPhoneForDisplay(client.phone)}
+                                  </strong>{' '}
+                                  <span className="text-[10.5px] text-slate-400">
+                                    (+{client.phoneNormalized || normalizePhone(client.phone)})
                                   </span>
-                                  <span>·</span>
-                                  <span>
-                                    {t('المستندات:', 'Docs:')}{' '}
-                                    <strong className="text-[#0284C7]">{docsCount}</strong>
-                                  </span>
-                                </>
-                              )}
+                                </span>
+                                {canManageClients && (
+                                  <>
+                                    <span>·</span>
+                                    <span>
+                                      {t('الجواز:', 'Passport:')}{' '}
+                                      <strong className="text-[#0F2438] uppercase">
+                                        {client.passportNumber || t('غير مسجل', 'Not set')}
+                                      </strong>
+                                    </span>
+                                    <span>·</span>
+                                    <span>
+                                      {t('المستندات:', 'Docs:')}{' '}
+                                      <strong className="text-[#0284C7]">{docsCount}</strong>
+                                    </span>
+                                  </>
+                                )}
+                              </div>
                             </div>
                           </div>
 
@@ -651,12 +683,16 @@ export const AdminDashboardWorkspace: React.FC = () => {
                           )}
                         </div>
 
-                        {!client.verified && canActivateOtp && (
+                        {canActivateOtp && (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200/80 px-3 py-2 rounded-xl"
+                            className={`flex flex-wrap items-center justify-between gap-2 border px-3 py-2 rounded-xl ${
+                              client.verified
+                                ? 'bg-slate-50 border-slate-200'
+                                : 'bg-amber-50 border-amber-200/80'
+                            }`}
                           >
-                            <span className="text-[11px] font-bold text-amber-900 tabular-nums">
+                            <span className="text-[11px] font-bold text-[#0F2438] tabular-nums">
                               OTP: {client.otp}
                             </span>
                             <div className="flex flex-wrap items-center gap-1.5">
@@ -669,18 +705,22 @@ export const AdminDashboardWorkspace: React.FC = () => {
                                 className="px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
                               >
                                 <Send className="w-3 h-3" />
-                                <span>{t('تفعيل / إرسال OTP', 'Verify & Send OTP')}</span>
+                                <span>
+                                  {t('إرسال كود الدخول للرقم المسجل', 'Send OTP to Registered Number')}
+                                </span>
                               </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleToggleVerified(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-950 text-[11px] font-bold cursor-pointer"
-                              >
-                                {t('توثيق فوري', 'Verify Now')}
-                              </button>
+                              {!client.verified && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleVerified(client);
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-950 text-[11px] font-bold cursor-pointer"
+                                >
+                                  {t('توثيق فوري', 'Verify Now')}
+                                </button>
+                              )}
                             </div>
                           </div>
                         )}
@@ -705,13 +745,21 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   )}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                 <input
                   type="text"
                   required
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder={t('اسم العميل الكامل', 'Client Full Name')}
+                  value={newFirstName}
+                  onChange={(e) => setNewFirstName(e.target.value)}
+                  placeholder={t('الاسم الأول', 'First Name')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438]"
+                />
+                <input
+                  type="text"
+                  required
+                  value={newLastName}
+                  onChange={(e) => setNewLastName(e.target.value)}
+                  placeholder={t('الاسم الأخير', 'Last Name')}
                   className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438]"
                 />
                 <input
@@ -738,14 +786,38 @@ export const AdminDashboardWorkspace: React.FC = () => {
         {activeTab === 'clients' && canManageClients && selectedClient && (
           <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200">
-              <button
-                type="button"
-                onClick={() => setSelectedClientPhone(null)}
-                className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-              >
-                <BackArrow className="w-4 h-4" />
-                <span>{t('العودة لقائمة العملاء', 'Back to Clients Directory')}</span>
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedClientPhone(null)}
+                  className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <BackArrow className="w-4 h-4" />
+                  <span>{t('العودة لقائمة العملاء', 'Back to Clients Directory')}</span>
+                </button>
+
+                <div className="flex items-center gap-2.5">
+                  {selectedClient.avatarUrl ? (
+                    <img
+                      src={selectedClient.avatarUrl}
+                      alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
+                      className="w-10 h-10 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-xs font-black shrink-0">
+                      {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
+                    </div>
+                  )}
+                  <div className="leading-tight">
+                    <span className="text-xs sm:text-sm font-black text-[#0F2438] block">
+                      {getTravelerDisplayNames(selectedClient).fullDisplayName}
+                    </span>
+                    <span className="text-[11px] text-slate-500 tabular-nums" dir="ltr">
+                      +{selectedClient.phoneNormalized || normalizePhone(selectedClient.phone)}
+                    </span>
+                  </div>
+                </div>
+              </div>
 
               <div className="flex flex-wrap items-center gap-2">
                 {canActivateOtp && (
@@ -793,7 +865,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   {buildActivationMagicLink(
                     selectedClient.phone,
                     selectedClient.otp,
-                    selectedClient.name
+                    getTravelerDisplayNames(selectedClient).fullDisplayName
                   )}
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -821,7 +893,9 @@ export const AdminDashboardWorkspace: React.FC = () => {
                     className="min-h-[40px] px-3 py-2 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
                   >
                     <Send className="w-3.5 h-3.5" />
-                    <span>{t('إرسال الكود لواتساب العميل', 'Send OTP to Client WhatsApp')}</span>
+                    <span>
+                      {t('إرسال كود الدخول للرقم المسجل', 'Send OTP to Registered Number')}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -840,12 +914,23 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم المسجل', 'Client Name')}
+                      {t('الاسم الأول (حسب الجواز)', 'First Name')}
                     </label>
                     <input
                       type="text"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
+                      value={editFirstName}
+                      onChange={(e) => setEditFirstName(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('الاسم الأخير (حسب الجواز)', 'Last Name')}
+                    </label>
+                    <input
+                      type="text"
+                      value={editLastName}
+                      onChange={(e) => setEditLastName(e.target.value)}
                       className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                     />
                   </div>

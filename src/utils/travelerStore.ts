@@ -14,6 +14,7 @@ import { TravelRepository } from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
   deleteTravelerDocumentFromStorage,
+  uploadTravelerAvatarToStorage,
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
 import { getSiteConfig } from './siteConfigStore';
@@ -36,6 +37,28 @@ export const VISA_ORDER_STATUSES: VisaOrderStatus[] = [
 ];
 
 export const TRAVELERS_UPDATED_EVENT = 'masarik-travelers-updated';
+
+export interface StagedDraftDocument {
+  id: string;
+  label: string;
+  docType: TravelerDocument['docType'];
+  fileName: string;
+  dataUrl: string;
+}
+
+export interface TravelerProfileDraft {
+  firstName: string;
+  lastName: string;
+  passportFullName: string;
+  passportNumber: string;
+  passportExpiryDate: string;
+  nationality: string;
+  preferredVisaType: string;
+  pendingAvatarPreviewUrl: string;
+  pendingDocuments: StagedDraftDocument[];
+  removedDocIds: string[];
+  isDirty: boolean;
+}
 
 function emitUpdateEvent(): void {
   if (typeof window !== 'undefined') {
@@ -69,11 +92,36 @@ export function formatPhoneForDisplay(rawPhone: string): string {
   return rawPhone.trim() || normalized;
 }
 
+export function splitPassportName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: '' };
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
 export function formatFirstLastName(fullName: string): string {
   const parts = fullName.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return '';
   if (parts.length === 1) return parts[0];
   return `${parts[0]} ${parts[parts.length - 1]}`;
+}
+
+export function getTravelerDisplayNames(profile: TravelerProfile | null): {
+  firstName: string;
+  lastName: string;
+  fullDisplayName: string;
+} {
+  if (!profile) {
+    return { firstName: '', lastName: '', fullDisplayName: '' };
+  }
+  const split = splitPassportName(profile.name || '');
+  const firstName = (profile.firstName || split.firstName || '').trim();
+  const lastName = (profile.lastName || split.lastName || '').trim();
+  const fullDisplayName = `${firstName} ${lastName}`.trim() || profile.name || '';
+  return { firstName, lastName, fullDisplayName };
 }
 
 export function generateSixDigitOtp(): string {
@@ -100,51 +148,29 @@ export function buildAdminForwardActivationMessage(
 ): string {
   const magicLink = buildActivationMagicLink(phone, otp, name);
   if (lang === 'en') {
-    return `Hello ${name.trim()}, your Masarik Tourism (Traveler Profile) activation is ready ✅
+    return `Hello ${name.trim()}, your Masarik Tourism login code is ready:
 
-🔐 *6-Digit Verification Code (OTP):* ${otp}
-
-⚡ *Or click this direct one-tap activation link:*
+• 6-Digit Login Code (OTP): ${otp}
+• Direct One-Tap Login Link:
 ${magicLink}
 
 We are happy to assist you 24/7.`;
   }
-  return `مرحباً ${name.trim()}، تم تجهيز تفعيل حسابك في منصة ${TravelRepository.COMPANY_NAME_AR} (ملف المسافر) بنجاح ✅
+  return `مرحباً ${name.trim()}، تم تجهيز كود الدخول لحسابك في منصة ${TravelRepository.COMPANY_NAME_AR}:
 
-🔐 *كود التفعيل اليدوي (OTP):* ${otp}
-
-⚡ *أو اضغط على رابط التفعيل المباشر للدخول فوراً بضغطة واحدة:*
+• كود الدخول (OTP): ${otp}
+• رابط الدخول المباشر بضغطة واحدة:
 ${magicLink}
 
-نسعد بخدمتك على مدار 24 ساعة.`;
+نسعد بخدمتك على مدار الساعة.`;
 }
 
-export function buildClientWhatsAppRequestMessage(
-  name: string,
-  phone: string,
-  otp: string,
-  lang: 'ar' | 'en' = 'ar'
-): string {
-  const cleanDisplayPhone = formatPhoneForDisplay(phone);
-  const forwardBlock = buildAdminForwardActivationMessage(name, phone, otp, lang);
+// Anti-Spoofing & Zero-Leak Request: NEVER include OTP or user inputs in client WhatsApp request
+export function buildClientWhatsAppRequestMessage(lang: 'ar' | 'en' = 'ar'): string {
   if (lang === 'en') {
-    return `Hello Masarik Tourism team,
-I would like to verify my *Traveler Profile* account:
-👤 *Name:* ${name.trim()}
-📱 *WhatsApp Number:* ${cleanDisplayPhone}
-🔐 *Verification Code (OTP):* ${otp}
-
---- *Ready-to-forward activation message for client* ---
-${forwardBlock}`;
+    return 'Hello, please send me the login code for my Masarik Tourism account.';
   }
-  return `السلام عليكم ورحمة الله وبركاته،
-أرغب في تفعيل حسابي في *ملف المسافر* بمنصة مسارك للإنجاز السياحي:
-👤 *الاسم:* ${name.trim()}
-📱 *رقم الواتساب:* ${cleanDisplayPhone}
-🔐 *كود التفعيل:* ${otp}
-
---- *رسالة جاهزة للنسخ وإعادة الإرسال للعميل* ---
-${forwardBlock}`;
+  return 'السلام عليكم، أرجو إرسال كود الدخول لحسابي في منصة مسارك للإنجاز السياحي.';
 }
 
 export function getAllTravelers(): Record<string, TravelerProfile> {
@@ -178,6 +204,19 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     ? String(profile.otp)
     : generateSixDigitOtp();
 
+  const normalized = normalizePhone(profile.phone).slice(0, 20);
+  const split = splitPassportName(profile.name || '');
+  const firstName = String(profile.firstName ?? split.firstName ?? '')
+    .trim()
+    .slice(0, 80);
+  const lastName = String(profile.lastName ?? split.lastName ?? '')
+    .trim()
+    .slice(0, 80);
+  const combinedName =
+    `${firstName} ${lastName}`.trim().slice(0, 160) ||
+    String(profile.name || 'مسافر').trim().slice(0, 160) ||
+    'مسافر';
+
   const safeDocs = Array.isArray(profile.documents)
     ? profile.documents.slice(0, 30).map((d) => ({
         id: String(d.id || `${Date.now()}`).slice(0, 80),
@@ -192,8 +231,11 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     : [];
 
   const payload: Record<string, unknown> = {
-    phone: normalizePhone(profile.phone).slice(0, 20),
-    name: String(profile.name || 'مسافر').trim().slice(0, 160) || 'مسافر',
+    phone: normalized,
+    phoneNormalized: normalized,
+    firstName,
+    lastName,
+    name: combinedName,
     otp: safeOtp,
     verified: Boolean(profile.verified),
     createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
@@ -214,6 +256,12 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     payload.passportExpiryDate = String(profile.passportExpiryDate).slice(0, 32);
   if (profile.nationality !== undefined)
     payload.nationality = String(profile.nationality).slice(0, 100);
+  if (profile.avatarUrl && profile.avatarUrl.length <= 4096) {
+    payload.avatarUrl = profile.avatarUrl;
+  }
+  if (profile.avatarStoragePath) {
+    payload.avatarStoragePath = String(profile.avatarStoragePath).slice(0, 300);
+  }
 
   return payload;
 }
@@ -237,8 +285,15 @@ function mergeCloudClientWithLocal(
       })
     : localExisting?.documents || [];
 
+  const split = splitPassportName(cloudData.name || '');
+
   return {
     ...cloudData,
+    phoneNormalized: cloudData.phoneNormalized || normalizePhone(cloudData.phone),
+    firstName: cloudData.firstName || split.firstName,
+    lastName: cloudData.lastName || split.lastName,
+    avatarUrl: cloudData.avatarUrl || localExisting?.avatarUrl || undefined,
+    avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
     documents: mergedDocs,
   };
 }
@@ -248,7 +303,7 @@ export async function syncTravelerToCloud(profile: TravelerProfile): Promise<voi
   if (!/^[0-9]{8,20}$/.test(phone)) return;
 
   const path = `clients/${phone}`;
-  const payload = sanitizeClientForFirestore({ ...profile, phone });
+  const payload = sanitizeClientForFirestore({ ...profile, phone, phoneNormalized: phone });
   try {
     await setDoc(doc(db, 'clients', phone), payload);
   } catch (error) {
@@ -300,9 +355,12 @@ export function subscribeAllClientsCloud(): () => void {
 
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as TravelerProfile;
-        const key = normalizePhone(data.phone || docSnap.id);
+        const key = normalizePhone(data.phoneNormalized || data.phone || docSnap.id);
         if (key) {
-          nextMap[key] = mergeCloudClientWithLocal({ ...data, phone: key }, currentLocal[key]);
+          nextMap[key] = mergeCloudClientWithLocal(
+            { ...data, phone: key, phoneNormalized: key },
+            currentLocal[key]
+          );
         }
       });
 
@@ -340,27 +398,246 @@ export function setActiveTravelerPhone(phone: string | null): void {
   emitUpdateEvent();
 }
 
+/**
+ * Step 1 of Zero-Leak Client Login:
+ * Generates a brand-new random 6-digit OTP in Firestore (`clients/{phoneNormalized}`),
+ * saves `firstName`, `lastName`, `name`, `phone`, and `phoneNormalized`,
+ * and DOES NOT unlock the session until OTP or Magic Link verification succeeds.
+ */
+export async function initiateTravelerOtpLoginCloud(
+  firstNameInput: string,
+  lastNameInput: string,
+  rawPhone: string
+): Promise<{ ok: boolean; phone: string; isExisting: boolean; error?: string }> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, phone: '', isExisting: false, error: 'رقم الهاتف غير صالح.' };
+  }
+
+  const cleanFirst = firstNameInput.trim();
+  const cleanLast = lastNameInput.trim();
+  const combinedName = `${cleanFirst} ${cleanLast}`.trim();
+  const freshOtp = generateSixDigitOtp();
+  const path = `clients/${phone}`;
+
+  const localAll = getAllTravelers();
+  let existing: TravelerProfile | undefined = localAll[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, localAll[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+    console.warn('Cloud lookup during OTP initiation deferred (offline fallback):', msg);
+  }
+
+  if (existing) {
+    const existingSplit = splitPassportName(existing.name || '');
+    const finalFirst = cleanFirst || existing.firstName || existingSplit.firstName;
+    const finalLast = cleanLast || existing.lastName || existingSplit.lastName;
+    const finalName = `${finalFirst} ${finalLast}`.trim() || existing.name;
+
+    const updated: TravelerProfile = {
+      ...existing,
+      phone,
+      phoneNormalized: phone,
+      firstName: finalFirst,
+      lastName: finalLast,
+      name: finalName,
+      otp: freshOtp,
+    };
+
+    localAll[phone] = updated;
+    saveAllTravelersLocalOnly(localAll);
+    await syncTravelerToCloud(updated);
+    return { ok: true, phone, isExisting: true };
+  }
+
+  const created: TravelerProfile = {
+    phone,
+    phoneNormalized: phone,
+    firstName: cleanFirst,
+    lastName: cleanLast,
+    name: combinedName || `مسافر (${formatPhoneForDisplay(phone)})`,
+    otp: freshOtp,
+    verified: false,
+    createdAt: new Date().toISOString(),
+    orderStatus: 'تم استلام الأوراق',
+    documents: [],
+  };
+
+  localAll[phone] = created;
+  saveAllTravelersLocalOnly(localAll);
+  await syncTravelerToCloud(created);
+  return { ok: true, phone, isExisting: false };
+}
+
+/**
+ * Step 2 of Zero-Leak Client Login:
+ * Verifies the user-entered 6-digit OTP against Firestore `clients/{phoneNormalized}`
+ * and unlocks the active traveler session only upon exact match.
+ */
+export async function verifyLoginOtpCloud(
+  rawPhone: string,
+  enteredOtp: string,
+  lang: 'ar' | 'en' = 'ar'
+): Promise<{ ok: boolean; error?: string; profile?: TravelerProfile }> {
+  const phone = normalizePhone(rawPhone);
+  const cleanOtp = normalizeArabicDigits(enteredOtp).replace(/\D/g, '');
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanOtp.length !== 6) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Please enter a valid 6-digit login code.'
+          : 'يرجى إدخال كود الدخول المكون من 6 أرقام.',
+    };
+  }
+
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let target: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+    console.warn('Cloud OTP verify read deferred (offline fallback):', msg);
+  }
+
+  if (!target) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Account not found for this WhatsApp number. Please start login again.'
+          : 'لم يتم العثور على حساب مسجل لهذا الرقم. يرجى إعادة خطوة الدخول.',
+    };
+  }
+
+  if (String(target.otp || '').trim() !== cleanOtp) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'The entered login code is incorrect. Please check with Masarik support and try again.'
+          : 'كود الدخول المدخل غير صحيح. يرجى التأكد من الكود المرسل لكم عبر واتساب.',
+    };
+  }
+
+  const verifiedProfile: TravelerProfile = {
+    ...target,
+    phone,
+    phoneNormalized: phone,
+    verified: true,
+    verifiedAt: new Date().toISOString(),
+  };
+
+  all[phone] = verifiedProfile;
+  saveAllTravelersLocalOnly(all);
+  setActiveTravelerPhone(phone);
+  await syncTravelerToCloud(verifiedProfile);
+  return { ok: true, profile: verifiedProfile };
+}
+
+/**
+ * Admin Quick-Add / Update Client helper (does NOT overwrite client session state).
+ */
+export async function adminCreateClientCloud(
+  firstNameInput: string,
+  lastNameInput: string,
+  rawPhone: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const cleanFirst = firstNameInput.trim();
+  const cleanLast = lastNameInput.trim();
+  const fullName = `${cleanFirst} ${cleanLast}`.trim();
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  const profile: TravelerProfile = existing
+    ? {
+        ...existing,
+        phone,
+        phoneNormalized: phone,
+        firstName: cleanFirst || existing.firstName,
+        lastName: cleanLast || existing.lastName,
+        name: fullName || existing.name,
+        otp: existing.otp || generateSixDigitOtp(),
+      }
+    : {
+        phone,
+        phoneNormalized: phone,
+        firstName: cleanFirst,
+        lastName: cleanLast,
+        name: fullName || `مسافر (${formatPhoneForDisplay(phone)})`,
+        otp: generateSixDigitOtp(),
+        verified: false,
+        createdAt: new Date().toISOString(),
+        orderStatus: 'تم استلام الأوراق',
+        documents: [],
+      };
+
+  all[phone] = profile;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(profile);
+  return profile;
+}
+
 export function registerOrLoginTraveler(name: string, rawPhone: string): TravelerProfile {
   const phone = normalizePhone(rawPhone);
   const cleanName = name.trim();
+  const split = splitPassportName(cleanName);
   const all = getAllTravelers();
   const existing = all[phone];
 
   if (existing) {
     const updated: TravelerProfile = {
       ...existing,
+      phone,
+      phoneNormalized: phone,
+      firstName: split.firstName || existing.firstName,
+      lastName: split.lastName || existing.lastName,
       name: cleanName || existing.name,
-      otp: existing.verified ? existing.otp : existing.otp || generateSixDigitOtp(),
+      otp: generateSixDigitOtp(),
     };
     all[phone] = updated;
     saveAllTravelersLocalOnly(all);
-    setActiveTravelerPhone(phone);
     void syncTravelerToCloud(updated);
     return updated;
   }
 
   const created: TravelerProfile = {
     phone,
+    phoneNormalized: phone,
+    firstName: split.firstName,
+    lastName: split.lastName,
     name: cleanName,
     otp: generateSixDigitOtp(),
     verified: false,
@@ -370,7 +647,6 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
   };
   all[phone] = created;
   saveAllTravelersLocalOnly(all);
-  setActiveTravelerPhone(phone);
   void syncTravelerToCloud(created);
   return created;
 }
@@ -379,39 +655,9 @@ export async function registerOrLoginTravelerCloud(
   name: string,
   rawPhone: string
 ): Promise<TravelerProfile> {
-  const phone = normalizePhone(rawPhone);
-  const cleanName = name.trim();
-  const path = `clients/${phone}`;
-
-  try {
-    if (/^[0-9]{8,20}$/.test(phone)) {
-      const snap = await getDoc(doc(db, 'clients', phone));
-      if (snap.exists()) {
-        const cloud = snap.data() as TravelerProfile;
-        const all = getAllTravelers();
-        const merged: TravelerProfile = {
-          ...mergeCloudClientWithLocal(cloud, all[phone]),
-          name: cleanName || cloud.name,
-          otp: cloud.verified ? cloud.otp : cloud.otp || generateSixDigitOtp(),
-        };
-        all[phone] = merged;
-        saveAllTravelersLocalOnly(all);
-        setActiveTravelerPhone(phone);
-        if (cleanName && cleanName !== cloud.name) {
-          await syncTravelerToCloud(merged);
-        }
-        return merged;
-      }
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (msg.toLowerCase().includes('permission')) {
-      handleFirestoreError(error, OperationType.GET, path);
-    }
-    console.warn('Cloud lookup skipped (offline fallback):', msg);
-  }
-
-  return registerOrLoginTraveler(name, rawPhone);
+  const split = splitPassportName(name);
+  const created = await adminCreateClientCloud(split.firstName, split.lastName, rawPhone);
+  return created || registerOrLoginTraveler(name, rawPhone);
 }
 
 export function verifyManualOtp(
@@ -455,6 +701,8 @@ export function verifyManualOtp(
 
   const verifiedProfile: TravelerProfile = {
     ...profile,
+    phone,
+    phoneNormalized: phone,
     verified: true,
     verifiedAt: new Date().toISOString(),
   };
@@ -484,8 +732,13 @@ export function activateViaMagicLink(
     if (existing.otp !== cleanOtp) {
       return { ok: false, error: 'كود التفعيل في الرابط غير مطابق لهذا الحساب.' };
     }
+    const split = splitPassportName(nameFromUrl || existing.name);
     const updated: TravelerProfile = {
       ...existing,
+      phone,
+      phoneNormalized: phone,
+      firstName: existing.firstName || split.firstName,
+      lastName: existing.lastName || split.lastName,
       name: nameFromUrl?.trim() || existing.name,
       verified: true,
       verifiedAt: existing.verifiedAt || new Date().toISOString(),
@@ -497,9 +750,14 @@ export function activateViaMagicLink(
     return { ok: true, profile: updated };
   }
 
+  const fallbackName = nameFromUrl?.trim() || `مسافر (${formatPhoneForDisplay(phone)})`;
+  const split = splitPassportName(fallbackName);
   const restored: TravelerProfile = {
     phone,
-    name: nameFromUrl?.trim() || `مسافر (${formatPhoneForDisplay(phone)})`,
+    phoneNormalized: phone,
+    firstName: split.firstName,
+    lastName: split.lastName,
+    name: fallbackName,
     otp: cleanOtp,
     verified: true,
     verifiedAt: new Date().toISOString(),
@@ -535,9 +793,15 @@ export async function activateViaMagicLinkCloud(
         if (cloud.otp !== cleanOtp) {
           return { ok: false, error: 'كود التفعيل في الرابط غير مطابق لهذا الحساب.' };
         }
+        const split = splitPassportName(nameFromUrl || cloud.name);
+        const merged = mergeCloudClientWithLocal(cloud, getAllTravelers()[phone]);
         const updated: TravelerProfile = {
-          ...mergeCloudClientWithLocal(cloud, getAllTravelers()[phone]),
-          name: nameFromUrl?.trim() || cloud.name,
+          ...merged,
+          phone,
+          phoneNormalized: phone,
+          firstName: merged.firstName || split.firstName,
+          lastName: merged.lastName || split.lastName,
+          name: nameFromUrl?.trim() || merged.name,
           verified: true,
           verifiedAt: cloud.verifiedAt || new Date().toISOString(),
         };
@@ -565,7 +829,12 @@ export function updateTravelerProfileDetails(
   updates: Partial<
     Pick<
       TravelerProfile,
+      | 'firstName'
+      | 'lastName'
       | 'name'
+      | 'phoneNormalized'
+      | 'avatarUrl'
+      | 'avatarStoragePath'
       | 'passportFullName'
       | 'passportNumber'
       | 'passportExpiryDate'
@@ -588,13 +857,128 @@ export function updateTravelerProfileDetails(
     cleanUpdates.passportNumber = cleanUpdates.passportNumber.trim().toUpperCase();
   }
 
+  const nextFirst =
+    cleanUpdates.firstName !== undefined
+      ? cleanUpdates.firstName.trim()
+      : existing.firstName || splitPassportName(existing.name).firstName;
+  const nextLast =
+    cleanUpdates.lastName !== undefined
+      ? cleanUpdates.lastName.trim()
+      : existing.lastName || splitPassportName(existing.name).lastName;
+  const nextCombined =
+    cleanUpdates.name !== undefined
+      ? cleanUpdates.name.trim()
+      : `${nextFirst} ${nextLast}`.trim() || existing.name;
+
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
+    phone,
+    phoneNormalized: phone,
+    firstName: nextFirst,
+    lastName: nextLast,
+    name: nextCombined,
   };
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(updated);
+  return updated;
+}
+
+/**
+ * Commits staged traveler draft edits, personal profile photo (avatar),
+ * newly staged wallet/passport documents, and document removals in one atomic save.
+ */
+export async function commitTravelerProfileDraftCloud(
+  rawPhone: string,
+  draft: TravelerProfileDraft
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  // 1. Upload staged personal avatar if changed
+  let nextAvatarUrl = existing.avatarUrl;
+  let nextAvatarStoragePath = existing.avatarStoragePath;
+
+  if (draft.pendingAvatarPreviewUrl) {
+    if (draft.pendingAvatarPreviewUrl.startsWith('data:')) {
+      const uploadedAvatar = await uploadTravelerAvatarToStorage(
+        phone,
+        draft.pendingAvatarPreviewUrl
+      );
+      if (uploadedAvatar) {
+        if (existing.avatarStoragePath && existing.avatarStoragePath !== uploadedAvatar.storagePath) {
+          void deleteTravelerDocumentFromStorage(existing.avatarStoragePath);
+        }
+        nextAvatarUrl = uploadedAvatar.downloadUrl;
+        nextAvatarStoragePath = uploadedAvatar.storagePath;
+      } else {
+        // Offline local fallback (sanitizeClientForFirestore skips >4096 base64 from Firestore)
+        nextAvatarUrl = draft.pendingAvatarPreviewUrl;
+      }
+    } else {
+      nextAvatarUrl = draft.pendingAvatarPreviewUrl;
+    }
+  }
+
+  // 2. Remove staged deletions
+  const removedSet = new Set(draft.removedDocIds || []);
+  const keptDocs: TravelerDocument[] = [];
+  for (const docItem of existing.documents || []) {
+    if (removedSet.has(docItem.id)) {
+      if (docItem.storagePath) {
+        void deleteTravelerDocumentFromStorage(docItem.storagePath);
+      }
+    } else {
+      keptDocs.push(docItem);
+    }
+  }
+
+  // 3. Upload newly staged documents
+  const uploadedNewDocs: TravelerDocument[] = [];
+  for (const staged of draft.pendingDocuments || []) {
+    const uploaded = await uploadTravelerDocumentToStorage(phone, staged.id, staged.dataUrl);
+    uploadedNewDocs.push({
+      id: staged.id,
+      label: staged.label,
+      docType: staged.docType,
+      fileName: staged.fileName,
+      dataUrl: uploaded ? uploaded.downloadUrl : staged.dataUrl,
+      ...(uploaded ? { storagePath: uploaded.storagePath } : {}),
+      uploadedAt: new Date().toISOString(),
+    });
+  }
+
+  const cleanFirst = draft.firstName.trim();
+  const cleanLast = draft.lastName.trim();
+  const fullDisplayName = `${cleanFirst} ${cleanLast}`.trim() || existing.name;
+
+  // Re-read latest map in case snapshot arrived while uploading
+  const latestAll = getAllTravelers();
+  const latestExisting = latestAll[phone] || existing;
+
+  const updated: TravelerProfile = {
+    ...latestExisting,
+    phone,
+    phoneNormalized: phone,
+    firstName: cleanFirst,
+    lastName: cleanLast,
+    name: fullDisplayName,
+    passportFullName: draft.passportFullName.trim() || fullDisplayName,
+    passportNumber: draft.passportNumber.trim().toUpperCase(),
+    passportExpiryDate: draft.passportExpiryDate,
+    nationality: draft.nationality.trim(),
+    preferredVisaType: draft.preferredVisaType.trim(),
+    ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
+    ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
+    documents: [...uploadedNewDocs, ...keptDocs],
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
   return updated;
 }
 
@@ -605,6 +989,7 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
   if (!existing) return false;
 
   const docs = existing.documents || [];
+  const avatarPath = existing.avatarStoragePath;
   delete all[phone];
   saveAllTravelersLocalOnly(all);
   if (getActivePhone() === phone) {
@@ -612,6 +997,9 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
   }
 
   // Cleanup Storage assets + Firestore document
+  if (avatarPath) {
+    void deleteTravelerDocumentFromStorage(avatarPath);
+  }
   docs.forEach((d) => {
     if (d.storagePath) {
       void deleteTravelerDocumentFromStorage(d.storagePath);

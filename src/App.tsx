@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Navbar } from './components/Navbar';
 import { BottomNav } from './components/BottomNav';
 import { HomeScreen } from './screens/HomeScreen';
@@ -11,17 +11,24 @@ import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight } from 'lucide-re
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
 import { InAppVersionBanner } from './components/InAppVersionBanner';
-import { TravelerProfileModal } from './components/TravelerProfileModal';
+import {
+  TravelerSubTab,
+  TravelerWorkspaceScreen,
+} from './components/TravelerWorkspaceScreen';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { AdminDashboardWorkspace } from './components/AdminDashboardWorkspace';
 import { LiveInlineEditorEngine } from './components/LiveInlineEditorEngine';
 import {
   TRAVELERS_UPDATED_EVENT,
+  TravelerProfileDraft,
   activateViaMagicLinkCloud,
   getActivePhone,
+  getActiveTraveler,
+  getTravelerDisplayNames,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
 } from './utils/travelerStore';
+import { TravelerProfile } from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
@@ -30,6 +37,44 @@ import { subscribeCmsCloud } from './utils/cmsStore';
 import { subscribeAdminsCloud } from './utils/adminAuthStore';
 import { useAdmin } from './contexts/AdminContext';
 
+function buildDraftFromTraveler(
+  traveler: TravelerProfile | null,
+  lang: 'ar' | 'en'
+): TravelerProfileDraft {
+  if (!traveler) {
+    return {
+      firstName: '',
+      lastName: '',
+      passportFullName: '',
+      passportNumber: '',
+      passportExpiryDate: '',
+      nationality: lang === 'en' ? 'Egyptian' : 'مصري',
+      preferredVisaType:
+        lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية',
+      pendingAvatarPreviewUrl: '',
+      pendingDocuments: [],
+      removedDocIds: [],
+      isDirty: false,
+    };
+  }
+  const names = getTravelerDisplayNames(traveler);
+  return {
+    firstName: names.firstName,
+    lastName: names.lastName,
+    passportFullName: traveler.passportFullName || names.fullDisplayName,
+    passportNumber: traveler.passportNumber || '',
+    passportExpiryDate: traveler.passportExpiryDate || '',
+    nationality: traveler.nationality || (lang === 'en' ? 'Egyptian' : 'مصري'),
+    preferredVisaType:
+      traveler.preferredVisaType ||
+      (lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية'),
+    pendingAvatarPreviewUrl: '',
+    pendingDocuments: [],
+    removedDocIds: [],
+    isDirty: false,
+  };
+}
+
 export const App: React.FC = () => {
   const { lang, dir, t } = useLanguage();
   const siteConfig = useSiteConfig();
@@ -37,12 +82,23 @@ export const App: React.FC = () => {
   const localized = getLocalizedTravelContent(lang);
 
   const [currentTab, setCurrentTab] = useState<number>(0);
+  const [travelerSection, setTravelerSection] = useState<TravelerSubTab | null>(null);
   const [selectedServiceForContact, setSelectedServiceForContact] = useState<string | null>(null);
-  const [travelerModalOpen, setTravelerModalOpen] = useState<boolean>(false);
   const [magicLinkFeedback, setMagicLinkFeedback] = useState<string | null>(null);
   const [activeTravelerPhone, setActiveTravelerPhoneState] = useState<string | null>(() =>
     getActivePhone()
   );
+  const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
+    getActiveTraveler()
+  );
+  const [pendingOtpPhone, setPendingOtpPhone] = useState<string | null>(null);
+
+  // Lifted Draft State: preserved across full-page navigation until explicit Save or Cancel
+  const [travelerDraft, setTravelerDraft] = useState<TravelerProfileDraft>(() =>
+    buildDraftFromTraveler(getActiveTraveler(), lang)
+  );
+  const draftOwnerPhoneRef = useRef<string | null>(activeTravelerPhone);
+
   const adminTapCountRef = useRef<number>(0);
   const adminTapTimerRef = useRef<number | null>(null);
 
@@ -51,15 +107,30 @@ export const App: React.FC = () => {
     const unsubConfig = subscribeSiteConfigCloud();
     const unsubCms = subscribeCmsCloud();
     const unsubAdmins = subscribeAdminsCloud();
-    const syncActivePhone = () => setActiveTravelerPhoneState(getActivePhone());
-    window.addEventListener(TRAVELERS_UPDATED_EVENT, syncActivePhone);
+    const syncTravelerState = () => {
+      const nextPhone = getActivePhone();
+      const nextTraveler = getActiveTraveler();
+      setActiveTravelerPhoneState(nextPhone);
+      setActiveTraveler(nextTraveler);
+
+      // Re-sync draft only when active user changes or draft is clean (never overwrite unsaved edits)
+      if (draftOwnerPhoneRef.current !== nextPhone) {
+        draftOwnerPhoneRef.current = nextPhone;
+        setTravelerDraft(buildDraftFromTraveler(nextTraveler, lang));
+      } else {
+        setTravelerDraft((prev) =>
+          prev.isDirty ? prev : buildDraftFromTraveler(nextTraveler, lang)
+        );
+      }
+    };
+    window.addEventListener(TRAVELERS_UPDATED_EVENT, syncTravelerState);
     return () => {
       unsubConfig();
       unsubCms();
       unsubAdmins();
-      window.removeEventListener(TRAVELERS_UPDATED_EVENT, syncActivePhone);
+      window.removeEventListener(TRAVELERS_UPDATED_EVENT, syncTravelerState);
     };
-  }, []);
+  }, [lang]);
 
   // Real-time cloud subscription for currently signed-in traveler
   useEffect(() => {
@@ -104,16 +175,16 @@ export const App: React.FC = () => {
           if (res.ok && res.profile) {
             setMagicLinkFeedback(
               t(
-                `تم تفعيل حسابك (${res.profile.name}) بنجاح وتوثيقه عبر رابط الواتساب المباشر!`,
-                `Your account (${res.profile.name}) has been verified ✓ via your WhatsApp activation link!`
+                `تم تفعيل حسابك (${res.profile.name}) بنجاح والدخول المباشر عبر رابط الواتساب!`,
+                `Your account (${res.profile.name}) has been verified and unlocked via your WhatsApp link!`
               )
             );
-            setTravelerModalOpen(true);
+            setTravelerSection('account');
           } else {
             setMagicLinkFeedback(
-              res.error || t('رابط التفعيل غير صالح.', 'Invalid activation link.')
+              res.error || t('رابط التفعيل غير صالح أو منتهي.', 'Invalid or expired login link.')
             );
-            setTravelerModalOpen(true);
+            setTravelerSection('account');
           }
         }
       } catch {
@@ -147,6 +218,7 @@ export const App: React.FC = () => {
   };
 
   const handleNavigateToAiScanner = () => {
+    setTravelerSection(null);
     setCurrentTab(0);
     setTimeout(() => {
       const el = document.getElementById('traveler-smart-tools');
@@ -158,20 +230,32 @@ export const App: React.FC = () => {
     if (serviceTitle) {
       setSelectedServiceForContact(serviceTitle);
     }
+    setTravelerSection(null);
     setCurrentTab(3);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSelectTab = (tab: number) => {
+    setTravelerSection(null);
     setCurrentTab(tab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSelectTravelerSection = (section: TravelerSubTab) => {
+    setTravelerSection(section);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSelectServiceFromNavbar = (serviceTitle: string) => {
     setSelectedServiceForContact(serviceTitle);
+    setTravelerSection(null);
     setCurrentTab(1);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  const handleResetDraft = useCallback(() => {
+    setTravelerDraft(buildDraftFromTraveler(getActiveTraveler(), lang));
+  }, [lang]);
 
   return (
     <div
@@ -180,19 +264,40 @@ export const App: React.FC = () => {
       dir={dir}
       className="min-h-screen flex flex-col bg-[#F8FAFC] text-[#0F2438] selection:bg-[#0284C7]/20"
     >
-      {/* Organized Navigation Bar */}
+      {/* Organized Navigation Bar + Slim Logged-in Sub-Navbar */}
       <Navbar
         currentTab={currentTab}
+        travelerSection={travelerSection}
         onSelectTab={handleSelectTab}
+        onSelectTravelerSection={handleSelectTravelerSection}
         onSelectService={handleSelectServiceFromNavbar}
-        onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+        onOpenTravelerProfile={() => handleSelectTravelerSection('account')}
         onSecretAdminTap={handleSecretAdminTap}
+        hasUnsavedTravelerDraft={travelerDraft.isDirty}
       />
 
-      {/* Full-Page Admin Workspace OR Live Site Viewport */}
+      {/* Full-Page Admin Workspace OR Full-Page Traveler Workspace OR Live Site Viewport */}
       {isDashboardMode ? (
         <main className="flex-1" data-no-admin-edit="true">
           <AdminDashboardWorkspace />
+        </main>
+      ) : travelerSection ? (
+        <main className="flex-1" data-no-admin-edit="true">
+          <TravelerWorkspaceScreen
+            activeTraveler={activeTraveler}
+            subTab={travelerSection}
+            onChangeSubTab={handleSelectTravelerSection}
+            draft={travelerDraft}
+            onUpdateDraft={(updater) => setTravelerDraft((prev) => updater(prev))}
+            onResetDraft={handleResetDraft}
+            pendingOtpPhone={pendingOtpPhone}
+            onSetPendingOtpPhone={setPendingOtpPhone}
+            magicLinkFeedback={magicLinkFeedback}
+            onClearMagicLinkFeedback={() => setMagicLinkFeedback(null)}
+            onNavigateToAiScanner={handleNavigateToAiScanner}
+            onNavigateToServices={() => handleSelectTab(1)}
+            onGoHome={() => handleSelectTab(0)}
+          />
         </main>
       ) : (
         <main className="flex-1">
@@ -200,7 +305,7 @@ export const App: React.FC = () => {
             <HomeScreen
               onNavigateToServices={() => handleSelectTab(1)}
               onNavigateToContact={handleNavigateToContact}
-              onOpenTravelerProfile={() => setTravelerModalOpen(true)}
+              onOpenTravelerProfile={() => handleSelectTravelerSection('account')}
               onSecretAdminTap={handleSecretAdminTap}
             />
           )}
@@ -363,22 +468,13 @@ export const App: React.FC = () => {
         </div>
       </footer>
 
-      {/* Traveler Profile & Internal Verification Modal */}
-      <TravelerProfileModal
-        isOpen={travelerModalOpen}
-        onClose={() => {
-          setTravelerModalOpen(false);
-          setMagicLinkFeedback(null);
-        }}
-        magicLinkFeedback={magicLinkFeedback}
-        onNavigateToAiScanner={handleNavigateToAiScanner}
-      />
-
       {/* PIN-Only Admin Entry Modal (Unlocks Full-Page Admin Session) */}
       <AdminLoginModal />
 
       {/* Universal Live Inline Site Editor & Persistent CMS Observer */}
-      {!isDashboardMode && <LiveInlineEditorEngine rootId="masarik-site-viewport" />}
+      {!isDashboardMode && !travelerSection && (
+        <LiveInlineEditorEngine rootId="masarik-site-viewport" />
+      )}
 
       {/* Self-Updating Website Notification Banner */}
       <SiteUpdateBanner />
@@ -393,8 +489,8 @@ export const App: React.FC = () => {
       <BottomNav
         currentTab={currentTab}
         onSelectTab={handleSelectTab}
-        onOpenTravelerProfile={() => setTravelerModalOpen(true)}
-        isTravelerOpen={travelerModalOpen}
+        onOpenTravelerProfile={() => handleSelectTravelerSection('account')}
+        isTravelerOpen={Boolean(travelerSection)}
       />
     </div>
   );

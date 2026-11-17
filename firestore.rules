@@ -41,7 +41,12 @@ service cloud.firestore {
       ])
       && data.keys().hasOnly([
         'phone',
+        'phoneNormalized',
+        'firstName',
+        'lastName',
         'name',
+        'avatarUrl',
+        'avatarStoragePath',
         'otp',
         'verified',
         'verifiedAt',
@@ -59,9 +64,15 @@ service cloud.firestore {
       && data.phone is string
       && data.phone == phoneId
       && data.phone.matches('^[0-9]{8,20}$')
+      && isOptionalString(data, 'phoneNormalized', 20)
+      && (!('phoneNormalized' in data) || (data.phoneNormalized.size() >= 8 && data.phoneNormalized.matches('^[0-9]{8,20}$') && data.phoneNormalized == phoneId))
+      && isOptionalString(data, 'firstName', 80)
+      && isOptionalString(data, 'lastName', 80)
       && data.name is string
       && data.name.size() >= 1
       && data.name.size() <= 160
+      && isOptionalString(data, 'avatarUrl', 4096)
+      && isOptionalString(data, 'avatarStoragePath', 300)
       && data.otp is string
       && data.otp.matches('^[0-9]{6}$')
       && data.verified is bool
@@ -186,7 +197,12 @@ service cloud.firestore {
         && incoming().phone == existing().phone
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly([
+          'phoneNormalized',
+          'firstName',
+          'lastName',
           'name',
+          'avatarUrl',
+          'avatarStoragePath',
           'otp',
           'verified',
           'verifiedAt',

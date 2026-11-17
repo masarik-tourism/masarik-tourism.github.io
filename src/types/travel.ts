@@ -57,7 +57,12 @@ export interface TravelerDocument {
 
 export interface TravelerProfile {
   phone: string;
+  phoneNormalized?: string;
+  firstName?: string;
+  lastName?: string;
   name: string;
+  avatarUrl?: string;
+  avatarStoragePath?: string;
   otp: string;
   verified: boolean;
   verifiedAt?: string;

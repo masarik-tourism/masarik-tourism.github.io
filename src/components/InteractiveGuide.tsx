@@ -173,15 +173,15 @@ export const InteractiveGuide: React.FC<{ onRequestModal: (serviceTitle: string)
       lang === 'en'
         ? `Hello Masarik Tourism,
 I used the Interactive Service Guide:
-📌 *Recommended Service:* ${matched.title}
-🎯 *Primary Goal:* ${goalObj?.label || selectedGoal}
-🔍 *Selected Option:* ${detailObj?.label || selectedDetail}
+• Recommended Service: ${matched.title}
+• Primary Goal: ${goalObj?.label || selectedGoal}
+• Selected Option: ${detailObj?.label || selectedDetail}
 Please share requirements, fees, and next steps. Thank you.`
         : `السلام عليكم ورحمة الله وبركاته،
 استخدمت الدليل التفاعلي لمنصة مسارك للإنجاز السياحي:
-📌 *الخدمة الموصى بها:* ${matched.title}
-🎯 *الهدف الأساسي:* ${goalObj?.label || selectedGoal}
-🔍 *التفاصيل المحددة:* ${detailObj?.label || selectedDetail}
+• الخدمة الموصى بها: ${matched.title}
+• الهدف الأساسي: ${goalObj?.label || selectedGoal}
+• التفاصيل المحددة: ${detailObj?.label || selectedDetail}
 أرغب في البدء في المعاملة ومعرفة الرسوم والخطوات القادمة. شكراً لكم.`;
 
     openWhatsApp(message);
