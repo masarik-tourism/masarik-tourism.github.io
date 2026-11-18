@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'masarik-cache-81-mwlcgknr';
+const CACHE_VERSION = 'masarik-cache-82-mwlvg15j';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
@@ -9,6 +9,7 @@ const PRECACHE_URLS = [
 ];
 
 self.addEventListener('install', (event) => {
+  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_VERSION).then((cache) => cache.addAll(PRECACHE_URLS).catch(() => {}))
   );
@@ -50,13 +51,20 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // Never intercept or cache GitHub API, .apk files, version check files, or sw.js itself
+  // Never intercept or cache GitHub API, .apk files, version check files, sw.js, API routes, or Vite dev source modules
   if (
     url.hostname.includes('github.com') ||
     url.hostname.includes('githubusercontent.com') ||
     url.pathname.toLowerCase().endsWith('.apk') ||
     url.pathname.endsWith('version.json') ||
-    url.pathname.endsWith('sw.js')
+    url.pathname.endsWith('sw.js') ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname.endsWith('.ts') ||
+    url.pathname.endsWith('.tsx') ||
+    url.pathname.endsWith('.jsx')
   ) {
     return;
   }
@@ -80,7 +88,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-While-Revalidate for static assets
+  // Network-First for JS/CSS scripts to prevent stale module export mismatches
+  if (url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
+    event.respondWith(
+      fetch(request)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const copy = networkResponse.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return networkResponse;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Stale-While-Revalidate for images and static manifest/font assets
   event.respondWith(
     caches.match(request).then((cachedResponse) => {
       const fetchPromise = fetch(request)
