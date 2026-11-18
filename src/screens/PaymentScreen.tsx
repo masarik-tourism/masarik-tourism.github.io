@@ -20,7 +20,10 @@ import {
   Lock,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
-import { openWhatsApp } from '../utils/communication';
+import {
+  CUSTOMER_SERVICE_WHATSAPP_NUMBER,
+  openWhatsApp,
+} from '../utils/communication';
 import { useLanguage } from '../contexts/LanguageContext';
 import {
   TRAVELERS_UPDATED_EVENT,
@@ -29,7 +32,10 @@ import {
   getActiveTraveler,
   uploadAndAddDocumentToTravelerCloud,
 } from '../utils/travelerStore';
-import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
+import {
+  getDisplayableDriveImageUrl,
+  uploadToGoogleDriveWebApp,
+} from '../utils/firebaseStorageHelper';
 import { TravelerDocument, TravelerProfile } from '../types/travel';
 
 interface PaymentScreenProps {
@@ -50,8 +56,14 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
   const [receiptFileName, setReceiptFileName] = useState<string>('payment-receipt.jpg');
   const [isUploadingReceipt, setIsUploadingReceipt] = useState(false);
   const [uploadedReceiptDoc, setUploadedReceiptDoc] = useState<TravelerDocument | null>(null);
+  const [guestDriveReceipt, setGuestDriveReceipt] = useState<{
+    viewUrl: string;
+    downloadUrl: string;
+  } | null>(null);
+  const [lastWhatsappConfirmUrl, setLastWhatsappConfirmUrl] = useState<string | null>(null);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const receiptFileRef = useRef<HTMLInputElement | null>(null);
+  const receiptSectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const sync = () => setActiveTraveler(getActiveTraveler());
@@ -80,6 +92,14 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
     }, 2400);
   };
 
+  const handleJumpToReceiptUpload = (channelValue: string) => {
+    setTransferChannel(channelValue);
+    setReceiptError(null);
+    setTimeout(() => {
+      receiptSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 40);
+  };
+
   const handleSelectReceiptFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -87,6 +107,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
 
     setReceiptError(null);
     setUploadedReceiptDoc(null);
+    setGuestDriveReceipt(null);
+    setLastWhatsappConfirmUrl(null);
 
     try {
       const compressed = await compressImageToDataUrl(file, 1280, 0.82);
@@ -102,13 +124,24 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
     }
   };
 
-  const handleAttachReceiptToOrder = async () => {
-    if (!receiptPreview || !activeTraveler) return;
-    setIsUploadingReceipt(true);
-    setReceiptError(null);
-    try {
-      const refPart = transferReference.trim() ? ` (${transferReference.trim()})` : '';
-      const label = `${t('إيصال دفع عبر', 'Payment Receipt via')} ${transferChannel}${refPart}`;
+  const ensureReceiptSavedToCloud = async (): Promise<string> => {
+    if (!receiptPreview) return '';
+
+    // Already uploaded to Google Drive in this session
+    if (uploadedReceiptDoc?.viewUrl && uploadedReceiptDoc.viewUrl.startsWith('http')) {
+      return uploadedReceiptDoc.viewUrl;
+    }
+    if (uploadedReceiptDoc?.dataUrl && uploadedReceiptDoc.dataUrl.startsWith('http')) {
+      return uploadedReceiptDoc.dataUrl;
+    }
+    if (guestDriveReceipt?.viewUrl && guestDriveReceipt.viewUrl.startsWith('http')) {
+      return guestDriveReceipt.viewUrl;
+    }
+
+    const refPart = transferReference.trim() ? ` (${transferReference.trim()})` : '';
+    const label = `${t('إيصال دفع عبر', 'Payment Receipt via')} ${transferChannel}${refPart}`;
+
+    if (activeTraveler) {
       const res = await uploadAndAddDocumentToTravelerCloud(activeTraveler.phone, {
         docType: 'receipt',
         label,
@@ -118,25 +151,70 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
       if (res) {
         setUploadedReceiptDoc(res.document);
         setActiveTraveler(res.profile);
-      } else {
-        setReceiptError(
-          t('تعذر إرفاق الإيصال في حسابك حالياً.', 'Could not attach receipt to your account.')
-        );
+        if (res.document.viewUrl?.startsWith('http')) return res.document.viewUrl;
+        if (res.document.dataUrl?.startsWith('http')) return res.document.dataUrl;
+        return '';
       }
+      throw new Error('Could not save to order');
+    }
+
+    // Guest upload: still store safely on Google Drive Web App
+    const safeGuestName = `Masarik_GuestReceipt_${Date.now()}_${receiptFileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const driveRes = await uploadToGoogleDriveWebApp({
+      fileName: safeGuestName,
+      mimeType: 'image/jpeg',
+      base64: receiptPreview,
+    });
+    setGuestDriveReceipt({ viewUrl: driveRes.viewUrl, downloadUrl: driveRes.downloadUrl });
+    return driveRes.viewUrl;
+  };
+
+  const handleAttachReceiptToOrder = async () => {
+    if (!receiptPreview || isUploadingReceipt) return;
+    setIsUploadingReceipt(true);
+    setReceiptError(null);
+    try {
+      await ensureReceiptSavedToCloud();
     } catch {
       setReceiptError(
-        t('حدث خطأ أثناء رفع الإيصال، يرجى المحاولة مجدداً.', 'Upload error. Please try again.')
+        t(
+          'حدث خطأ أثناء رفع الإيصال إلى السحابة، يمكنك المحاولة مجدداً أو الإرسال عبر واتساب مباشرة.',
+          'Cloud upload encountered an issue. Please try again or send directly via WhatsApp.'
+        )
       );
     } finally {
       setIsUploadingReceipt(false);
     }
   };
 
-  const handleNotifyReceiptWhatsApp = () => {
+  const handleNotifyReceiptWhatsApp = async () => {
+    setReceiptError(null);
+    let driveUrl =
+      uploadedReceiptDoc?.viewUrl ||
+      (uploadedReceiptDoc?.dataUrl?.startsWith('http') ? uploadedReceiptDoc.dataUrl : '') ||
+      guestDriveReceipt?.viewUrl ||
+      '';
+
+    // Automatically save/upload receipt image to Google Drive + DB before opening WhatsApp
+    if (receiptPreview && !driveUrl) {
+      setIsUploadingReceipt(true);
+      try {
+        driveUrl = await ensureReceiptSavedToCloud();
+      } catch {
+        setReceiptError(
+          t(
+            'تعذر رفع نسخة الإيصال سحابياً في هذه اللحظة، سيتم فتح واتساب لإرسال الإيصال مباشرة.',
+            'Could not upload receipt copy to cloud right now; opening WhatsApp so you can send it directly.'
+          )
+        );
+      } finally {
+        setIsUploadingReceipt(false);
+      }
+    }
+
     const orderCode = activeTraveler
       ? activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)
       : null;
-    const driveUrl = uploadedReceiptDoc?.viewUrl || uploadedReceiptDoc?.dataUrl || '';
     const refText = transferReference.trim();
 
     const msg =
@@ -156,6 +234,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               : '\n• صورة الإيصال: مرفقة بالمحادثة الآن.'
           }`;
 
+    const waUrl = `https://wa.me/${CUSTOMER_SERVICE_WHATSAPP_NUMBER}?text=${encodeURIComponent(msg)}`;
+    setLastWhatsappConfirmUrl(waUrl);
     openWhatsApp(msg);
   };
 
@@ -163,6 +243,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
   const existingReceipts = (activeTraveler?.documents || []).filter(
     (d) => d.docType === 'receipt'
   );
+  const isSavedReceiptReady = Boolean(uploadedReceiptDoc || guestDriveReceipt);
 
   return (
     <div className="min-h-screen bg-[#FAF9F6] pb-24 md:pb-16 pt-5">
@@ -192,8 +273,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               </span>
               <p className="text-xs text-slate-200 leading-relaxed">
                 {t(
-                  'أتمم التحويل بضغطة واحدة عبر إنستاباي أو المحافظ الإلكترونية، ثم أرفق صورة الإيصال بالأسفل لتأكيد الحجز فوراً.',
-                  'Complete your transfer via InstaPay or E-Wallets, then attach your payment receipt below to confirm your booking immediately.'
+                  'أتمم التحويل بضغطة واحدة عبر إنستاباي أو المحافظ الإلكترونية، ثم اضغط "رفع الإيصال" لإرفاق صورة الإيصال بالأسفل وتأكيد الحجز فوراً.',
+                  'Complete your transfer via InstaPay or E-Wallets, then tap "Upload Receipt" to attach your receipt below and confirm immediately.'
                 )}
               </p>
             </div>
@@ -208,7 +289,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
           )}
         </div>
 
-        {/* 1. InstaPay Official Channel (Button + IPA Handle Only) */}
+        {/* 1. InstaPay Official Channel */}
         <div className="bg-gradient-to-br from-[#FAF8F2] via-white to-[#F6EFFC] border-2 border-[#7E22CE]/45 hover:border-[#7E22CE] rounded-2xl p-5 shadow-md space-y-4 transition-all">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -258,21 +339,42 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             <button
               type="button"
               onClick={() => handleCopyValue('instapay_ipa', instapayHandle)}
-              className="min-h-[42px] px-4 py-2 rounded-xl bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0 whitespace-nowrap"
+              className="min-h-[42px] px-3.5 sm:px-4 py-2 rounded-xl bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0 whitespace-nowrap"
             >
               {copiedKey === 'instapay_ipa' ? (
                 <>
-                  <Check className="w-4 h-4 text-emerald-600" />
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span className="text-emerald-700">{t('تم نسخ العنوان!', 'Address Copied!')}</span>
                 </>
               ) : (
                 <>
-                  <Copy className="w-4 h-4" />
+                  <Copy className="w-4 h-4 shrink-0" />
                   <span>{t('نسخ العنوان بضغطة واحدة', '1-Click Copy Address')}</span>
                 </>
               )}
             </button>
           </div>
+
+          {/* Recipient Assurance Line */}
+          <div className="bg-[#F3E8FF]/65 border border-[#D8B4FE] rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-xs font-bold text-[#4C1D95]">
+            <CheckCircle2 className="w-4 h-4 text-[#7E22CE] shrink-0" />
+            <span>
+              {t(
+                'الاسم الظاهر عند التحويل: محمد يوسف / شركة مسارك للإنجاز السياحي',
+                'Recipient Name Shown on Transfer: Mohamed Youssef / Masarik Tourism L.L.C'
+              )}
+            </span>
+          </div>
+
+          {/* Quick Upload Receipt Trigger */}
+          <button
+            type="button"
+            onClick={() => handleJumpToReceiptUpload('إنستاباي (InstaPay)')}
+            className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#F3E8FF]/60 text-[#0F2438] border border-[#C6A052]/65 hover:border-[#7E22CE]/60 text-xs font-black flex items-center justify-center gap-2 transition active:scale-[0.99] cursor-pointer"
+          >
+            <Upload className="w-4 h-4 text-[#7E22CE]" />
+            <span>{t('رفع الإيصال', 'Upload Receipt')}</span>
+          </button>
         </div>
 
         {/* 2. Electronic Wallets Card */}
@@ -299,31 +401,34 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             </div>
           </div>
 
-          <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <span className="text-[11px] font-bold text-[#678093] block">
-                {t('رقم المحفظة الإلكترونية المعتمد:', 'Official E-Wallet Transfer Number:')}
-              </span>
-              <span dir="ltr" className="text-lg font-black text-[#0F2438] tabular-nums tracking-wide">
-                {TravelRepository.PHONE_NUMBER}
-              </span>
+          <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3.5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <span className="text-[11px] font-bold text-[#678093] block">
+                  {t('رقم المحفظة الإلكترونية المعتمد:', 'Official E-Wallet Transfer Number:')}
+                </span>
+                <span dir="ltr" className="text-lg font-black text-[#0F2438] tabular-nums tracking-wide block mt-0.5">
+                  {TravelRepository.PHONE_NUMBER}
+                </span>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {/* Unified Horizontal Flex Row: Copy + WhatsApp Side-by-Side */}
+            <div className="flex flex-row items-stretch gap-2.5 w-full">
               <button
                 type="button"
                 onClick={() => handleCopyValue('wallet_phone', TravelRepository.PHONE_NUMBER)}
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                className="flex-1 min-w-0 min-h-[42px] px-2.5 sm:px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer text-center"
               >
                 {copiedKey === 'wallet_phone' ? (
                   <>
-                    <Check className="w-4 h-4 text-emerald-400" />
-                    <span>{t('تم نسخ الرقم!', 'Number Copied!')}</span>
+                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span className="truncate">{t('تم نسخ الرقم!', 'Number Copied!')}</span>
                   </>
                 ) : (
                   <>
-                    <Copy className="w-4 h-4" />
-                    <span>{t('نسخ الرقم بضغطة واحدة', '1-Click Copy Number')}</span>
+                    <Copy className="w-4 h-4 shrink-0" />
+                    <span className="truncate">{t('نسخ الرقم بضغطة واحدة', '1-Click Copy Number')}</span>
                   </>
                 )}
               </button>
@@ -337,17 +442,152 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
                       : `السلام عليكم، أرغب في التحويل عبر المحفظة الإلكترونية على الرقم ${TravelRepository.PHONE_NUMBER} وتأكيد الحجز.`;
                   openWhatsApp(text);
                 }}
-                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                className="flex-1 min-w-0 min-h-[42px] px-2.5 sm:px-4 py-2 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer text-center"
               >
-                <MessageCircle className="w-4 h-4" />
-                <span>{t('تأكيد عبر واتساب', 'Confirm on WhatsApp')}</span>
+                <MessageCircle className="w-4 h-4 shrink-0" />
+                <span className="truncate">{t('تأكيد عبر واتساب', 'Confirm on WhatsApp')}</span>
               </button>
             </div>
           </div>
+
+          {/* Recipient Assurance Line */}
+          <div className="bg-emerald-50/75 border border-emerald-200 rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-xs font-bold text-[#0F2438]">
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            <span>
+              {t(
+                'الاسم الظاهر عند التحويل: محمد يوسف / شركة مسارك للإنجاز السياحي',
+                'Recipient Name Shown on Transfer: Mohamed Youssef / Masarik Tourism L.L.C'
+              )}
+            </span>
+          </div>
+
+          {/* Quick Upload Receipt Trigger */}
+          <button
+            type="button"
+            onClick={() => handleJumpToReceiptUpload('محفظة إلكترونية (كاش)')}
+            className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#F3ECE0] text-[#0F2438] border border-[#C6A052]/65 text-xs font-black flex items-center justify-center gap-2 transition active:scale-[0.99] cursor-pointer"
+          >
+            <Upload className="w-4 h-4 text-[#9E7B33]" />
+            <span>{t('رفع الإيصال', 'Upload Receipt')}</span>
+          </button>
         </div>
 
-        {/* 3. Interactive Attach Payment Receipt Inside Order */}
-        <div className="bg-white border-2 border-[#C6A052] rounded-2xl p-5 shadow-md space-y-4">
+        {/* 3. Cash at Branch */}
+        <div className="bg-white border border-[#E2DAC8] rounded-2xl p-5 shadow-sm space-y-3.5">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#FAF8F2] text-[#9E7B33] border border-[#E5C887] flex items-center justify-center shrink-0">
+              <Store className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-sm md:text-base font-bold text-[#17344F]">
+                {t('السداد نقداً في المقر الرسمي', 'Cash Payment at Our Office')}
+              </h2>
+              <span className="text-[11px] md:text-xs text-[#678093]">{localized.address}</span>
+            </div>
+          </div>
+
+          <p className="text-xs md:text-sm text-[#324D61] leading-relaxed">
+            {t(
+              `شرّفنا في مقرنا الرسمي واستلم إيصالاً وعقداً موثقاً ومعتمداً بجميع المعاملات وخدمات التأشيرات والحجوزات الصادرة بسجل تجاري رقم ${TravelRepository.COMMERCIAL_RECORD} والرقم الموحد ${TravelRepository.UNIFIED_NUMBER}.`,
+              `Visit our registered office to receive an official stamped receipt and service contract issued under Commercial Record No. ${TravelRepository.COMMERCIAL_RECORD} and Unified ID ${TravelRepository.UNIFIED_NUMBER}.`
+            )}
+          </p>
+
+          <div className="flex flex-col sm:flex-row gap-2.5">
+            <button
+              type="button"
+              onClick={onNavigateToContact}
+              className="flex-1 min-h-[42px] bg-transparent hover:bg-[#FAF8F2] text-[#17344F] border-2 border-[#17344F] py-2 px-4 rounded-xl text-xs font-black transition active:scale-[0.99] cursor-pointer"
+            >
+              {t('عرض عناوين ومواقع التواصل', 'View Office Address & Contact')}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleJumpToReceiptUpload('سداد نقدي بالفرع')}
+              className="sm:w-auto min-h-[42px] px-5 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#F3ECE0] text-[#0F2438] border border-[#C6A052]/65 text-xs font-black flex items-center justify-center gap-2 transition active:scale-[0.99] cursor-pointer shrink-0"
+            >
+              <Upload className="w-4 h-4 text-[#9E7B33]" />
+              <span>{t('رفع الإيصال', 'Upload Receipt')}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 4. Online Payment Gateway Card (Under Maintenance & Upgrade) */}
+        <div className="bg-white border-2 border-amber-300 rounded-2xl p-5 shadow-sm space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 border border-amber-200 flex items-center justify-center shrink-0">
+                <CreditCard className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm md:text-base font-black text-[#17344F]">
+                  {t(
+                    'بوابة الدفع الإلكتروني (البطاقات البنكية والمحافظ الذكية)',
+                    'Online Payment Gateway (Bank Cards & Smart Wallets)'
+                  )}
+                </h2>
+                <span className="text-[11px] md:text-xs text-[#678093]">
+                  {t('بطاقات فيزا / ماستركارد / ميزة والمحافظ الذكية', 'Visa / Mastercard / Meeza & Smart Wallets')}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-amber-100 border border-amber-400 text-amber-950 text-xs font-black px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 shadow-xs">
+              <Wrench className="w-3.5 h-3.5 text-amber-700" />
+              <span>{t('تحت الصيانة والتحديث حالياً', 'Under Maintenance & Upgrade')}</span>
+            </div>
+          </div>
+
+          <p className="text-xs md:text-sm text-[#324D61] leading-relaxed">
+            {t(
+              'نعمل حالياً على تحديث بوابة الدفع الإلكتروني بالبطاقات البنكية لخدمتكم بأعلى معايير الأمان. يمكنكم السداد الفوري حالياً عبر إنستاباي أو المحافظ الإلكترونية بالأعلى وإرفاق صورة الإيصال بالأسفل.',
+              'We are upgrading our direct bank-card payment gateway. Meanwhile, please complete instant transfers via InstaPay or E-Wallets above and attach your receipt below.'
+            )}
+          </p>
+
+          <button
+            type="button"
+            disabled
+            aria-disabled="true"
+            className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-slate-200 text-slate-500 border border-slate-300 text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-not-allowed opacity-85"
+          >
+            <Lock className="w-4 h-4" />
+            <span>{t('الدفع الإلكتروني المباشر (قريباً)', 'Direct Online Payment (Coming Soon)')}</span>
+          </button>
+        </div>
+
+        {/* Financial Guarantee Summary */}
+        <div className="bg-[#F7F4EB] border border-[#E2DAC8] rounded-xl p-4 space-y-2">
+          <div className="flex items-center gap-2 text-[#0F2437] font-bold text-xs md:text-sm">
+            <Info className="w-4 h-4 text-[#17344F]" />
+            <span>{t('سياسة السداد والضمان المالي', 'Payment Policy & Financial Guarantee')}</span>
+          </div>
+          <ul className="text-[11px] md:text-xs text-[#324D61] space-y-1 ps-4 list-disc">
+            <li>
+              {t(
+                `جميع الرسوم موثقة بفواتير رسمية ومعتمدة بسجل تجاري رقم ${TravelRepository.COMMERCIAL_RECORD}.`,
+                `All fees are documented with official receipts under CR No. ${TravelRepository.COMMERCIAL_RECORD}.`
+              )}
+            </li>
+            <li>
+              {t('البريد الرسمي للمتابعة المالية:', 'Official Billing Email:')} {TravelRepository.OFFICIAL_EMAIL}
+            </li>
+            <li>
+              {t('للاستفسارات والتحصيلات المالية والواتساب:', 'WhatsApp & Billing Inquiries:')}{' '}
+              <span dir="ltr" className="tabular-nums font-bold">
+                {TravelRepository.PHONE_NUMBER}
+              </span>
+            </li>
+          </ul>
+        </div>
+
+        {/* 5. FINAL CARD AT BOTTOM: Interactive Attach Payment Receipt Inside Order */}
+        <div
+          ref={receiptSectionRef}
+          id="attach-payment-receipt"
+          className="scroll-mt-24 bg-white border-2 border-[#C6A052] rounded-2xl p-5 shadow-md space-y-4"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">
               <div className="w-10 h-10 rounded-xl bg-[#FAF8F2] border border-[#E5C887] text-[#9E7B33] flex items-center justify-center shrink-0">
@@ -359,8 +599,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
                 </h2>
                 <p className="text-[11px] md:text-xs text-[#678093]">
                   {t(
-                    'ارفع صورة إيصال التحويل لتوثيق السداد داخل طلبك وتأكيد الحجز فوراً',
-                    'Upload a screenshot of your transfer receipt to attach it directly to your order and confirm immediately'
+                    'ارفع صورة إيصال التحويل لحفظها سحابياً وتأكيد حجزك فوراً عبر الواتساب',
+                    'Upload a screenshot of your transfer receipt to archive it securely on cloud storage and confirm immediately on WhatsApp'
                   )}
                 </p>
               </div>
@@ -443,6 +683,9 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
                   onClick={() => {
                     setReceiptPreview('');
                     setUploadedReceiptDoc(null);
+                    setGuestDriveReceipt(null);
+                    setLastWhatsappConfirmUrl(null);
+                    setReceiptError(null);
                   }}
                   className="px-3 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold flex items-center gap-1 cursor-pointer"
                 >
@@ -459,28 +702,47 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             </div>
           )}
 
-          {uploadedReceiptDoc && (
-            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-start gap-2.5">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <span className="block font-black">
-                  {t(
-                    'تم حفظ وإرفاق إيصال الدفع في ملف طلبك بنجاح!',
-                    'Payment receipt saved and attached to your order!'
-                  )}
-                </span>
-                <span className="block text-[11px] text-emerald-800">
-                  {t(
-                    'أرسل إشعار التأكيد الآن عبر واتساب لمراجعة الإيصال وتأكيد الحجز فوراً.',
-                    'Send WhatsApp confirmation now so our team verifies and confirms your booking right away.'
-                  )}
-                </span>
+          {isSavedReceiptReady && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 space-y-2.5">
+              <div className="flex items-start gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span className="block font-black">
+                    {uploadedReceiptDoc
+                      ? t(
+                          'تم حفظ وإرفاق إيصال الدفع في ملف طلبك وعلى Google Drive بنجاح!',
+                          'Payment receipt archived on Google Drive & attached to your order!'
+                        )
+                      : t(
+                          'تم حفظ نسخة من صورة الإيصال على Google Drive بنجاح!',
+                          'Payment receipt archived on Google Drive successfully!'
+                        )}
+                  </span>
+                  <span className="block text-[11px] text-emerald-800">
+                    {t(
+                      'اضغط على زر واتساب لتأكيد السداد ومراجعة الإيصال وتأكيد الحجز فوراً.',
+                      'Confirm via WhatsApp so our team verifies your receipt and finalizes your booking right away.'
+                    )}
+                  </span>
+                </div>
               </div>
+
+              {lastWhatsappConfirmUrl && (
+                <a
+                  href={lastWhatsappConfirmUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black transition"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>{t('فتح محادثة التأكيد في واتساب مباشرة', 'Open WhatsApp Confirmation Chat')}</span>
+                </a>
+              )}
             </div>
           )}
 
           <div className="flex flex-col sm:flex-row gap-2.5">
-            {activeTraveler && receiptPreview && !uploadedReceiptDoc && (
+            {receiptPreview && !isSavedReceiptReady && (
               <button
                 type="button"
                 disabled={isUploadingReceipt}
@@ -494,21 +756,32 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
                 )}
                 <span>
                   {isUploadingReceipt
-                    ? t('جاري رفع وحفظ الإيصال بالطلب...', 'Attaching Receipt to Order...')
-                    : t('حفظ وإرفاق الإيصال داخل طلبي الآن', 'Save & Attach Receipt to My Order')}
+                    ? t('جاري رفع وحفظ الإيصال...', 'Archiving Receipt...')
+                    : activeTraveler
+                    ? t('حفظ وإرفاق الإيصال داخل طلبي الآن', 'Save & Attach Receipt to My Order')
+                    : t('حفظ نسخة الإيصال سحابياً الآن', 'Archive Receipt Copy Now')}
                 </span>
               </button>
             )}
 
             <button
               type="button"
-              onClick={handleNotifyReceiptWhatsApp}
-              className="flex-1 min-h-[44px] px-4 py-2.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
+              disabled={isUploadingReceipt}
+              onClick={() => void handleNotifyReceiptWhatsApp()}
+              className="flex-1 min-h-[44px] px-4 py-2.5 bg-[#25D366] hover:bg-[#128C7E] disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
             >
-              <MessageCircle className="w-4 h-4" />
+              {isUploadingReceipt ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <MessageCircle className="w-4 h-4" />
+              )}
               <span>
-                {uploadedReceiptDoc
+                {isUploadingReceipt
+                  ? t('جاري حفظ الإيصال وتحضير التأكيد...', 'Saving Receipt & Preparing Confirmation...')
+                  : isSavedReceiptReady
                   ? t('إرسال إشعار السداد وتأكيد الحجز (واتساب)', 'Send Payment Confirmation (WhatsApp)')
+                  : receiptPreview
+                  ? t('حفظ الإيصال وإرسال التأكيد عبر واتساب', 'Save Receipt & Confirm via WhatsApp')
                   : t('إرسال صورة إيصال الدفع عبر واتساب لتأكيد الحجز', 'Send Receipt on WhatsApp to Confirm')}
               </span>
             </button>
@@ -549,106 +822,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             </div>
           )}
         </div>
-
-        {/* 4. Cash at Branch */}
-        <div className="bg-white border border-[#E2DAC8] rounded-2xl p-5 shadow-sm space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#FAF8F2] text-[#9E7B33] border border-[#E5C887] flex items-center justify-center shrink-0">
-              <Store className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-sm md:text-base font-bold text-[#17344F]">
-                {t('السداد نقداً في المقر الرسمي', 'Cash Payment at Our Office')}
-              </h2>
-              <span className="text-[11px] md:text-xs text-[#678093]">{localized.address}</span>
-            </div>
-          </div>
-
-          <p className="text-xs md:text-sm text-[#324D61] leading-relaxed">
-            {t(
-              `شرّفنا في مقرنا الرسمي واستلم إيصالاً وعقداً موثقاً ومعتمداً بجميع المعاملات وخدمات التأشيرات والحجوزات الصادرة بسجل تجاري رقم ${TravelRepository.COMMERCIAL_RECORD} والرقم الموحد ${TravelRepository.UNIFIED_NUMBER}.`,
-              `Visit our registered office to receive an official stamped receipt and service contract issued under Commercial Record No. ${TravelRepository.COMMERCIAL_RECORD} and Unified ID ${TravelRepository.UNIFIED_NUMBER}.`
-            )}
-          </p>
-
-          <button
-            type="button"
-            onClick={onNavigateToContact}
-            className="w-full bg-transparent hover:bg-[#FAF8F2] text-[#17344F] border-2 border-[#17344F] py-2.5 px-4 rounded-xl text-xs md:text-sm font-bold transition active:scale-[0.99] cursor-pointer"
-          >
-            {t('عرض عناوين ومواقع التواصل', 'View Office Address & Contact')}
-          </button>
-        </div>
-
-        {/* 5. Financial Guarantee Summary */}
-        <div className="bg-[#F7F4EB] border border-[#E2DAC8] rounded-xl p-4 space-y-2">
-          <div className="flex items-center gap-2 text-[#0F2437] font-bold text-xs md:text-sm">
-            <Info className="w-4 h-4 text-[#17344F]" />
-            <span>{t('سياسة السداد والضمان المالي', 'Payment Policy & Financial Guarantee')}</span>
-          </div>
-          <ul className="text-[11px] md:text-xs text-[#324D61] space-y-1 ps-4 list-disc">
-            <li>
-              {t(
-                `جميع الرسوم موثقة بفواتير رسمية ومعتمدة بسجل تجاري رقم ${TravelRepository.COMMERCIAL_RECORD}.`,
-                `All fees are documented with official receipts under CR No. ${TravelRepository.COMMERCIAL_RECORD}.`
-              )}
-            </li>
-            <li>
-              {t('البريد الرسمي للمتابعة المالية:', 'Official Billing Email:')} {TravelRepository.OFFICIAL_EMAIL}
-            </li>
-            <li>
-              {t('للاستفسارات والتحصيلات المالية والواتساب:', 'WhatsApp & Billing Inquiries:')}{' '}
-              <span dir="ltr" className="tabular-nums font-bold">
-                {TravelRepository.PHONE_NUMBER}
-              </span>
-            </li>
-          </ul>
-        </div>
-
-        {/* 6. Online Payment Gateway Card (Under Maintenance & Upgrade — Replacing Bank Transfer) */}
-        <div className="bg-white border-2 border-amber-300 rounded-2xl p-5 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 border border-amber-200 flex items-center justify-center shrink-0">
-                <CreditCard className="w-5 h-5" />
-              </div>
-              <div>
-                <h2 className="text-sm md:text-base font-black text-[#17344F]">
-                  {t(
-                    'بوابة الدفع الإلكتروني (البطاقات البنكية والمحافظ الذكية)',
-                    'Online Payment Gateway (Bank Cards & Smart Wallets)'
-                  )}
-                </h2>
-                <span className="text-[11px] md:text-xs text-[#678093]">
-                  {t('بطاقات فيزا / ماستركارد / ميزة والمحافظ الذكية', 'Visa / Mastercard / Meeza & Smart Wallets')}
-                </span>
-              </div>
-            </div>
-
-            <div className="bg-amber-100 border border-amber-400 text-amber-950 text-xs font-black px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 shadow-xs">
-              <Wrench className="w-3.5 h-3.5 text-amber-700" />
-              <span>{t('تحت الصيانة والتحديث حالياً', 'Under Maintenance & Upgrade')}</span>
-            </div>
-          </div>
-
-          <p className="text-xs md:text-sm text-[#324D61] leading-relaxed">
-            {t(
-              'نعمل حالياً على تحديث بوابة الدفع الإلكتروني بالبطاقات البنكية لخدمتكم بأعلى معايير الأمان. يمكنكم السداد الفوري حالياً عبر إنستاباي أو المحافظ الإلكترونية بالأعلى وإرفاق صورة الإيصال داخل الطلب.',
-              'We are upgrading our direct bank-card payment gateway. Meanwhile, please complete instant transfers via InstaPay or E-Wallets above and attach your receipt.'
-            )}
-          </p>
-
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
-            className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-slate-200 text-slate-500 border border-slate-300 text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-not-allowed opacity-85"
-          >
-            <Lock className="w-4 h-4" />
-            <span>{t('الدفع الإلكتروني المباشر (قريباً)', 'Direct Online Payment (Coming Soon)')}</span>
-          </button>
-        </div>
       </div>
     </div>
   );
 };
+

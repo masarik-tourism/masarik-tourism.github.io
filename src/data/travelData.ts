@@ -204,7 +204,7 @@ export const TravelRepository = {
     },
     {
       question: 'ما هي طرق السداد والتحويل المتاحة؟',
-      answer: 'نوفر وسائل سداد مرنة وموثقة تشمل: التحويل الفوري عبر إنستاباي (InstaPay) على الرابط الرسمي، التحويل البنكي المباشر لحساب الشركة، أو السداد نقداً عند زيارة مقر الشركة.',
+      answer: 'نوفر وسائل سداد مرنة وموثقة تشمل: التحويل الفوري عبر إنستاباي (InstaPay) على الرابط الرسمي، المحافظ الإلكترونية (فودافون كاش • أورنج • اتصالات)، أو السداد نقداً عند زيارة مقر الشركة.',
     },
     {
       question: 'هل أحتاج لتسجيل الدخول لتصفح الخدمات أو طلب خدمة؟',
@@ -423,7 +423,7 @@ const EnglishTravelContent = {
     },
     {
       question: 'What payment and transfer methods are available?',
-      answer: 'We accept instant InstaPay transfers via our verified link, direct bank transfers, or cash payment at our registered office.',
+      answer: 'We accept instant InstaPay transfers via our verified link, Egyptian E-Wallets (Vodafone / Orange / Etisalat Cash), or cash payment at our registered office.',
     },
     {
       question: 'Do I have to sign in to browse services or request a booking?',
