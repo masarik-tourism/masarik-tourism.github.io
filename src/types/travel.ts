@@ -154,6 +154,11 @@ export interface TravelerProfile {
   avatarStoragePath?: string;
   avatarSizeBytes?: number;
   otp: string;
+  otpGeneratedAt?: string;
+  otpExpiresAt?: string;
+  otpConsumed?: boolean;
+  activatedByAdmin?: boolean;
+  adminBypassOtpAt?: string;
   pinHash?: string;
   pinUpdatedAt?: string;
   trustedDevices?: TrustedDevice[];

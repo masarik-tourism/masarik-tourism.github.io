@@ -46,6 +46,7 @@ import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
   adminCreateClientCloud,
+  adminInstantActivateClientCloud,
   approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
@@ -59,6 +60,7 @@ import {
   getOrderStatusStageIndex,
   getRelationshipLabel,
   getTravelerDisplayNames,
+  isOtpActiveAndUnexpired,
   normalizeOrderStatusValue,
   normalizePhone,
   previewOldCompletedAttachmentsCleanup,
@@ -296,6 +298,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
     openWhatsApp(`https://wa.me/${phoneDigits}?text=${encodeURIComponent(hello)}`);
   };
 
+  const handleAdminInstantActivate = async (client: TravelerProfile) => {
+    if (!canActivateOtp) return;
+    await adminInstantActivateClientCloud(client.phone);
+    loadTravelers();
+  };
+
   const handleOneClickVerifyAndSendOtp = (client: TravelerProfile) => {
     if (!canActivateOtp) return;
     if (!client.verified) {
@@ -310,9 +318,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
 
   const handleToggleVerified = (client: TravelerProfile) => {
     if (!canActivateOtp) return;
+    if (!client.verified) {
+      void handleAdminInstantActivate(client);
+      return;
+    }
     updateTravelerProfileDetails(client.phone, {
-      verified: !client.verified,
-      verifiedAt: !client.verified ? new Date().toISOString() : undefined,
+      verified: false,
+      verifiedAt: undefined,
+      activatedByAdmin: false,
     });
     loadTravelers();
   };
@@ -1234,45 +1247,65 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         {canActivateOtp && (
                           <div
                             onClick={(e) => e.stopPropagation()}
-                            className={`flex flex-wrap items-center justify-between gap-2 border px-3 py-2 rounded-xl ${
+                            className={`flex flex-col gap-2 border px-3 py-2.5 rounded-xl ${
                               client.verified
                                 ? 'bg-slate-50 border-slate-200'
                                 : 'bg-amber-50 border-amber-200/80'
                             }`}
                           >
-                            <span className="text-[11px] font-bold text-[#0F2438] tabular-nums">
-                              {t('كود التفعيل:', 'OTP:')} {client.otp}
-                            </span>
-                            <div className="flex flex-wrap items-center gap-1.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[11px] font-bold text-[#0F2438] tabular-nums">
+                                  {t('كود التفعيل:', 'OTP:')} {client.otp}
+                                </span>
+                                {!client.verified && (
+                                  <span
+                                    className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
+                                      isOtpActiveAndUnexpired(client)
+                                        ? 'bg-sky-100 text-sky-900 border border-sky-200'
+                                        : 'bg-red-100 text-red-800 border border-red-200'
+                                    }`}
+                                  >
+                                    {isOtpActiveAndUnexpired(client)
+                                      ? t('صالح 24 ساعة', '24h Active')
+                                      : t('منتهي', 'Expired')}
+                                  </span>
+                                )}
+                              </div>
+
                               <button
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleOneClickVerifyAndSendOtp(client);
                                 }}
-                                className="px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
+                                className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
                               >
                                 <Send className="w-3 h-3" />
                                 <span>
                                   {t(
-                                    'إرسال الكود يدوياً بضغطة واحدة عبر واتساب',
-                                    'Send OTP Manually via WhatsApp (1-Click)'
+                                    'إرسال الكود عبر واتساب',
+                                    'Send OTP via WhatsApp'
                                   )}
                                 </span>
                               </button>
-                              {!client.verified && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleToggleVerified(client);
-                                  }}
-                                  className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-950 text-[11px] font-bold cursor-pointer"
-                                >
-                                  {t('توثيق فوري', 'Verify Now')}
-                                </button>
-                              )}
                             </div>
+
+                            {!client.verified && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleAdminInstantActivate(client);
+                                }}
+                                className="w-full min-h-[38px] px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11.5px] font-black flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                                <span>
+                                  {t('تفعيل الحساب فوراً (بدون OTP)', 'Activate Account Instantly (No OTP)')}
+                                </span>
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1385,15 +1418,20 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => handleToggleVerified(selectedClient)}
-                    className={`px-3 py-2 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                    className={`px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 ${
                       selectedClient.verified
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
-                        : 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
+                        : 'bg-emerald-600 border-emerald-700 text-white hover:bg-emerald-700 shadow-xs'
                     }`}
                   >
-                    {selectedClient.verified
-                      ? t('حساب موثق ✓ (إلغاء)', 'Verified ✓ (Revoke)')
-                      : t('غير موثق (تفعيل فوري)', 'Unverified (Verify Now)')}
+                    {selectedClient.verified ? (
+                      t('حساب موثق ✓ (إلغاء)', 'Verified ✓ (Revoke)')
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>{t('تفعيل الحساب فوراً (بدون OTP)', 'Activate Instantly (No OTP)')}</span>
+                      </>
+                    )}
                   </button>
                 )}
 

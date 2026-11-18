@@ -12,6 +12,7 @@ import {
   Trash2,
   Loader2,
   Receipt,
+  Sparkles,
 } from 'lucide-react';
 import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
 import { getLocalizedTravelContent } from '../data/travelData';
@@ -34,12 +35,16 @@ interface ServiceRequestModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialServiceTitle?: string;
+  initialTravelerCount?: number;
+  initialNotes?: string;
 }
 
 export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   isOpen,
   onClose,
   initialServiceTitle,
+  initialTravelerCount,
+  initialNotes,
 }) => {
   const { lang, dir, t } = useLanguage();
   const localized = getLocalizedTravelContent(lang);
@@ -48,6 +53,13 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   );
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
+  const [passportNumber, setPassportNumber] = useState('');
+  const [passportExpiryDate, setPassportExpiryDate] = useState('');
+  const [autoFillTargetId, setAutoFillTargetId] = useState<string>('owner');
+  const [autoFillNotice, setAutoFillNotice] = useState<{
+    type: 'success' | 'info';
+    text: string;
+  } | null>(null);
   const [selectedService, setSelectedService] = useState(
     initialServiceTitle || localized.services[0].title
   );
@@ -80,13 +92,24 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   }, [initialServiceTitle, lang]);
 
   useEffect(() => {
-    if (isOpen && activeTraveler) {
+    if (!isOpen) return;
+    setAutoFillNotice(null);
+    if (initialNotes) {
+      setNotes(initialNotes);
+    } else if (initialTravelerCount && initialTravelerCount > 1) {
+      setNotes(
+        lang === 'en'
+          ? `Estimated travelers: ${initialTravelerCount} travelers`
+          : `عدد المسافرين المشمولين بالطلب: ${initialTravelerCount} مسافرين`
+      );
+    }
+    if (activeTraveler) {
       const names = getTravelerDisplayNames(activeTraveler);
       setFullName((prev) => prev.trim() || names.fullDisplayName);
       setPhone((prev) => prev.trim() || formatPhoneForDisplay(activeTraveler.phone));
       setSelectedTravelerIds((prev) => (prev.length > 0 ? prev : ['owner']));
     }
-  }, [isOpen, activeTraveler]);
+  }, [isOpen, activeTraveler, initialNotes, initialTravelerCount, lang]);
 
   if (!isOpen) return null;
 
@@ -127,17 +150,97 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
     }
   };
 
+  const handleAutoFillSavedTraveler = () => {
+    if (!activeTraveler) {
+      setAutoFillNotice({
+        type: 'info',
+        text: t(
+          'سجّل الدخول أولاً إلى (ملف المسافر) لحفظ بيانات جوازك وصوره واستدعائها بضغطة واحدة.',
+          'Sign in to your Traveler Profile first to save and auto-fill passport details & photos in 1 click.'
+        ),
+      });
+      return;
+    }
+
+    const formattedPhone = formatPhoneForDisplay(activeTraveler.phone);
+    if (autoFillTargetId === 'owner') {
+      const names = getTravelerDisplayNames(activeTraveler);
+      const resolvedName =
+        (activeTraveler.passportFullName || '').trim() || names.fullDisplayName;
+      setFullName(resolvedName);
+      setPhone(formattedPhone);
+      setPassportNumber((activeTraveler.passportNumber || '').trim().toUpperCase());
+      setPassportExpiryDate(activeTraveler.passportExpiryDate || '');
+      setSelectedTravelerIds((prev) => (prev.includes('owner') ? prev : ['owner', ...prev]));
+
+      const savedPassportDoc = (activeTraveler.documents || []).find(
+        (d) => d.docType === 'passport' && (d.dataUrl || d.viewUrl)
+      );
+      if (savedPassportDoc) {
+        setPrePassportPreview(
+          getDisplayableDriveImageUrl(savedPassportDoc.dataUrl || savedPassportDoc.viewUrl || '')
+        );
+      }
+      if (activeTraveler.avatarUrl) {
+        setPrePersonalPhotoPreview(getDisplayableDriveImageUrl(activeTraveler.avatarUrl));
+      }
+
+      setAutoFillNotice({
+        type: 'success',
+        text: t(
+          `تم استدعاء بيانات (${resolvedName}) ورقم الجواز وصور المستندات المحفوظة فوراً.`,
+          `Auto-filled saved details, passport info, and documents for (${resolvedName}).`
+        ),
+      });
+      return;
+    }
+
+    const member = (activeTraveler.familyMembers || []).find((m) => m.id === autoFillTargetId);
+    if (!member) return;
+    const memberFullName =
+      (member.passportFullName || '').trim() || `${member.firstName} ${member.lastName}`.trim();
+    setFullName(memberFullName);
+    setPhone(formattedPhone);
+    setPassportNumber((member.passportNumber || '').trim().toUpperCase());
+    setPassportExpiryDate(member.passportExpiryDate || '');
+    setSelectedTravelerIds((prev) =>
+      prev.includes(member.id) ? prev : [...prev, member.id]
+    );
+
+    if (member.passportPhotoUrl) {
+      setPrePassportPreview(getDisplayableDriveImageUrl(member.passportPhotoUrl));
+    }
+    if (member.personalPhotoUrl) {
+      setPrePersonalPhotoPreview(getDisplayableDriveImageUrl(member.personalPhotoUrl));
+    }
+
+    setAutoFillNotice({
+      type: 'success',
+      text: t(
+        `تم استدعاء بيانات المرافق (${memberFullName}) ورقم الجواز وصوره المحفوظة فوراً.`,
+        `Auto-filled saved details, passport info, and photos for (${memberFullName}).`
+      ),
+    });
+  };
+
   const handleSubmitWhatsApp = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
     let updatedTraveler = activeTraveler;
 
     try {
-      if (activeTraveler && (prePassportPreview || prePersonalPhotoPreview || preReceiptPreview)) {
+      const hasNewLocalUploads =
+        prePassportPreview.startsWith('data:') ||
+        prePersonalPhotoPreview.startsWith('data:') ||
+        preReceiptPreview.startsWith('data:');
+
+      if (activeTraveler && hasNewLocalUploads) {
         const res = await attachPreOrderFilesToTravelerCloud(activeTraveler.phone, {
-          passportDataUrl: prePassportPreview || undefined,
-          avatarDataUrl: prePersonalPhotoPreview || undefined,
-          receiptDataUrl: preReceiptPreview || undefined,
+          passportDataUrl: prePassportPreview.startsWith('data:') ? prePassportPreview : undefined,
+          avatarDataUrl: prePersonalPhotoPreview.startsWith('data:')
+            ? prePersonalPhotoPreview
+            : undefined,
+          receiptDataUrl: preReceiptPreview.startsWith('data:') ? preReceiptPreview : undefined,
           serviceTitle: selectedService,
         });
         if (res) {
@@ -152,12 +255,24 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
       const preOrderAttachedList: string[] = [];
       if (prePassportPreview) {
         preOrderAttachedList.push(
-          lang === 'en' ? 'Passport photo prepared & ready' : 'صورة جواز السفر (مجهّزة للإرسال)'
+          prePassportPreview.startsWith('data:')
+            ? lang === 'en'
+              ? 'Passport photo prepared & ready'
+              : 'صورة جواز السفر (مجهّزة للإرسال)'
+            : lang === 'en'
+            ? 'Saved Google Drive passport photo linked'
+            : 'صورة جواز السفر المحفوظة في Google Drive مرفقة'
         );
       }
       if (prePersonalPhotoPreview) {
         preOrderAttachedList.push(
-          lang === 'en' ? 'Personal photo prepared & ready' : 'الصورة الشخصية (مجهّزة للإرسال)'
+          prePersonalPhotoPreview.startsWith('data:')
+            ? lang === 'en'
+              ? 'Personal photo prepared & ready'
+              : 'الصورة الشخصية (مجهّزة للإرسال)'
+            : lang === 'en'
+            ? 'Saved Google Drive personal photo linked'
+            : 'الصورة الشخصية المحفوظة في Google Drive مرفقة'
         );
       }
       if (preReceiptPreview) {
@@ -167,6 +282,17 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
             : 'صورة إيصال الدفع مرفقة لتأكيد الحجز فوراً'
         );
       }
+
+      const passportDetailsBlock =
+        passportNumber.trim() || passportExpiryDate.trim()
+          ? lang === 'en'
+            ? `${passportNumber.trim() ? `\n• Passport Number: ${passportNumber.trim().toUpperCase()}` : ''}${
+                passportExpiryDate.trim() ? `\n• Passport Expiry: ${passportExpiryDate.trim()}` : ''
+              }`
+            : `${passportNumber.trim() ? `\n• رقم الجواز: ${passportNumber.trim().toUpperCase()}` : ''}${
+                passportExpiryDate.trim() ? `\n• تاريخ انتهاء الجواز: ${passportExpiryDate.trim()}` : ''
+              }`
+          : '';
 
       const preOrderNote =
         preOrderAttachedList.length > 0
@@ -181,7 +307,7 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
 I would like to request a service:
 • Service: ${selectedService}
 • Full Name: ${fullName.trim() || 'Client'}
-• Phone / WhatsApp: ${phone.trim() || 'N/A'}${preOrderNote}${
+• Phone / WhatsApp: ${phone.trim() || 'N/A'}${passportDetailsBlock}${preOrderNote}${
               travelersBlock ? `\n\nSelected Traveler(s) & Cloud Documents:\n${travelersBlock}` : ''
             }${notes.trim() ? `\n• Notes: ${notes.trim()}` : ''}
 Please share requirements and next steps. Thank you.`
@@ -189,7 +315,7 @@ Please share requirements and next steps. Thank you.`
 أرغب في طلب خدمة من منصة مسارك للإنجاز السياحي:
 • الخدمة المطلوبة: ${selectedService}
 • الاسم: ${fullName.trim() || 'عميل مسارك'}
-• رقم الهاتف: ${phone.trim() || 'غير محدد'}${preOrderNote}${
+• رقم الهاتف: ${phone.trim() || 'غير محدد'}${passportDetailsBlock}${preOrderNote}${
               travelersBlock ? `\n\nالمسافرون المشمولون بالطلب ومستنداتهم السحابية:\n${travelersBlock}` : ''
             }${notes.trim() ? `\n• تفاصيل إضافية: ${notes.trim()}` : ''}
 يرجى تزويدي بالمتطلبات والتفاصيل وسرعة المتابعة. شكراً لكم.`;
@@ -614,6 +740,66 @@ Please share requirements and next steps. Thank you.`
                 </div>
               )}
 
+              {/* Saved Traveler Auto-Fill Box */}
+              <div className="bg-gradient-to-br from-[#0F2438] to-[#163B65] text-white rounded-2xl p-3.5 space-y-2.5 border border-[#C6A052]/60 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="text-xs font-black text-[#E5C887] flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      <span>{t('بيانات المسافر المحفوظة', 'Saved Traveler Auto-Fill')}</span>
+                    </span>
+                    <p className="text-[11px] text-slate-200 mt-0.5 leading-snug">
+                      {t(
+                        'املأ الاسم ورقم الجواز والهاتف وصور المستندات في ثانية واحدة دون إعادة كتابة',
+                        'Fill Name, Passport No., Expiry & saved Drive photos in 1 second'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  {activeTraveler && familyMembers.length > 0 && (
+                    <select
+                      value={autoFillTargetId}
+                      onChange={(e) => setAutoFillTargetId(e.target.value)}
+                      className="min-h-[42px] px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-[#E5C887]"
+                    >
+                      <option value="owner" className="text-[#0F2438]">
+                        {ownerNames?.fullDisplayName} ({t('صاحب الحساب', 'Owner')})
+                      </option>
+                      {familyMembers.map((m) => (
+                        <option key={m.id} value={m.id} className="text-[#0F2438]">
+                          {m.firstName} {m.lastName} ({getRelationshipLabel(m.relationship, lang)})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleAutoFillSavedTraveler}
+                    className="flex-1 min-h-[44px] px-4 py-2 bg-[#C6A052] hover:bg-[#b58e3f] text-[#0F2438] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
+                  >
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span>
+                      {t('تعبئة تلقائية من بياناتي المحفوظة', 'Auto-Fill From Saved Profile')}
+                    </span>
+                  </button>
+                </div>
+
+                {autoFillNotice && (
+                  <div
+                    className={`rounded-xl px-3 py-2 text-[11px] font-bold ${
+                      autoFillNotice.type === 'success'
+                        ? 'bg-emerald-500/20 border border-emerald-300/40 text-emerald-100'
+                        : 'bg-white/10 border border-white/20 text-amber-100'
+                    }`}
+                  >
+                    {autoFillNotice.text}
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-[#0F2438] mb-1.5">
@@ -635,12 +821,40 @@ Please share requirements and next steps. Thank you.`
                   </label>
                   <input
                     type="tel"
+                    inputMode="numeric"
                     required
                     dir="ltr"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="01000000000"
                     className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs md:text-sm text-[#0F2438] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0284C7] focus:border-transparent transition tabular-nums"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#0F2438] mb-1.5">
+                    {t('رقم جواز السفر (اختياري)', 'Passport Number (Optional)')}
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={passportNumber}
+                    onChange={(e) => setPassportNumber(e.target.value.toUpperCase())}
+                    placeholder="A12345678"
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs md:text-sm text-[#0F2438] uppercase tabular-nums placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0284C7] focus:border-transparent transition"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#0F2438] mb-1.5">
+                    {t('تاريخ انتهاء الجواز (اختياري)', 'Passport Expiry Date (Optional)')}
+                  </label>
+                  <input
+                    type="date"
+                    dir="ltr"
+                    value={passportExpiryDate}
+                    onChange={(e) => setPassportExpiryDate(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs md:text-sm text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] focus:border-transparent transition"
                   />
                 </div>
               </div>

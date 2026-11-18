@@ -56,10 +56,33 @@
         },
         "otp": {
           "type": "string",
-          "description": "6-digit WhatsApp verification OTP.",
+          "description": "6-digit numeric WhatsApp verification OTP (0-9).",
           "minLength": 6,
           "maxLength": 6,
           "pattern": "^[0-9]{6}$"
+        },
+        "otpGeneratedAt": {
+          "type": "string",
+          "description": "ISO timestamp when current 6-digit OTP was generated.",
+          "maxLength": 64
+        },
+        "otpExpiresAt": {
+          "type": "string",
+          "description": "ISO timestamp (24h validity) when current 6-digit OTP expires.",
+          "maxLength": 64
+        },
+        "otpConsumed": {
+          "type": "boolean",
+          "description": "Whether the current OTP has been consumed or invalidated."
+        },
+        "activatedByAdmin": {
+          "type": "boolean",
+          "description": "Whether the account was instantly activated by Admin without requiring OTP."
+        },
+        "adminBypassOtpAt": {
+          "type": "string",
+          "description": "ISO timestamp of latest Admin instant activation without OTP.",
+          "maxLength": 64
         },
         "pinHash": {
           "type": "string",

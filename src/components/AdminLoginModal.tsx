@@ -72,13 +72,15 @@ export const AdminLoginModal: React.FC = () => {
           </div>
 
           <input
-            type="password"
+            type="tel"
             inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="one-time-code"
             value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
+            onChange={(e) => setPinInput(e.target.value.replace(/[^0-9\u0660-\u0669\u06F0-\u06F9]/g, ''))}
             placeholder={t('الرمز السري (PIN)', 'Admin PIN')}
             autoFocus
-            className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-base font-bold tracking-widest text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A052]"
+            className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-base font-bold tracking-widest text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A052] [-webkit-text-security:disc]"
           />
 
           {pinError && (

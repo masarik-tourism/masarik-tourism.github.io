@@ -73,6 +73,7 @@ import {
   setClientPinCloud,
   splitPassportName,
   startTravelerSession,
+  subscribePendingClientCloud,
   trustCurrentDeviceCloud,
   verifyAccountSecurityOtpCloud,
   verifyLoginOtpCloud,
@@ -175,9 +176,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [pinLoginError, setPinLoginError] = useState('');
   const [isLoggingInWithPin, setIsLoggingInWithPin] = useState(false);
 
-  // Logged-out Step 2 OTP unlock
+  // Logged-out Step 2 OTP unlock (with 24h validity countdown & Admin real-time instant activation)
   const [otpInput, setOtpInput] = useState('');
   const [otpError, setOtpError] = useState('');
+  const [otpInfoBanner, setOtpInfoBanner] = useState('');
+  const [otpExpiresAt, setOtpExpiresAt] = useState<string | null>(null);
+  const [otpRemainingMs, setOtpRemainingMs] = useState<number | null>(null);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
 
   // Create / Reset Personal 6-digit PIN
@@ -277,6 +281,105 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setAuthStage('otp_verify');
     }
   }, [pendingPostAuthFlow, pendingOtpPhone, activeTraveler, authStage]);
+
+  // Live 1-second countdown ticker for 24-hour OTP validity window
+  useEffect(() => {
+    if (activeTraveler || authStage !== 'otp_verify' || !otpExpiresAt) {
+      setOtpRemainingMs(null);
+      return;
+    }
+    const updateRemaining = () => {
+      const exp = Date.parse(otpExpiresAt);
+      if (!Number.isFinite(exp)) {
+        setOtpRemainingMs(null);
+        return;
+      }
+      setOtpRemainingMs(Math.max(0, exp - Date.now()));
+    };
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeTraveler, authStage, otpExpiresAt]);
+
+  // Real-time Firestore listener while waiting on OTP screen:
+  // If Admin taps "تفعيل الحساب فوراً (بدون OTP)", immediately move client to PIN setup / Device trust!
+  useEffect(() => {
+    if (activeTraveler || authStage !== 'otp_verify') return;
+    const waitPhone = pendingOtpPhone || trustedPhone;
+    if (!waitPhone) return;
+
+    return subscribePendingClientCloud(waitPhone, (cloudProfile) => {
+      if (cloudProfile.otpExpiresAt && !cloudProfile.otpConsumed) {
+        setOtpExpiresAt(cloudProfile.otpExpiresAt);
+      }
+
+      if (
+        cloudProfile.verified &&
+        (cloudProfile.activatedByAdmin || cloudProfile.adminBypassOtpAt) &&
+        otpPurpose !== 'forgot_pin'
+      ) {
+        const verifiedPhone = cloudProfile.phone;
+        setTrustedPhone(verifiedPhone);
+        if (cloudProfile.name) setDetectedClientName(cloudProfile.name);
+        setOtpInput('');
+        setOtpError('');
+
+        const hasPin = Boolean(
+          cloudProfile.pinHash && /^[a-f0-9]{64}$/.test(cloudProfile.pinHash)
+        );
+        const trusted = isDeviceInTrustedList(
+          cloudProfile.trustedDevices,
+          currentDevice.deviceId
+        );
+
+        if (!hasPin) {
+          onSetPendingPostAuthFlow?.({
+            phone: verifiedPhone,
+            stage: 'pin_setup',
+            isPinReset: false,
+          });
+          setNewPinInput('');
+          setConfirmPinInput('');
+          setPinSetupError('');
+          setOtpInfoBanner(
+            t(
+              'تم تفعيل حسابك فوراً من قبل الإدارة! أنشئ رمز الـ PIN الشخصي (6 أرقام).',
+              'Your account has been instantly activated by Admin! Create your 6-digit PIN now.'
+            )
+          );
+          setAuthStage('pin_setup');
+          return;
+        }
+
+        if (!trusted) {
+          onSetPendingPostAuthFlow?.({
+            phone: verifiedPhone,
+            stage: 'device_trust_prompt',
+          });
+          setAuthStage('device_trust_prompt');
+          return;
+        }
+
+        void trustCurrentDeviceCloud(verifiedPhone).then(() => {
+          onSetPendingOtpPhone(null);
+          onSetPendingPostAuthFlow?.(null);
+          setAuthStage('phone_entry');
+          onChangeSubTab('account');
+        });
+      }
+    });
+  }, [
+    activeTraveler,
+    authStage,
+    pendingOtpPhone,
+    trustedPhone,
+    otpPurpose,
+    currentDevice.deviceId,
+    onSetPendingPostAuthFlow,
+    onSetPendingOtpPhone,
+    onChangeSubTab,
+    t,
+  ]);
 
   // Live minute ticker for 1-hour temporary session countdown badge
   useEffect(() => {
@@ -531,13 +634,36 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           return;
         }
 
-        // Existing account on untrusted device OR without PIN yet -> fresh WhatsApp OTP
+        // If Admin already activated this account without OTP and user hasn't created a PIN yet, go straight to PIN setup
+        if (check.profile.verified && check.profile.activatedByAdmin && !check.hasPin) {
+          onSetPendingOtpPhone(check.phone);
+          onSetPendingPostAuthFlow?.({
+            phone: check.phone,
+            stage: 'pin_setup',
+            isPinReset: false,
+          });
+          setNewPinInput('');
+          setConfirmPinInput('');
+          setPinSetupError('');
+          setOtpInfoBanner(
+            t(
+              'تم تفعيل حسابك من قبل الإدارة مسبقاً! يرجى تعيين رمز الـ PIN الشخصي (6 أرقام) للدخول.',
+              'Your account is already activated by Admin! Create your personal 6-digit PIN to proceed.'
+            )
+          );
+          setAuthStage('pin_setup');
+          return;
+        }
+
+        // Existing account waiting for OTP or untrusted device -> resume active 24h OTP or issue fresh 6-digit OTP
         setOtpPurpose(check.hasPin ? 'untrusted_device' : 'first_login');
         const res = await initiateTravelerOtpLoginCloud('', '', check.phone);
         if (!res.ok) {
           setAuthError(res.error || t('تعذر بدء تسجيل الدخول.', 'Could not start login.'));
           return;
         }
+        setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
+        setOtpInfoBanner('');
         onSetPendingOtpPhone(check.phone);
         setOtpInput('');
         setAuthStage('otp_verify');
@@ -552,11 +678,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // Step 1B: New Client Name Entry -> Issue fresh 6-digit OTP in Firestore
+  // Step 1B: New Client Name Entry -> Issue fresh 6-digit OTP (valid 24h) in Firestore
   const handleInitiateLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
     setOtpError('');
+    setOtpInfoBanner('');
     onClearMagicLinkFeedback?.();
     onClearSessionExpiredAlert?.();
 
@@ -585,6 +712,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setTrustedPhone(res.phone);
       setDetectedClientName(`${cleanFirst} ${cleanLast}`.trim());
       setOtpPurpose('first_login');
+      setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
       onSetPendingOtpPhone(res.phone);
       setOtpInput('');
       setAuthStage('otp_verify');
@@ -674,8 +802,9 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       const res = await loginWithTrustedDevicePinCloud(targetPhone, cleanPin, lang);
       if (!res.ok) {
         if (res.fallbackToOtp) {
-          await requestAccountSecurityOtpCloud(targetPhone);
+          const sec = await requestAccountSecurityOtpCloud(targetPhone);
           onSetPendingOtpPhone(targetPhone);
+          setOtpExpiresAt(sec.otpExpiresAt || null);
           setOtpPurpose('untrusted_device');
           setOtpInput('');
           setOtpError(res.error || '');
@@ -712,12 +841,49 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         return;
       }
       setOtpPurpose('forgot_pin');
+      setOtpExpiresAt(res.otpExpiresAt || null);
       onSetPendingOtpPhone(targetPhone);
       setOtpInput('');
       setOtpError('');
       setAuthStage('otp_verify');
     } finally {
       setIsLoggingInWithPin(false);
+    }
+  };
+
+  const handleIssueFreshOtpCode = async () => {
+    const targetPhone = pendingOtpPhone || trustedPhone || normalizePhone(loginPhone);
+    if (!targetPhone) return;
+    setOtpError('');
+    setIsInitiatingOtp(true);
+    try {
+      if (otpPurpose === 'forgot_pin') {
+        const res = await requestAccountSecurityOtpCloud(targetPhone, { forceNew: true });
+        if (res.ok) {
+          setOtpExpiresAt(res.otpExpiresAt || null);
+          setOtpInput('');
+          setOtpInfoBanner(
+            t(
+              'تم إصدار كود تفعيل جديد (6 أرقام) صالح لمدة 24 ساعة. اطلبه عبر واتساب الآن.',
+              'A new 6-digit OTP valid for 24 hours has been issued. Request it via WhatsApp now.'
+            )
+          );
+        }
+      } else {
+        const res = await initiateTravelerOtpLoginCloud('', '', targetPhone, { forceNew: true });
+        if (res.ok) {
+          setOtpExpiresAt(res.otpExpiresAt || null);
+          setOtpInput('');
+          setOtpInfoBanner(
+            t(
+              'تم إصدار كود تفعيل جديد (6 أرقام) صالح لمدة 24 ساعة. اطلبه عبر واتساب الآن.',
+              'A new 6-digit OTP valid for 24 hours has been issued. Request it via WhatsApp now.'
+            )
+          );
+        }
+      }
+    } finally {
+      setIsInitiatingOtp(false);
     }
   };
 
@@ -1540,6 +1706,7 @@ Please advise on the next steps for my application.`
                   </label>
                   <input
                     type="tel"
+                    inputMode="numeric"
                     required
                     dir="ltr"
                     value={loginPhone}
@@ -1688,8 +1855,9 @@ Please advise on the next steps for my application.`
                         ref={(el) => {
                           pinBoxRefs.current[idx] = el;
                         }}
-                        type={showPinLogin ? 'text' : 'password'}
+                        type="tel"
                         inputMode="numeric"
+                        pattern="[0-9]*"
                         maxLength={6}
                         value={digit}
                         onChange={(e) => handlePinBoxChange(idx, e.target.value)}
@@ -1698,7 +1866,9 @@ Please advise on the next steps for my application.`
                         onFocus={(e) => e.target.select()}
                         autoFocus={idx === 0}
                         aria-label={t(`الخانة ${idx + 1} من رمز PIN`, `PIN digit ${idx + 1}`)}
-                        className="w-full h-12 sm:h-13 rounded-xl border-2 border-slate-300 bg-slate-50 focus:bg-white text-center text-lg sm:text-xl font-black text-[#0F2438] tabular-nums focus:outline-none focus:border-[#C6A052] focus:ring-2 focus:ring-[#C6A052]/30 transition"
+                        className={`w-full h-12 sm:h-13 rounded-xl border-2 border-slate-300 bg-slate-50 focus:bg-white text-center text-lg sm:text-xl font-black text-[#0F2438] tabular-nums focus:outline-none focus:border-[#C6A052] focus:ring-2 focus:ring-[#C6A052]/30 transition ${
+                          showPinLogin ? '' : '[-webkit-text-security:disc]'
+                        }`}
                       />
                     ))}
                   </div>
@@ -1748,114 +1918,190 @@ Please advise on the next steps for my application.`
             )}
 
             {/* STAGE 2B: WHATSAPP OTP VERIFICATION (FIRST TIME / UNTRUSTED DEVICE / FORGOT PIN) */}
-            {authStage === 'otp_verify' && (
-              <div className="p-5 sm:p-6 space-y-5">
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2 text-center">
-                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0F2438] text-[#E5C887] text-[11px] font-black">
-                    <KeyRound className="w-3.5 h-3.5" />
-                    <span>
-                      {otpPurpose === 'forgot_pin'
-                        ? t('استعادة رمز الـ PIN عبر واتساب OTP', 'PIN Recovery via WhatsApp OTP')
-                        : otpPurpose === 'untrusted_device'
-                        ? t('التحقق من جهاز جديد عبر واتساب OTP', 'New Device Verification via WhatsApp OTP')
-                        : t('تفعيل الحساب بكود واتساب OTP', 'Account Activation via WhatsApp OTP')}
-                    </span>
-                  </div>
-                  <span className="text-base font-black text-[#0F2438] tabular-nums block pt-1" dir="ltr">
-                    {formatPhoneForDisplay(activeAuthPhone)}
-                  </span>
-                  <p className="text-[11px] text-slate-600 leading-relaxed">
-                    {t(
-                      'يمكنك التفعيل بإدخال الكود المكون من 6 أرقام أدناه، أو الضغط مباشرةً على رابط التفعيل التلقائي القادم لك في رسالة الواتساب.',
-                      'Verify by entering the 6-digit OTP below, or simply tap the direct activation link sent in your WhatsApp reply.'
-                    )}
-                  </p>
-                </div>
+            {authStage === 'otp_verify' && (() => {
+              const remMs = otpRemainingMs;
+              const isExpired = remMs !== null && remMs <= 0;
+              const totalSec = remMs !== null ? Math.floor(remMs / 1000) : 24 * 3600;
+              const remHours = Math.floor(totalSec / 3600);
+              const remMins = Math.floor((totalSec % 3600) / 60);
+              const remSecs = totalSec % 60;
+              const formattedCountdown = `${String(remHours).padStart(2, '0')}:${String(remMins).padStart(2, '0')}:${String(remSecs).padStart(2, '0')}`;
 
-                <div className="space-y-2.5">
-                  <a
-                    href={buildClientOtpWhatsAppUrl(lang)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="w-full min-h-[48px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
-                  >
-                    <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
-                    <span>
-                      {t('اطلب كود التفعيل عبر واتساب', 'Request Activation Code via WhatsApp')}
+              return (
+                <div className="p-5 sm:p-6 space-y-5">
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2 text-center">
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0F2438] text-[#E5C887] text-[11px] font-black">
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>
+                        {otpPurpose === 'forgot_pin'
+                          ? t('استعادة رمز الـ PIN عبر واتساب OTP', 'PIN Recovery via WhatsApp OTP')
+                          : otpPurpose === 'untrusted_device'
+                          ? t('التحقق من جهاز جديد عبر واتساب OTP', 'New Device Verification via WhatsApp OTP')
+                          : t('بانتظار التفعيل بكود واتساب OTP', 'Pending Activation via WhatsApp OTP')}
+                      </span>
+                    </div>
+                    <span className="text-base font-black text-[#0F2438] tabular-nums block pt-1" dir="ltr">
+                      {formatPhoneForDisplay(activeAuthPhone)}
                     </span>
-                  </a>
-
-                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-emerald-950">
-                    <Clock className="w-4 h-4 text-emerald-700 shrink-0" />
-                    <span className="text-xs font-bold leading-snug">
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
                       {t(
-                        'الرد بالكود يتم آلياً عبر واتساب خلال ثوانٍ',
-                        'The activation code is sent automatically via WhatsApp within seconds.'
+                        'يمكنك التفعيل بإدخال الكود الرقمي (6 أرقام 0-9) أدناه، أو عبر رابط التفعيل المباشر في الواتساب، أو انتظار التفعيل الفوري من الإدارة.',
+                        'Activate using the 6 numeric digits (0-9) below, via WhatsApp activation link, or instant Admin activation.'
                       )}
-                    </span>
-                  </div>
-                </div>
-
-                <form onSubmit={handleVerifyOtpSubmit} className="space-y-3.5 pt-3 border-t border-slate-200">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="block text-xs font-bold text-[#0F2438]">
-                      {t('أدخل كود التفعيل (6 أرقام)', 'Enter Activation Code (6 Digits)')}
-                    </label>
-                    <span className="text-[11px] font-semibold text-slate-500">
-                      {t('يدعم اللصق السريع', 'Quick paste supported')}
-                    </span>
+                    </p>
                   </div>
 
-                  <div dir="ltr" className="grid grid-cols-6 gap-2 sm:gap-2.5 max-w-sm mx-auto">
-                    {otpDigits.map((digit, idx) => (
-                      <input
-                        key={idx}
-                        ref={(el) => {
-                          otpBoxRefs.current[idx] = el;
-                        }}
-                        type="text"
-                        inputMode="numeric"
-                        autoComplete={idx === 0 ? 'one-time-code' : 'off'}
-                        maxLength={6}
-                        value={digit}
-                        onChange={(e) => handleOtpBoxChange(idx, e.target.value)}
-                        onKeyDown={(e) => handleOtpBoxKeyDown(idx, e)}
-                        onPaste={handleOtpPaste}
-                        onFocus={(e) => e.target.select()}
-                        autoFocus={idx === 0}
-                        aria-label={t(`الخانة ${idx + 1} من كود التفعيل`, `OTP digit ${idx + 1}`)}
-                        className="w-full h-12 sm:h-13 rounded-xl border-2 border-slate-300 bg-slate-50 focus:bg-white text-center text-lg sm:text-xl font-black text-[#0F2438] tabular-nums focus:outline-none focus:border-[#C6A052] focus:ring-2 focus:ring-[#C6A052]/30 transition"
+                  {/* 24-Hour OTP Validity Live Countdown Banner */}
+                  <div
+                    className={`rounded-2xl border p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                      isExpired
+                        ? 'bg-red-50 border-red-200 text-red-900'
+                        : 'bg-sky-50 border-sky-200 text-[#0F2438]'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <Clock
+                        className={`w-4.5 h-4.5 shrink-0 mt-0.5 ${
+                          isExpired ? 'text-red-600' : 'text-[#0284C7]'
+                        }`}
                       />
-                    ))}
+                      <div className="text-xs leading-snug">
+                        <span className="font-black block">
+                          {isExpired
+                            ? t('انتهت صلاحية كود التفعيل (24 ساعة)', 'OTP Code Validity Expired (24 Hours)')
+                            : t('صلاحية الكود المحفوظ (24 ساعة)', '24-Hour OTP Validity Active')}
+                        </span>
+                        <span className="text-[11px] text-slate-600 block mt-0.5">
+                          {isExpired
+                            ? t(
+                                'اضغط على "إصدار كود جديد" بالأسفل لإرسال كود جديد صالح 24 ساعة.',
+                                'Tap "Issue New Code" below to generate a fresh 24-hour OTP.'
+                              )
+                            : t(
+                                'يبقى طلبك محفوظاً خلال الـ 24 ساعة حتى عند إغلاق الصفحة والعودة برقمك.',
+                                'Stays active for 24h even if you close and revisit with your phone.'
+                              )}
+                        </span>
+                      </div>
+                    </div>
+
+                    {!isExpired && (
+                      <div
+                        className="px-3 py-1.5 rounded-xl bg-white border border-sky-300 text-xs sm:text-sm font-black text-[#0F2438] tabular-nums shrink-0 text-center"
+                        dir="ltr"
+                      >
+                        {formattedCountdown}
+                      </div>
+                    )}
                   </div>
 
-                  {otpError && (
-                    <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
-                      {otpError}
+                  {otpInfoBanner && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900">
+                      {otpInfoBanner}
                     </div>
                   )}
 
-                  <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                    <button
-                      type="submit"
-                      disabled={isVerifyingOtp}
-                      className="flex-1 min-h-[46px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition cursor-pointer"
+                  <div className="space-y-2.5">
+                    <a
+                      href={buildClientOtpWhatsAppUrl(lang)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full min-h-[48px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
                     >
-                      {isVerifyingOtp && <Loader2 className="w-4 h-4 animate-spin" />}
-                      <span>{t('تحقق ومتابعة', 'Verify & Continue')}</span>
-                    </button>
+                      <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
+                      <span>
+                        {t(
+                          'طلب الكود عبر واتساب (201119227270)',
+                          'Request Code via WhatsApp (201119227270)'
+                        )}
+                      </span>
+                    </a>
 
-                    <button
-                      type="button"
-                      onClick={resetToPhoneEntry}
-                      className="min-h-[46px] px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
-                    >
-                      {t('تغيير الرقم', 'Change Number')}
-                    </button>
+                    <div className="flex items-center justify-between gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-2.5 text-emerald-950">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span className="text-[11px] sm:text-xs font-bold leading-snug">
+                          {t(
+                            'الرد بالكود يتم آلياً عبر واتساب أو تفعيله من الإدارة مباشرة',
+                            'Code sent via WhatsApp or activated live by Admin'
+                          )}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isInitiatingOtp}
+                        onClick={() => void handleIssueFreshOtpCode()}
+                        className="text-[11px] font-black text-[#0284C7] hover:underline shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        {isInitiatingOtp
+                          ? t('جاري الإصدار...', 'Issuing...')
+                          : t('إصدار كود جديد', 'Issue New Code')}
+                      </button>
+                    </div>
                   </div>
-                </form>
-              </div>
-            )}
+
+                  <form onSubmit={handleVerifyOtpSubmit} className="space-y-3.5 pt-3 border-t border-slate-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-bold text-[#0F2438]">
+                        {t('أدخل كود التفعيل (6 أرقام فقط 0-9)', 'Enter Activation Code (6 Digits 0-9)')}
+                      </label>
+                      <span className="text-[11px] font-semibold text-slate-500">
+                        {t('يدعم اللصق السريع', 'Quick paste supported')}
+                      </span>
+                    </div>
+
+                    <div dir="ltr" className="grid grid-cols-6 gap-2 sm:gap-2.5 max-w-sm mx-auto">
+                      {otpDigits.map((digit, idx) => (
+                        <input
+                          key={idx}
+                          ref={(el) => {
+                            otpBoxRefs.current[idx] = el;
+                          }}
+                          type="tel"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          autoComplete={idx === 0 ? 'one-time-code' : 'off'}
+                          maxLength={6}
+                          value={digit}
+                          onChange={(e) => handleOtpBoxChange(idx, e.target.value)}
+                          onKeyDown={(e) => handleOtpBoxKeyDown(idx, e)}
+                          onPaste={handleOtpPaste}
+                          onFocus={(e) => e.target.select()}
+                          autoFocus={idx === 0}
+                          aria-label={t(`الخانة ${idx + 1} من كود التفعيل`, `OTP digit ${idx + 1}`)}
+                          className="w-full h-12 sm:h-13 rounded-xl border-2 border-slate-300 bg-slate-50 focus:bg-white text-center text-lg sm:text-xl font-black text-[#0F2438] tabular-nums focus:outline-none focus:border-[#C6A052] focus:ring-2 focus:ring-[#C6A052]/30 transition"
+                        />
+                      ))}
+                    </div>
+
+                    {otpError && (
+                      <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
+                        {otpError}
+                      </div>
+                    )}
+
+                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                      <button
+                        type="submit"
+                        disabled={isVerifyingOtp}
+                        className="flex-1 min-h-[46px] py-2.5 px-4 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 transition cursor-pointer"
+                      >
+                        {isVerifyingOtp && <Loader2 className="w-4 h-4 animate-spin" />}
+                        <span>{t('تحقق ومتابعة', 'Verify & Continue')}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={resetToPhoneEntry}
+                        className="min-h-[46px] px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+                      >
+                        {t('تغيير الرقم', 'Change Number')}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              );
+            })()}
 
             {/* STAGE 3: CREATE OR RESET 6-DIGIT PERSONAL PIN */}
             {authStage === 'pin_setup' && (
@@ -1895,8 +2141,9 @@ Please advise on the next steps for my application.`
                       <span className="text-red-500">*</span>
                     </label>
                     <input
-                      type={showSetupPins ? 'text' : 'password'}
+                      type="tel"
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       maxLength={6}
                       required
                       dir="ltr"
@@ -1906,7 +2153,9 @@ Please advise on the next steps for my application.`
                         setNewPinInput(normalizeArabicDigits(e.target.value).replace(/\D/g, '').slice(0, 6))
                       }
                       placeholder="••••••"
-                      className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      className={`w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] ${
+                        showSetupPins ? '' : '[-webkit-text-security:disc]'
+                      }`}
                     />
                   </div>
 
@@ -1916,8 +2165,9 @@ Please advise on the next steps for my application.`
                       <span className="text-red-500">*</span>
                     </label>
                     <input
-                      type={showSetupPins ? 'text' : 'password'}
+                      type="tel"
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       maxLength={6}
                       required
                       dir="ltr"
@@ -1926,7 +2176,9 @@ Please advise on the next steps for my application.`
                         setConfirmPinInput(normalizeArabicDigits(e.target.value).replace(/\D/g, '').slice(0, 6))
                       }
                       placeholder="••••••"
-                      className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      className={`w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] ${
+                        showSetupPins ? '' : '[-webkit-text-security:disc]'
+                      }`}
                     />
                   </div>
                 </div>
@@ -3177,17 +3429,36 @@ Please advise on the next steps for my application.`
                 </div>
               </div>
 
-              {/* Account & Passport Details Form */}
+              {/* Saved Traveler Auto-Fill Profile & Passport Details Form */}
               <div className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
                   <div>
-                    <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
-                      {t('البيانات الأساسية وبيانات جواز السفر', 'Account & Mandatory Passport Details')}
-                    </h2>
-                    <p className="text-[11px] text-slate-500">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+                        {t(
+                          'بيانات المسافر المحفوظة (للتعبئة التلقائية للطلبات)',
+                          'Saved Traveler Profile (Quick Order Auto-Fill)'
+                        )}
+                      </h2>
+                      {Boolean(
+                        (draft.passportFullName.trim() || (draft.firstName.trim() && draft.lastName.trim())) &&
+                          draft.passportNumber.trim() &&
+                          draft.passportExpiryDate &&
+                          hasPassportScan
+                      ) ? (
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[10.5px] font-black text-emerald-800">
+                          {t('جاهز للتعبئة التلقائية ✓', 'Auto-Fill Ready ✓')}
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-[10.5px] font-black text-amber-800">
+                          {t('أكمل بيانات الجواز للتعبئة بضغطة زر', 'Complete to enable 1-click auto-fill')}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
                       {t(
-                        'تتحدث البيانات تلقائياً عند رفع صورة الجواز أو يمكنك تعديلها يدوياً في أي وقت',
-                        'Fields auto-populate when uploading your passport scan or can be edited anytime'
+                        'احفظ الاسم بالإنجليزية، رقم الجواز، تاريخ الانتهاء وصورة الجواز هنا لتعبئة طلباتك الجديدة خلال ثانية واحدة دون إعادة كتابة.',
+                        'Save your English name, passport number, expiry date, and passport scan once to auto-fill future orders in 1 second.'
                       )}
                     </p>
                   </div>
@@ -3635,8 +3906,9 @@ Please advise on the next steps for my application.`
                     </div>
 
                     <input
-                      type="text"
+                      type="tel"
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       maxLength={6}
                       dir="ltr"
                       required
@@ -3696,8 +3968,9 @@ Please advise on the next steps for my application.`
                     </div>
 
                     <input
-                      type={showChangePins ? 'text' : 'password'}
+                      type="tel"
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       maxLength={6}
                       dir="ltr"
                       required
@@ -3708,12 +3981,15 @@ Please advise on the next steps for my application.`
                         )
                       }
                       placeholder={t('رمز PIN الجديد (6 أرقام)', 'New 6-digit PIN')}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-center text-sm font-black tracking-[0.35em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      className={`w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-center text-sm font-black tracking-[0.35em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] ${
+                        showChangePins ? '' : '[-webkit-text-security:disc]'
+                      }`}
                     />
 
                     <input
-                      type={showChangePins ? 'text' : 'password'}
+                      type="tel"
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       maxLength={6}
                       dir="ltr"
                       required
@@ -3724,7 +4000,9 @@ Please advise on the next steps for my application.`
                         )
                       }
                       placeholder={t('تأكيد رمز PIN الجديد', 'Confirm new 6-digit PIN')}
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-center text-sm font-black tracking-[0.35em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      className={`w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-center text-sm font-black tracking-[0.35em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] ${
+                        showChangePins ? '' : '[-webkit-text-security:disc]'
+                      }`}
                     />
 
                     {changePinError && (

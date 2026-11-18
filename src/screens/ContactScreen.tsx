@@ -12,6 +12,7 @@ import {
   Loader2,
   Users,
   Check,
+  Sparkles,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber, openWhatsApp, launchEmail } from '../utils/communication';
@@ -65,6 +66,13 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [passportNumber, setPassportNumber] = useState('');
+  const [passportExpiryDate, setPassportExpiryDate] = useState('');
+  const [autoFillTargetId, setAutoFillTargetId] = useState<string>('owner');
+  const [autoFillNotice, setAutoFillNotice] = useState<{
+    type: 'success' | 'info';
+    text: string;
+  } | null>(null);
   const [selectedService, setSelectedService] = useState(
     initialService || serviceOptions[0]
   );
@@ -105,6 +113,65 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
     );
   };
 
+  const handleAutoFillSavedTraveler = () => {
+    if (!activeTraveler) {
+      setAutoFillNotice({
+        type: 'info',
+        text: t(
+          'يرجى تسجيل الدخول في تبويب (حسابي / ملف المسافر) أولاً لحفظ واستدعاء بيانات جوازك وصوره تلقائياً بضغطة واحدة.',
+          'Please sign in to your Traveler Profile first to save and auto-fill your passport details & Drive photos in 1 click.'
+        ),
+      });
+      return;
+    }
+
+    const formattedPhone = formatPhoneForDisplay(activeTraveler.phone);
+    if (autoFillTargetId === 'owner') {
+      const names = getTravelerDisplayNames(activeTraveler);
+      const resolvedName =
+        (activeTraveler.passportFullName || '').trim() || names.fullDisplayName;
+      setName(resolvedName);
+      setPhone(formattedPhone);
+      setPassportNumber((activeTraveler.passportNumber || '').trim().toUpperCase());
+      setPassportExpiryDate(activeTraveler.passportExpiryDate || '');
+      setSelectedTravelerIds((prev) => (prev.includes('owner') ? prev : ['owner', ...prev]));
+
+      const hasPassportDoc = (activeTraveler.documents || []).some(
+        (d) => d.docType === 'passport' && Boolean(d.dataUrl || d.viewUrl)
+      );
+      setAutoFillNotice({
+        type: 'success',
+        text: hasPassportDoc
+          ? t(
+              `تمت التعبئة التلقائية لـ (${resolvedName}) مع تجهيز رابط صورة الجواز من Google Drive.`,
+              `Auto-filled (${resolvedName}) with Passport No., Expiry & Google Drive passport link ready.`
+            )
+          : t(
+              `تمت التعبئة التلقائية لـ (${resolvedName}) ورقم الهاتف وبيانات الجواز المحفوظة.`,
+              `Auto-filled (${resolvedName}), phone, and saved passport details.`
+            ),
+      });
+      return;
+    }
+
+    const member = (activeTraveler.familyMembers || []).find((m) => m.id === autoFillTargetId);
+    if (!member) return;
+    const memberName =
+      (member.passportFullName || '').trim() || `${member.firstName} ${member.lastName}`.trim();
+    setName(memberName);
+    setPhone(formattedPhone);
+    setPassportNumber((member.passportNumber || '').trim().toUpperCase());
+    setPassportExpiryDate(member.passportExpiryDate || '');
+    setSelectedTravelerIds((prev) => (prev.includes(member.id) ? prev : [...prev, member.id]));
+    setAutoFillNotice({
+      type: 'success',
+      text: t(
+        `تمت التعبئة التلقائية للمرافق (${memberName}) ورقم الجواز وروابط صوره المحفوظة.`,
+        `Auto-filled companion (${memberName}) with saved passport number and Drive links.`
+      ),
+    });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -129,10 +196,16 @@ export const ContactScreen: React.FC<ContactScreenProps> = ({ initialService }) 
     const travelersBlock = activeTraveler
       ? formatTravelersOrderSummary(activeTraveler, selectedTravelerIds, lang)
       : '';
+    const passportLine =
+      passportNumber.trim() || passportExpiryDate.trim()
+        ? `\n• Passport Number: ${passportNumber.trim().toUpperCase() || 'N/A'}\n• Passport Expiry: ${
+            passportExpiryDate.trim() || 'N/A'
+          }`
+        : '';
     const bodyText = `
 • Client Name: ${name}
 • Client Email: ${email}
-• Phone / WhatsApp: ${phone}
+• Phone / WhatsApp: ${phone}${passportLine}
 • Requested Service: ${selectedService}${
       travelersBlock ? `\n• Selected Traveler(s) & Documents:\n${travelersBlock}` : ''
     }
@@ -180,20 +253,30 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
     const travelersBlock = activeTraveler
       ? formatTravelersOrderSummary(activeTraveler, selectedTravelerIds, lang)
       : '';
+    const passportBlock =
+      passportNumber.trim() || passportExpiryDate.trim()
+        ? lang === 'en'
+          ? `${passportNumber.trim() ? `\n• Passport No.: ${passportNumber.trim().toUpperCase()}` : ''}${
+              passportExpiryDate.trim() ? `\n• Passport Expiry: ${passportExpiryDate.trim()}` : ''
+            }`
+          : `${passportNumber.trim() ? `\n• رقم الجواز: ${passportNumber.trim().toUpperCase()}` : ''}${
+              passportExpiryDate.trim() ? `\n• تاريخ انتهاء الجواز: ${passportExpiryDate.trim()}` : ''
+            }`
+        : '';
     const msg =
       lang === 'en'
         ? `Hello ${localized.companyName} (CR: ${TravelRepository.COMMERCIAL_RECORD}):\n• Name: ${
             name.trim() || 'Client'
           }\n• Email: ${email.trim() || 'N/A'}\n• Phone: ${
             phone.trim() || 'N/A'
-          }\n• Service: ${selectedService}${
+          }${passportBlock}\n• Service: ${selectedService}${
             travelersBlock ? `\n\nSelected Traveler(s) & Cloud Documents:\n${travelersBlock}` : ''
           }\n• Details: ${message.trim() || 'None'}`
         : `السلام عليكم، أود حجز خدمة من مكتب ${TravelRepository.COMPANY_NAME_AR} (س.ت: ${
             TravelRepository.COMMERCIAL_RECORD
           }):\n• الاسم: ${name.trim() || 'عميل'}\n• الإيميل: ${
             email.trim() || 'غير محدد'
-          }\n• الهاتف: ${phone.trim() || 'غير محدد'}\n• الخدمة: ${selectedService}${
+          }\n• الهاتف: ${phone.trim() || 'غير محدد'}${passportBlock}\n• الخدمة: ${selectedService}${
             travelersBlock ? `\n\nالمسافرون المشمولون بالطلب ومستنداتهم السحابية:\n${travelersBlock}` : ''
           }\n• تفاصيل: ${message.trim() || 'لا توجد'}`;
     openWhatsApp(msg);
@@ -285,6 +368,66 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
             </div>
           )}
 
+          {/* Saved Traveler Auto-Fill Bar */}
+          <div className="bg-gradient-to-br from-[#0F2438] to-[#17344F] text-white rounded-2xl p-3.5 sm:p-4 space-y-2.5 border border-[#C6A052]/60 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="text-xs sm:text-sm font-black text-[#E5C887] flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 shrink-0" />
+                  <span>{t('بيانات المسافر المحفوظة', 'Saved Traveler Auto-Fill')}</span>
+                </span>
+                <p className="text-[11px] text-slate-200 mt-0.5 leading-snug">
+                  {t(
+                    'استدعاء الاسم ورقم الهاتف ورقم وتاريخ انتهاء الجواز وروابط صور Google Drive بضغطة واحدة',
+                    'Auto-fill Full Name, Phone, Passport No., Expiry Date & saved Drive document links in 1 click'
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              {activeTraveler && (activeTraveler.familyMembers || []).length > 0 && (
+                <select
+                  value={autoFillTargetId}
+                  onChange={(e) => setAutoFillTargetId(e.target.value)}
+                  className="min-h-[44px] px-3 py-2 rounded-xl bg-white/10 border border-white/25 text-xs font-bold text-white focus:outline-none focus:ring-2 focus:ring-[#E5C887]"
+                >
+                  <option value="owner" className="text-[#0F2438]">
+                    {getTravelerDisplayNames(activeTraveler).fullDisplayName} ({t('صاحب الحساب', 'Owner')})
+                  </option>
+                  {(activeTraveler.familyMembers || []).map((m) => (
+                    <option key={m.id} value={m.id} className="text-[#0F2438]">
+                      {m.firstName} {m.lastName} ({getRelationshipLabel(m.relationship, lang)})
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                type="button"
+                onClick={handleAutoFillSavedTraveler}
+                className="flex-1 min-h-[44px] px-4 py-2.5 bg-[#C6A052] hover:bg-[#b58e3f] text-[#0F2438] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.99] cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 shrink-0" />
+                <span>
+                  {t('تعبئة تلقائية من بياناتي المحفوظة', 'Auto-Fill From Saved Profile')}
+                </span>
+              </button>
+            </div>
+
+            {autoFillNotice && (
+              <div
+                className={`rounded-xl px-3 py-2 text-[11px] font-bold ${
+                  autoFillNotice.type === 'success'
+                    ? 'bg-emerald-500/20 border border-emerald-300/40 text-emerald-100'
+                    : 'bg-white/10 border border-white/20 text-amber-100'
+                }`}
+              >
+                {autoFillNotice.text}
+              </div>
+            )}
+          </div>
+
           <form onSubmit={handleSubmit} className="space-y-3.5">
             <div>
               <label className="block text-xs font-bold text-[#0F2437] mb-1">
@@ -321,6 +464,7 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
               </label>
               <input
                 type="tel"
+                inputMode="numeric"
                 required
                 dir="ltr"
                 value={phone}
@@ -328,6 +472,35 @@ Official Email: ${TravelRepository.OFFICIAL_EMAIL}
                 placeholder={siteConfig.phoneNumber}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium tabular-nums"
               />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-[#0F2437] mb-1">
+                  {t('رقم جواز السفر (اختياري)', 'Passport Number (Optional)')}
+                </label>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={passportNumber}
+                  onChange={(e) => setPassportNumber(e.target.value.toUpperCase())}
+                  placeholder="A12345678"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium uppercase tabular-nums"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#0F2437] mb-1">
+                  {t('تاريخ انتهاء الجواز (اختياري)', 'Passport Expiry Date (Optional)')}
+                </label>
+                <input
+                  type="date"
+                  dir="ltr"
+                  value={passportExpiryDate}
+                  onChange={(e) => setPassportExpiryDate(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E2DAC8] focus:border-[#2A7688] focus:ring-1 focus:ring-[#2A7688] outline-none text-xs md:text-sm bg-[#FAF8F2] font-medium tabular-nums"
+                />
+              </div>
             </div>
 
             <div>

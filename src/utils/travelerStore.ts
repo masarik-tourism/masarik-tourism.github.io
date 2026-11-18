@@ -61,6 +61,7 @@ const DEFAULT_ADMIN_PIN = '202200';
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
 export const COMPANY_WHATSAPP_NUMBER = '201128440008';
 export const OTP_ACTIVATION_WHATSAPP_NUMBER = '201119227270';
+export const OTP_VALIDITY_MS = 24 * 60 * 60 * 1000;
 
 export const VISA_ORDER_STATUSES: CanonicalVisaOrderStatus[] = [
   'تم استلام الطلب',
@@ -272,6 +273,24 @@ export function generateSixDigitOtp(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+export function isOtpActiveAndUnexpired(profile?: Partial<TravelerProfile> | null): boolean {
+  if (!profile) return false;
+  if (!/^\d{6}$/.test(String(profile.otp || ''))) return false;
+  if (profile.otpConsumed === true) return false;
+  if (profile.otpExpiresAt) {
+    const expMs = Date.parse(profile.otpExpiresAt);
+    if (!Number.isFinite(expMs) || expMs <= Date.now()) {
+      return false;
+    }
+    return true;
+  }
+  const genMs = Date.parse(profile.otpGeneratedAt || profile.createdAt || '');
+  if (Number.isFinite(genMs)) {
+    return genMs + OTP_VALIDITY_MS > Date.now();
+  }
+  return false;
+}
+
 export function buildActivationMagicLink(phone: string, otp: string, name?: string): string {
   const cleanPhone = normalizePhone(phone);
   const params = new URLSearchParams({
@@ -481,6 +500,19 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     lastName,
     name: combinedName,
     otp: safeOtp,
+    ...(profile.otpGeneratedAt
+      ? { otpGeneratedAt: String(profile.otpGeneratedAt).slice(0, 64) }
+      : {}),
+    ...(profile.otpExpiresAt
+      ? { otpExpiresAt: String(profile.otpExpiresAt).slice(0, 64) }
+      : {}),
+    ...(typeof profile.otpConsumed === 'boolean' ? { otpConsumed: profile.otpConsumed } : {}),
+    ...(typeof profile.activatedByAdmin === 'boolean'
+      ? { activatedByAdmin: profile.activatedByAdmin }
+      : {}),
+    ...(profile.adminBypassOtpAt
+      ? { adminBypassOtpAt: String(profile.adminBypassOtpAt).slice(0, 64) }
+      : {}),
     verified: Boolean(profile.verified),
     createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
     updatedAt: new Date().toISOString(),
@@ -607,6 +639,17 @@ function mergeCloudClientWithLocal(
     orderCode: cloudData.orderCode || buildOrderCodeFromPhone(cloudData.phone),
     firstName: cloudData.firstName || split.firstName,
     lastName: cloudData.lastName || split.lastName,
+    otpGeneratedAt: cloudData.otpGeneratedAt || localExisting?.otpGeneratedAt,
+    otpExpiresAt: cloudData.otpExpiresAt || localExisting?.otpExpiresAt,
+    otpConsumed:
+      typeof cloudData.otpConsumed === 'boolean'
+        ? cloudData.otpConsumed
+        : localExisting?.otpConsumed,
+    activatedByAdmin:
+      typeof cloudData.activatedByAdmin === 'boolean'
+        ? cloudData.activatedByAdmin
+        : localExisting?.activatedByAdmin,
+    adminBypassOtpAt: cloudData.adminBypassOtpAt || localExisting?.adminBypassOtpAt,
     pinHash: cloudData.pinHash || localExisting?.pinHash || undefined,
     pinUpdatedAt: cloudData.pinUpdatedAt || localExisting?.pinUpdatedAt || undefined,
     trustedDevices: Array.isArray(cloudData.trustedDevices)
@@ -795,6 +838,41 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
         handleFirestoreError(error, OperationType.GET, path);
       }
       console.warn('Active traveler listener warning:', msg);
+    }
+  );
+}
+
+/**
+ * Real-time listener used on the OTP verification screen so that when the General Manager
+ * taps "تفعيل الحساب فوراً (بدون OTP)", the waiting client screen immediately advances to PIN/Device Trust setup.
+ */
+export function subscribePendingClientCloud(
+  rawPhone: string | null,
+  onUpdate: (profile: TravelerProfile) => void
+): () => void {
+  const normalized = rawPhone ? normalizePhone(rawPhone) : '';
+  if (!/^[0-9]{8,20}$/.test(normalized)) {
+    return () => {};
+  }
+
+  const path = `clients/${normalized}`;
+  return onSnapshot(
+    doc(db, 'clients', normalized),
+    (snap) => {
+      if (!snap.exists()) return;
+      const cloudProfile = snap.data() as TravelerProfile;
+      const all = getAllTravelers();
+      const merged = mergeCloudClientWithLocal(cloudProfile, all[normalized]);
+      all[normalized] = merged;
+      saveAllTravelersLocalOnly(all);
+      onUpdate(merged);
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
+      console.warn('Pending client OTP listener warning:', msg);
     }
   );
 }
@@ -1074,8 +1152,16 @@ export async function loginWithTrustedDevicePinCloud(
 export async function initiateTravelerOtpLoginCloud(
   firstNameInput: string,
   lastNameInput: string,
-  rawPhone: string
-): Promise<{ ok: boolean; phone: string; isExisting: boolean; error?: string }> {
+  rawPhone: string,
+  options?: { forceNew?: boolean }
+): Promise<{
+  ok: boolean;
+  phone: string;
+  isExisting: boolean;
+  otpExpiresAt?: string;
+  profile?: TravelerProfile;
+  error?: string;
+}> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) {
     return { ok: false, phone: '', isExisting: false, error: 'رقم الهاتف غير صالح.' };
@@ -1084,7 +1170,9 @@ export async function initiateTravelerOtpLoginCloud(
   const cleanFirst = firstNameInput.trim();
   const cleanLast = lastNameInput.trim();
   const combinedName = `${cleanFirst} ${cleanLast}`.trim();
-  const freshOtp = generateSixDigitOtp();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextExpiryIso = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
   const path = `clients/${phone}`;
 
   const localAll = getAllTravelers();
@@ -1109,6 +1197,23 @@ export async function initiateTravelerOtpLoginCloud(
     const finalLast = cleanLast || existing.lastName || existingSplit.lastName;
     const finalName = `${finalFirst} ${finalLast}`.trim() || existing.name;
 
+    // Preserve active unconsumed 6-digit OTP during its 24-hour validity window when client closes & reopens page
+    const canKeepExistingOtp =
+      !options?.forceNew &&
+      !existing.verified &&
+      isOtpActiveAndUnexpired(existing);
+
+    const activeOtp = canKeepExistingOtp ? existing.otp : generateSixDigitOtp();
+    const activeGeneratedAt = canKeepExistingOtp
+      ? existing.otpGeneratedAt || existing.createdAt || nowIso
+      : nowIso;
+    const activeExpiresAt = canKeepExistingOtp
+      ? existing.otpExpiresAt ||
+        new Date(
+          (Date.parse(activeGeneratedAt) || nowMs) + OTP_VALIDITY_MS
+        ).toISOString()
+      : nextExpiryIso;
+
     const updated: TravelerProfile = {
       ...existing,
       phone,
@@ -1116,15 +1221,20 @@ export async function initiateTravelerOtpLoginCloud(
       firstName: finalFirst,
       lastName: finalLast,
       name: finalName,
-      otp: freshOtp,
+      otp: activeOtp,
+      otpGeneratedAt: activeGeneratedAt,
+      otpExpiresAt: activeExpiresAt,
+      otpConsumed: false,
+      ...(!existing.verified ? { activatedByAdmin: false } : {}),
     };
 
     localAll[phone] = updated;
     saveAllTravelersLocalOnly(localAll);
     await syncTravelerToCloud(updated);
-    return { ok: true, phone, isExisting: true };
+    return { ok: true, phone, isExisting: true, otpExpiresAt: activeExpiresAt, profile: updated };
   }
 
+  const freshOtp = generateSixDigitOtp();
   const created: TravelerProfile = {
     phone,
     phoneNormalized: phone,
@@ -1132,9 +1242,13 @@ export async function initiateTravelerOtpLoginCloud(
     lastName: cleanLast,
     name: combinedName || `مسافر (${formatPhoneForDisplay(phone)})`,
     otp: freshOtp,
+    otpGeneratedAt: nowIso,
+    otpExpiresAt: nextExpiryIso,
+    otpConsumed: false,
+    activatedByAdmin: false,
     trustedDevices: [],
     verified: false,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
     orderStatus: 'تم استلام الطلب',
     documents: [],
   };
@@ -1142,20 +1256,23 @@ export async function initiateTravelerOtpLoginCloud(
   localAll[phone] = created;
   saveAllTravelersLocalOnly(localAll);
   await syncTravelerToCloud(created);
-  return { ok: true, phone, isExisting: false };
+  return { ok: true, phone, isExisting: false, otpExpiresAt: nextExpiryIso, profile: created };
 }
 
 /**
- * Generates a fresh 6-digit OTP on an existing client account (used for Forgot PIN or Change PIN).
+ * Generates (or reuses an unexpired) 6-digit numeric OTP on an existing client account (Forgot PIN or Change PIN).
  */
 export async function requestAccountSecurityOtpCloud(
-  rawPhone: string
-): Promise<{ ok: boolean; phone: string; error?: string }> {
+  rawPhone: string,
+  options?: { forceNew?: boolean }
+): Promise<{ ok: boolean; phone: string; otpExpiresAt?: string; error?: string }> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) {
     return { ok: false, phone: '', error: 'رقم الهاتف غير صالح.' };
   }
-  const freshOtp = generateSixDigitOtp();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextExpiryIso = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
   const path = `clients/${phone}`;
   const localAll = getAllTravelers();
   let existing: TravelerProfile | undefined = localAll[phone];
@@ -1176,18 +1293,26 @@ export async function requestAccountSecurityOtpCloud(
     return { ok: false, phone, error: 'الحساب غير موجود.' };
   }
 
+  const keepCurrent = !options?.forceNew && isOtpActiveAndUnexpired(existing) && Boolean(existing.otpExpiresAt);
+  const nextOtp = keepCurrent ? existing.otp : generateSixDigitOtp();
+  const nextGenAt = keepCurrent ? existing.otpGeneratedAt || nowIso : nowIso;
+  const nextExpAt = keepCurrent ? existing.otpExpiresAt || nextExpiryIso : nextExpiryIso;
+
   const updated: TravelerProfile = {
     ...existing,
-    otp: freshOtp,
+    otp: nextOtp,
+    otpGeneratedAt: nextGenAt,
+    otpExpiresAt: nextExpAt,
+    otpConsumed: false,
   };
   localAll[phone] = updated;
   saveAllTravelersLocalOnly(localAll);
   await syncTravelerToCloud(updated);
-  return { ok: true, phone };
+  return { ok: true, phone, otpExpiresAt: nextExpAt };
 }
 
 /**
- * Verifies a 6-digit security OTP against Firestore without creating/changing active session state.
+ * Verifies a 6-digit security OTP against Firestore (24h validity + one-time use) without altering session mode.
  */
 export async function verifyAccountSecurityOtpCloud(
   rawPhone: string,
@@ -1201,8 +1326,8 @@ export async function verifyAccountSecurityOtpCloud(
       ok: false,
       error:
         lang === 'en'
-          ? 'Please enter the 6-digit verification code.'
-          : 'يرجى إدخال كود التحقق المكون من 6 أرقام.',
+          ? 'Please enter the 6-digit verification code (0-9 only).'
+          : 'يرجى إدخال كود التحقق المكون من 6 أرقام (0-9 فقط).',
     };
   }
 
@@ -1222,7 +1347,34 @@ export async function verifyAccountSecurityOtpCloud(
     }
   }
 
-  if (!target || String(target.otp || '').trim() !== cleanOtp) {
+  if (!target) {
+    return {
+      ok: false,
+      error: lang === 'en' ? 'Account not found.' : 'الحساب غير موجود.',
+    };
+  }
+
+  if (target.otpConsumed === true) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'This verification code has already been used. Please request a new code.'
+          : 'تم استخدام هذا الكود مسبقاً. يرجى طلب كود تحقق جديد.',
+    };
+  }
+
+  if (target.otpExpiresAt && Date.parse(target.otpExpiresAt) <= Date.now()) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Verification code expired (24-hour validity elapsed). Please issue a new code.'
+          : 'انتهت صلاحية كود التحقق (24 ساعة). يرجى إصدار كود جديد.',
+    };
+  }
+
+  if (String(target.otp || '').trim() !== cleanOtp) {
     return {
       ok: false,
       error:
@@ -1232,13 +1384,24 @@ export async function verifyAccountSecurityOtpCloud(
     };
   }
 
-  return { ok: true, profile: target };
+  // Consume OTP immediately (One-Time Use) while maintaining ^[0-9]{6}$ schema constraint
+  const consumed: TravelerProfile = {
+    ...target,
+    otp: generateSixDigitOtp(),
+    otpConsumed: true,
+    otpExpiresAt: new Date(0).toISOString(),
+  };
+  all[phone] = consumed;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(consumed);
+
+  return { ok: true, profile: consumed };
 }
 
 /**
  * Step 2 of Zero-Leak Client Login:
- * Verifies the user-entered 6-digit OTP against Firestore `clients/{phoneNormalized}`
- * and returns PIN/device trust requirements before finalizing the session.
+ * Verifies the user-entered 6-digit OTP against Firestore (24h validity & one-time use),
+ * consumes the OTP immediately, and returns PIN/device trust requirements.
  */
 export async function verifyLoginOtpCloud(
   rawPhone: string,
@@ -1258,8 +1421,8 @@ export async function verifyLoginOtpCloud(
       ok: false,
       error:
         lang === 'en'
-          ? 'Please enter a valid 6-digit login code.'
-          : 'يرجى إدخال كود الدخول المكون من 6 أرقام.',
+          ? 'Please enter a valid 6-digit numeric login code.'
+          : 'يرجى إدخال كود التفعيل المكون من 6 أرقام فقط (0-9).',
     };
   }
 
@@ -1290,6 +1453,26 @@ export async function verifyLoginOtpCloud(
     };
   }
 
+  if (target.otpConsumed === true) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'This activation code has already been used or replaced. Please request a fresh code via WhatsApp.'
+          : 'تم استخدام كود التفعيل هذا مسبقاً أو تم استبداله. يرجى إصدار كود جديد عبر واتساب.',
+    };
+  }
+
+  if (target.otpExpiresAt && Date.parse(target.otpExpiresAt) <= Date.now()) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'This activation code has expired (24h limit). Tap "Issue New Code" and request via WhatsApp.'
+          : 'انتهت صلاحية كود التفعيل (24 ساعة). يرجى الضغط على "إصدار كود جديد" لطلبه عبر واتساب.',
+    };
+  }
+
   if (String(target.otp || '').trim() !== cleanOtp) {
     return {
       ok: false,
@@ -1304,6 +1487,9 @@ export async function verifyLoginOtpCloud(
     ...target,
     phone,
     phoneNormalized: phone,
+    otp: generateSixDigitOtp(),
+    otpConsumed: true,
+    otpExpiresAt: new Date(0).toISOString(),
     verified: true,
     verifiedAt: target.verifiedAt || new Date().toISOString(),
   };
@@ -1478,6 +1664,10 @@ export async function adminCreateClientCloud(
     }
   }
 
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiryIso = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
+
   const profile: TravelerProfile = existing
     ? {
         ...existing,
@@ -1486,7 +1676,10 @@ export async function adminCreateClientCloud(
         firstName: cleanFirst || existing.firstName,
         lastName: cleanLast || existing.lastName,
         name: fullName || existing.name,
-        otp: existing.otp || generateSixDigitOtp(),
+        otp: isOtpActiveAndUnexpired(existing) ? existing.otp : generateSixDigitOtp(),
+        otpGeneratedAt: existing.otpGeneratedAt || nowIso,
+        otpExpiresAt: existing.otpExpiresAt || expiryIso,
+        otpConsumed: existing.otpConsumed ?? false,
       }
     : {
         phone,
@@ -1495,8 +1688,12 @@ export async function adminCreateClientCloud(
         lastName: cleanLast,
         name: fullName || `مسافر (${formatPhoneForDisplay(phone)})`,
         otp: generateSixDigitOtp(),
+        otpGeneratedAt: nowIso,
+        otpExpiresAt: expiryIso,
+        otpConsumed: false,
+        activatedByAdmin: false,
         verified: false,
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
         orderStatus: 'تم استلام الطلب',
         documents: [],
       };
@@ -1505,6 +1702,55 @@ export async function adminCreateClientCloud(
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(profile);
   return profile;
+}
+
+/**
+ * Admin Action: Instantly activates a client's account WITHOUT requiring an OTP code.
+ * Updates Firestore immediately so any waiting client screen transitions straight to PIN Setup / Device Trust.
+ */
+export async function adminInstantActivateClientCloud(
+  rawPhone: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!existing) return null;
+
+  const nowIso = new Date().toISOString();
+  const updated: TravelerProfile = {
+    ...existing,
+    phone,
+    phoneNormalized: phone,
+    verified: true,
+    verifiedAt: existing.verifiedAt || nowIso,
+    activatedByAdmin: true,
+    adminBypassOtpAt: nowIso,
+    otp: generateSixDigitOtp(),
+    otpConsumed: true,
+    otpExpiresAt: new Date(0).toISOString(),
+    updatedAt: nowIso,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
 }
 
 export function registerOrLoginTraveler(name: string, rawPhone: string): TravelerProfile {
@@ -1693,6 +1939,18 @@ export async function activateViaMagicLinkCloud(
       const snap = await getDoc(doc(db, 'clients', phone));
       if (snap.exists()) {
         const cloud = snap.data() as TravelerProfile;
+        if (cloud.otpConsumed === true) {
+          return {
+            ok: false,
+            error: 'رابط وكود التفعيل مستخدمان مسبقاً أو منتهيا الصلاحية. يرجى طلب كود جديد عبر واتساب.',
+          };
+        }
+        if (cloud.otpExpiresAt && Date.parse(cloud.otpExpiresAt) <= Date.now()) {
+          return {
+            ok: false,
+            error: 'انتهت صلاحية كود التفعيل (24 ساعة). يرجى طلب كود جديد عبر واتساب.',
+          };
+        }
         if (cloud.otp !== cleanOtp) {
           return { ok: false, error: 'كود التفعيل في الرابط غير مطابق لهذا الحساب.' };
         }
@@ -1705,6 +1963,9 @@ export async function activateViaMagicLinkCloud(
           firstName: merged.firstName || split.firstName,
           lastName: merged.lastName || split.lastName,
           name: nameFromUrl?.trim() || merged.name,
+          otp: generateSixDigitOtp(),
+          otpConsumed: true,
+          otpExpiresAt: new Date(0).toISOString(),
           verified: true,
           verifiedAt: cloud.verifiedAt || new Date().toISOString(),
         };
@@ -1789,6 +2050,7 @@ export function updateTravelerProfileDetails(
       | 'adminNotes'
       | 'verified'
       | 'verifiedAt'
+      | 'activatedByAdmin'
       | 'issuedDocuments'
       | 'notifications'
       | 'appointmentDetails'
