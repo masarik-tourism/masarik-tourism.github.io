@@ -35,7 +35,10 @@ import {
   Bell,
   FileCheck2,
   ExternalLink,
+  QrCode,
+  MapPin,
 } from 'lucide-react';
+import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import {
   FamilyMember,
   FamilyRelationship,
@@ -49,6 +52,7 @@ import {
   TravelerProfileDraft,
   VISA_ORDER_STATUSES,
   buildClientOtpWhatsAppUrl,
+  buildOrderCodeFromPhone,
   checkClientAccountAndDeviceCloud,
   commitTravelerProfileDraftCloud,
   compressImageToDataUrl,
@@ -81,6 +85,8 @@ import {
 import {
   buildDescriptiveFilename,
   downloadCloudFile,
+  getDisplayableDriveImageUrl,
+  getDriveViewUrl,
   imageUrlToBase64,
 } from '../utils/firebaseStorageHelper';
 import { translateOrderStatus } from '../data/travelData';
@@ -237,6 +243,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [familySectionFeedback, setFamilySectionFeedback] = useState<string | null>(null);
   const [confirmDeleteMemberId, setConfirmDeleteMemberId] = useState<string | null>(null);
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
+  const [showQrPassModal, setShowQrPassModal] = useState(false);
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const accountPassportInputRef = useRef<HTMLInputElement>(null);
@@ -2130,11 +2137,15 @@ Please advise on the next steps for my application.`
 
                     {isPdf ? (
                       <a
-                        href={delDoc.downloadUrl}
+                        href={getDriveViewUrl(
+                          delDoc.downloadUrl,
+                          delDoc.viewUrl,
+                          delDoc.storagePath
+                        )}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="min-h-[44px] px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-emerald-300 text-[#0F2438] text-xs font-black flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
-                        title={t('فتح الملف في نافذة جديدة', 'Open in new tab')}
+                        title={t('فتح ومعاينة الملف في نافذة جديدة', 'Open preview in new tab')}
                       >
                         <ExternalLink className="w-4 h-4" />
                         <span>{t('عرض', 'View')}</span>
@@ -2548,7 +2559,7 @@ Please advise on the next steps for my application.`
                   <div className="flex items-center gap-3 min-w-0">
                     {member.personalPhotoUrl ? (
                       <img
-                        src={member.personalPhotoUrl}
+                        src={getDisplayableDriveImageUrl(member.personalPhotoUrl)}
                         alt={fullName}
                         loading="lazy"
                         decoding="async"
@@ -2752,7 +2763,7 @@ Please advise on the next steps for my application.`
             <div className="relative shrink-0">
               {effectiveAvatarUrl ? (
                 <img
-                  src={effectiveAvatarUrl}
+                  src={getDisplayableDriveImageUrl(effectiveAvatarUrl)}
                   alt={headerDisplayName}
                   loading="lazy"
                   decoding="async"
@@ -2808,10 +2819,15 @@ Please advise on the next steps for my application.`
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-300 tabular-nums" dir="ltr">
-                {formatPhoneForDisplay(activeTraveler.phone)} · +
-                {activeTraveler.phoneNormalized || activeTraveler.phone}
-              </p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300 tabular-nums">
+                <span dir="ltr">
+                  {formatPhoneForDisplay(activeTraveler.phone)} · +
+                  {activeTraveler.phoneNormalized || activeTraveler.phone}
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-white/10 border border-[#C6A052]/50 text-[#E5C887] font-black text-[11px]" dir="ltr">
+                  {t('رقم الطلب:', 'Order No:')} {activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -2964,7 +2980,7 @@ Please advise on the next steps for my application.`
                 <div className="flex flex-col items-center gap-3 py-2">
                   {effectiveAvatarUrl ? (
                     <img
-                      src={effectiveAvatarUrl}
+                      src={getDisplayableDriveImageUrl(effectiveAvatarUrl)}
                       alt={headerDisplayName}
                       loading="lazy"
                       decoding="async"
@@ -3076,7 +3092,7 @@ Please advise on the next steps for my application.`
                     <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
                       <div className="flex items-center gap-2.5">
                         <img
-                          src={latestPassportScan.dataUrl}
+                          src={getDisplayableDriveImageUrl(latestPassportScan.dataUrl)}
                           alt={latestPassportScan.label}
                           loading="lazy"
                           decoding="async"
@@ -3769,20 +3785,28 @@ Please advise on the next steps for my application.`
                     </p>
                   </div>
                 </div>
-                <span
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black ${
-                    activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
-                    activeTraveler.orderStatus === 'مكتمل'
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-[#0F2438] text-[#E5C887]'
-                  }`}
-                >
-                  {(activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
-                    activeTraveler.orderStatus === 'مكتمل') && (
-                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  )}
-                  <span>{translateOrderStatus(activeTraveler.orderStatus, lang)}</span>
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#E5C887] text-[11px] font-black text-[#0F2438] tabular-nums"
+                    dir="ltr"
+                  >
+                    {t('رقم الطلب:', 'Order No:')} {activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)}
+                  </span>
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black ${
+                      activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                      activeTraveler.orderStatus === 'مكتمل'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-[#0F2438] text-[#E5C887]'
+                    }`}
+                  >
+                    {(activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                      activeTraveler.orderStatus === 'مكتمل') && (
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>{translateOrderStatus(activeTraveler.orderStatus, lang)}</span>
+                  </span>
+                </div>
               </div>
 
               {/* Visual Progress Bar Header */}
@@ -3908,7 +3932,70 @@ Please advise on the next steps for my application.`
                 </div>
               )}
 
+              {(currentStatusIdx >= 2 ||
+                Boolean(
+                  activeTraveler.appointmentDetails?.appointmentDate ||
+                    activeTraveler.appointmentDetails?.appointmentTime ||
+                    activeTraveler.appointmentDetails?.referenceNumber
+                )) && (
+                <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white rounded-2xl p-4 sm:p-5 border border-[#C6A052]/65 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className="w-11 h-11 rounded-xl bg-[#C6A052] text-[#0A1926] flex items-center justify-center shrink-0 shadow-xs">
+                      <QrCode className="w-6 h-6" />
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-black text-white">
+                          {t('بطاقة باركود الموعد السريع (QR Pass)', 'Express Appointment QR Pass')}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-[10.5px] font-black text-emerald-300">
+                          {t('جاهزة للإبراز عند الدخول', 'Ready for Entry')}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        {activeTraveler.appointmentDetails?.serviceType ||
+                          activeTraveler.preferredVisaType ||
+                          t('موعد خدمة محجوز لدى مسارك', 'Confirmed Service Appointment')}
+                        {activeTraveler.appointmentDetails?.appointmentDate && (
+                          <span className="text-[#E5C887] font-black mx-1.5 tabular-nums" dir="ltr">
+                            • {activeTraveler.appointmentDetails.appointmentDate}{' '}
+                            {activeTraveler.appointmentDetails.appointmentTime || ''}
+                          </span>
+                        )}
+                      </p>
+                      {activeTraveler.appointmentDetails?.location && (
+                        <p className="text-[11px] text-slate-300 flex items-center gap-1">
+                          <MapPin className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
+                          <span>{activeTraveler.appointmentDetails.location}</span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowQrPassModal(true)}
+                    className="min-h-[44px] px-4 py-2.5 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer shrink-0"
+                  >
+                    <QrCode className="w-4.5 h-4.5" />
+                    <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
+                  </button>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-3 pt-2">
+                {(currentStatusIdx >= 2 ||
+                  Boolean(activeTraveler.appointmentDetails?.appointmentDate)) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowQrPassModal(true)}
+                    className="min-h-[44px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] border border-[#C6A052] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <QrCode className="w-4.5 h-4.5" />
+                    <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={handleSendWalletSummaryWhatsApp}
@@ -4118,6 +4205,8 @@ Please advise on the next steps for my application.`
                     setDocLabel(t('نسخة التأشيرة / باركود تساهيل', 'Visa / Tasheer Barcode'));
                   else if (val === 'contract')
                     setDocLabel(t('عقد عمل / مستند موثق', 'Attested Contract / Certificate'));
+                  else if (val === 'receipt')
+                    setDocLabel(t('إيصال دفع / تحويل مالي', 'Payment Receipt'));
                 }}
                 className="px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-xs text-[#0F2438]"
               >
@@ -4125,6 +4214,7 @@ Please advise on the next steps for my application.`
                 <option value="photo">{t('صورة شخصية', 'Personal Photo')}</option>
                 <option value="visa">{t('تأشيرة / تساهيل', 'Visa / Tasheer')}</option>
                 <option value="contract">{t('عقد / شهادة', 'Contract / Certificate')}</option>
+                <option value="receipt">{t('إيصال دفع / تحويل مالي', 'Payment Receipt')}</option>
                 <option value="other">{t('مستند آخر', 'Other Document')}</option>
               </select>
 
@@ -4193,7 +4283,7 @@ Please advise on the next steps for my application.`
                   >
                     <div className="flex items-center gap-3">
                       <img
-                        src={doc.dataUrl}
+                        src={getDisplayableDriveImageUrl(doc.dataUrl)}
                         alt={doc.label}
                         loading="lazy"
                         decoding="async"
@@ -4405,7 +4495,7 @@ Please advise on the next steps for my application.`
             </div>
             <div className="p-4 bg-slate-100 flex items-center justify-center max-h-[75vh] overflow-auto">
               <img
-                src={previewLightbox.dataUrl}
+                src={getDisplayableDriveImageUrl(previewLightbox.dataUrl)}
                 alt={previewLightbox.label}
                 loading="lazy"
                 decoding="async"
@@ -4414,6 +4504,15 @@ Please advise on the next steps for my application.`
             </div>
           </div>
         </div>
+      )}
+
+      {/* Express Appointment QR Pass Modal */}
+      {activeTraveler && (
+        <AppointmentQrPassModal
+          isOpen={showQrPassModal}
+          onClose={() => setShowQrPassModal(false)}
+          traveler={activeTraveler}
+        />
       )}
     </div>
   );

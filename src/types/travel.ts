@@ -61,7 +61,9 @@ export interface IssuedDocument {
   fileName: string;
   mimeType: string;
   downloadUrl: string;
+  viewUrl?: string;
   storagePath?: string;
+  fileSizeBytes?: number;
   notes?: string;
   issuedAt: string;
   issuedBy?: string;
@@ -82,11 +84,22 @@ export interface ClientNotification {
 export interface TravelerDocument {
   id: string;
   label: string;
-  docType: 'passport' | 'photo' | 'visa' | 'contract' | 'other';
+  docType: 'passport' | 'photo' | 'visa' | 'contract' | 'receipt' | 'other';
   fileName: string;
   dataUrl: string;
+  viewUrl?: string;
   storagePath?: string;
+  sizeBytes?: number;
   uploadedAt: string;
+}
+
+export interface AppointmentDetails {
+  serviceType: string;
+  appointmentDate: string;
+  appointmentTime: string;
+  location?: string;
+  referenceNumber?: string;
+  updatedAt?: string;
 }
 
 export type FamilyRelationship =
@@ -107,8 +120,10 @@ export interface FamilyMember {
   nationality?: string;
   passportPhotoUrl: string;
   passportStoragePath?: string;
+  passportSizeBytes?: number;
   personalPhotoUrl: string;
   personalPhotoStoragePath?: string;
+  personalPhotoSizeBytes?: number;
   createdAt: string;
   updatedAt?: string;
 }
@@ -131,11 +146,13 @@ export interface TravelerSessionMeta {
 export interface TravelerProfile {
   phone: string;
   phoneNormalized?: string;
+  orderCode?: string;
   firstName?: string;
   lastName?: string;
   name: string;
   avatarUrl?: string;
   avatarStoragePath?: string;
+  avatarSizeBytes?: number;
   otp: string;
   pinHash?: string;
   pinUpdatedAt?: string;
@@ -143,6 +160,7 @@ export interface TravelerProfile {
   verified: boolean;
   verifiedAt?: string;
   createdAt: string;
+  updatedAt?: string;
   orderStatus: VisaOrderStatus;
   adminNotes?: string;
   preferredVisaType?: string;
@@ -154,6 +172,15 @@ export interface TravelerProfile {
   familyMembers?: FamilyMember[];
   issuedDocuments?: IssuedDocument[];
   notifications?: ClientNotification[];
+  appointmentDetails?: AppointmentDetails;
+}
+
+export interface PublicOrderStatusSummary {
+  phoneId: string;
+  orderCode: string;
+  orderStatus: VisaOrderStatus;
+  hasIssuedDocuments: boolean;
+  updatedAt: string;
 }
 
 export interface PassportAiCheckResult {

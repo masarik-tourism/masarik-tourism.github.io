@@ -34,6 +34,7 @@ import { useSiteConfig } from '../utils/siteConfigStore';
 import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
 import { isRunningInApp } from '../utils/appEnvironment';
 import { OfficialTrustFooter } from '../components/OfficialTrustFooter';
+import { QuickOrderLookupCard } from '../components/QuickOrderLookupCard';
 
 interface HomeScreenProps {
   onNavigateToServices: () => void;
@@ -236,6 +237,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             {localized.certificationTitle}
           </h2>
         </div>
+
+        {/* Quick Public Order Status Lookup (Zero PII Leakage) */}
+        <QuickOrderLookupCard onOpenTravelerProfile={onOpenTravelerProfile} />
 
         {/* 2. Prominent Core Services Section */}
         <section className="space-y-4" aria-labelledby="services-directory-heading">

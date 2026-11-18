@@ -2,7 +2,7 @@
   "entities": {
     "ClientProfile": {
       "title": "Traveler Client Profile",
-      "description": "Cloud-synced traveler account with OTP verification state, Visa/Tasheer order tracking, passport metadata, and Firebase Storage document references.",
+      "description": "Cloud-synced traveler account with OTP verification state, Visa/Tasheer order tracking, passport metadata, and Google Drive document references.",
       "type": "object",
       "properties": {
         "phone": {
@@ -18,6 +18,11 @@
           "minLength": 8,
           "maxLength": 20,
           "pattern": "^[0-9]{8,20}$"
+        },
+        "orderCode": {
+          "type": "string",
+          "description": "Deterministic non-PII order code for quick order status lookup (e.g. MSK-5002428).",
+          "maxLength": 32
         },
         "firstName": {
           "type": "string",
@@ -37,13 +42,17 @@
         },
         "avatarUrl": {
           "type": "string",
-          "description": "Firebase Storage HTTPS download URL for personal profile avatar.",
+          "description": "Google Drive direct HTTPS download URL for personal profile avatar.",
           "maxLength": 4096
         },
         "avatarStoragePath": {
           "type": "string",
-          "description": "Firebase Storage path for client avatar cleanup.",
+          "description": "Google Drive file reference (gdrive:{fileId}) for client avatar.",
           "maxLength": 300
+        },
+        "avatarSizeBytes": {
+          "type": "number",
+          "description": "Recorded compressed avatar size in bytes for Storage quota tracking."
         },
         "otp": {
           "type": "string",
@@ -134,11 +143,11 @@
         },
         "documents": {
           "type": "array",
-          "description": "Bounded list (max 30) of uploaded document metadata with Firebase Storage download URLs."
+          "description": "Bounded list (max 30) of uploaded document metadata with Google Drive download & view URLs."
         },
         "familyMembers": {
           "type": "array",
-          "description": "Bounded list (max 25) of family members and companions with passport details and permanent Firebase Storage URLs for passport and personal photos."
+          "description": "Bounded list (max 25) of family members and companions with passport details and permanent Google Drive URLs for passport and personal photos."
         },
         "issuedDocuments": {
           "type": "array",
@@ -147,6 +156,10 @@
         "notifications": {
           "type": "array",
           "description": "Bounded list (max 30) of real-time client notifications for issued documents and order status updates."
+        },
+        "appointmentDetails": {
+          "type": "object",
+          "description": "Structured booked appointment metadata (serviceType, date, time, location, referenceNumber) used for the client's high-contrast Appointment QR Pass."
         }
       },
       "required": [
@@ -297,12 +310,62 @@
         "pinHash",
         "permissions"
       ]
+    },
+    "OrderStatusLookup": {
+      "title": "Public Non-PII Order Status Lookup",
+      "description": "Isolated non-PII status projection containing only order code, general execution state, and deliverable availability.",
+      "type": "object",
+      "properties": {
+        "phoneId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "orderCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 32
+        },
+        "orderStatus": {
+          "type": "string",
+          "enum": [
+            "تم استلام الطلب",
+            "قيد المراجعة والتنفيذ",
+            "تم الحجز / الإصدار",
+            "تم تنفيذ الطلب",
+            "مكتمل",
+            "تم استلام الأوراق",
+            "تم حجز موعد تساهيل",
+            "تحت المراجعة",
+            "صدرت التأشيرة"
+          ]
+        },
+        "hasIssuedDocuments": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "phoneId",
+        "orderCode",
+        "orderStatus",
+        "hasIssuedDocuments",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/clients/{phoneId}": {
       "schema": { "$ref": "#/entities/ClientProfile" },
       "description": "Traveler profiles keyed by normalized WhatsApp phone digits."
+    },
+    "/order_status/{phoneId}": {
+      "schema": { "$ref": "#/entities/OrderStatusLookup" },
+      "description": "Public non-PII order status lookup records exposing only general execution stage."
     },
     "/site_config/{configId}": {
       "schema": { "$ref": "#/entities/SiteGeneralConfig" },

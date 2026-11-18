@@ -42,11 +42,13 @@ service cloud.firestore {
       && data.keys().hasOnly([
         'phone',
         'phoneNormalized',
+        'orderCode',
         'firstName',
         'lastName',
         'name',
         'avatarUrl',
         'avatarStoragePath',
+        'avatarSizeBytes',
         'otp',
         'pinHash',
         'pinUpdatedAt',
@@ -65,13 +67,15 @@ service cloud.firestore {
         'documents',
         'familyMembers',
         'issuedDocuments',
-        'notifications'
+        'notifications',
+        'appointmentDetails'
       ])
       && data.phone is string
       && data.phone == phoneId
       && data.phone.matches('^[0-9]{8,20}$')
       && isOptionalString(data, 'phoneNormalized', 20)
       && (!('phoneNormalized' in data) || (data.phoneNormalized.size() >= 8 && data.phoneNormalized.matches('^[0-9]{8,20}$') && data.phoneNormalized == phoneId))
+      && isOptionalString(data, 'orderCode', 32)
       && isOptionalString(data, 'firstName', 80)
       && isOptionalString(data, 'lastName', 80)
       && data.name is string
@@ -79,6 +83,7 @@ service cloud.firestore {
       && data.name.size() <= 160
       && isOptionalString(data, 'avatarUrl', 4096)
       && isOptionalString(data, 'avatarStoragePath', 300)
+      && (!('avatarSizeBytes' in data) || (data.avatarSizeBytes is int && data.avatarSizeBytes >= 0 && data.avatarSizeBytes <= 10485760))
       && data.otp is string
       && data.otp.matches('^[0-9]{6}$')
       && data.verified is bool
@@ -225,6 +230,29 @@ service cloud.firestore {
             )
           )
         )
+      )
+      && (
+        !('appointmentDetails' in data)
+        || (
+          data.appointmentDetails is map
+          && data.appointmentDetails.keys().hasOnly([
+            'serviceType',
+            'appointmentDate',
+            'appointmentTime',
+            'location',
+            'referenceNumber',
+            'updatedAt'
+          ])
+          && data.appointmentDetails.serviceType is string
+          && data.appointmentDetails.serviceType.size() <= 160
+          && data.appointmentDetails.appointmentDate is string
+          && data.appointmentDetails.appointmentDate.size() <= 40
+          && data.appointmentDetails.appointmentTime is string
+          && data.appointmentDetails.appointmentTime.size() <= 40
+          && isOptionalString(data.appointmentDetails, 'location', 200)
+          && isOptionalString(data.appointmentDetails, 'referenceNumber', 80)
+          && isOptionalString(data.appointmentDetails, 'updatedAt', 64)
+        )
       );
     }
 
@@ -318,11 +346,13 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'phoneNormalized',
+          'orderCode',
           'firstName',
           'lastName',
           'name',
           'avatarUrl',
           'avatarStoragePath',
+          'avatarSizeBytes',
           'otp',
           'pinHash',
           'pinUpdatedAt',
@@ -340,8 +370,56 @@ service cloud.firestore {
           'documents',
           'familyMembers',
           'issuedDocuments',
-          'notifications'
+          'notifications',
+          'appointmentDetails'
         ]);
+      allow delete: if isValidPhoneId(phoneId) && resource != null;
+    }
+
+    // Validation Blueprint: Public Non-PII OrderStatusLookup (/order_status/{phoneId})
+    function isValidOrderStatusLookup(data, phoneId) {
+      return data.keys().hasAll([
+        'phoneId',
+        'orderCode',
+        'orderStatus',
+        'hasIssuedDocuments',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'phoneId',
+        'orderCode',
+        'orderStatus',
+        'hasIssuedDocuments',
+        'updatedAt'
+      ])
+      && data.phoneId is string
+      && data.phoneId == phoneId
+      && data.phoneId.matches('^[0-9]{8,20}$')
+      && data.orderCode is string
+      && data.orderCode.size() >= 3
+      && data.orderCode.size() <= 32
+      && data.orderStatus is string
+      && data.orderStatus in [
+        'تم استلام الطلب',
+        'قيد المراجعة والتنفيذ',
+        'تم الحجز / الإصدار',
+        'تم تنفيذ الطلب',
+        'مكتمل',
+        'تم استلام الأوراق',
+        'تم حجز موعد تساهيل',
+        'تحت المراجعة',
+        'صدرت التأشيرة'
+      ]
+      && data.hasIssuedDocuments is bool
+      && data.updatedAt is string
+      && data.updatedAt.size() <= 64;
+    }
+
+    // Public Non-PII Order Status Lookup Collection
+    match /order_status/{phoneId} {
+      allow get: if isValidPhoneId(phoneId);
+      allow list: if resource.data.orderCode is string;
+      allow create, update: if isValidPhoneId(phoneId) && isValidOrderStatusLookup(incoming(), phoneId);
       allow delete: if isValidPhoneId(phoneId) && resource != null;
     }
 

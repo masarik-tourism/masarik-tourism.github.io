@@ -54,7 +54,20 @@ export function useSiteUpdate() {
       window.location.reload();
     };
 
-    if ('serviceWorker' in navigator) {
+    if (import.meta.env.DEV) {
+      // In dev mode, ensure no stale Service Worker intercepts /src/*.ts Vite modules
+      void clearAllBrowserCaches();
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((regs) => {
+            regs.forEach((reg) => {
+              void reg.unregister();
+            });
+          })
+          .catch(() => {});
+      }
+    } else if ('serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
 
       navigator.serviceWorker

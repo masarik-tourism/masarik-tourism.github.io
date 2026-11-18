@@ -11,7 +11,9 @@ import {
   Camera,
   Trash2,
   Loader2,
+  Receipt,
 } from 'lucide-react';
+import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
 import { getLocalizedTravelContent } from '../data/travelData';
 import { dialPhoneNumber, openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
@@ -56,10 +58,12 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   // Pre-order document preparation & instant preview (works for guests & logged-in clients)
   const [prePassportPreview, setPrePassportPreview] = useState<string>('');
   const [prePersonalPhotoPreview, setPrePersonalPhotoPreview] = useState<string>('');
+  const [preReceiptPreview, setPreReceiptPreview] = useState<string>('');
   const [isPreparingUpload, setIsPreparingUpload] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const passportFileRef = useRef<HTMLInputElement | null>(null);
   const personalPhotoFileRef = useRef<HTMLInputElement | null>(null);
+  const receiptFileRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const sync = () => setActiveTraveler(getActiveTraveler());
@@ -96,7 +100,7 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
   };
 
   const handleSelectPreOrderImage = async (
-    target: 'passport' | 'photo',
+    target: 'passport' | 'photo' | 'receipt',
     e: React.ChangeEvent<HTMLInputElement>
   ) => {
     const file = e.target.files?.[0];
@@ -106,13 +110,15 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
     try {
       const compressed = await compressImageToDataUrl(
         file,
-        target === 'passport' ? 1280 : 720,
-        target === 'passport' ? 0.8 : 0.82
+        target === 'photo' ? 720 : 1280,
+        target === 'photo' ? 0.82 : 0.8
       );
       if (target === 'passport') {
         setPrePassportPreview(compressed.dataUrl);
-      } else {
+      } else if (target === 'photo') {
         setPrePersonalPhotoPreview(compressed.dataUrl);
+      } else {
+        setPreReceiptPreview(compressed.dataUrl);
       }
     } catch {
       // Ignore invalid image files cleanly
@@ -127,10 +133,11 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
     let updatedTraveler = activeTraveler;
 
     try {
-      if (activeTraveler && (prePassportPreview || prePersonalPhotoPreview)) {
+      if (activeTraveler && (prePassportPreview || prePersonalPhotoPreview || preReceiptPreview)) {
         const res = await attachPreOrderFilesToTravelerCloud(activeTraveler.phone, {
           passportDataUrl: prePassportPreview || undefined,
           avatarDataUrl: prePersonalPhotoPreview || undefined,
+          receiptDataUrl: preReceiptPreview || undefined,
           serviceTitle: selectedService,
         });
         if (res) {
@@ -151,6 +158,13 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
       if (prePersonalPhotoPreview) {
         preOrderAttachedList.push(
           lang === 'en' ? 'Personal photo prepared & ready' : 'الصورة الشخصية (مجهّزة للإرسال)'
+        );
+      }
+      if (preReceiptPreview) {
+        preOrderAttachedList.push(
+          lang === 'en'
+            ? 'Payment transfer receipt attached for instant booking confirmation'
+            : 'صورة إيصال الدفع مرفقة لتأكيد الحجز فوراً'
         );
       }
 
@@ -183,6 +197,7 @@ Please share requirements and next steps. Thank you.`
       openWhatsApp(message);
       setPrePassportPreview('');
       setPrePersonalPhotoPreview('');
+      setPreReceiptPreview('');
       setSubmitted(true);
       setTimeout(() => {
         setSubmitted(false);
@@ -322,6 +337,13 @@ Please share requirements and next steps. Thank you.`
                   className="hidden"
                   onChange={(e) => void handleSelectPreOrderImage('photo', e)}
                 />
+                <input
+                  ref={receiptFileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => void handleSelectPreOrderImage('receipt', e)}
+                />
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {/* Passport Preview / Upload */}
@@ -407,6 +429,61 @@ Please share requirements and next steps. Thank you.`
                       </button>
                     )}
                   </div>
+
+                  {/* Payment Receipt Image Preview / Upload */}
+                  <div className="sm:col-span-2 bg-white border border-emerald-200 rounded-xl p-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Receipt className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>
+                          {t(
+                            'صورة إيصال الدفع (لتأكيد الحجز فوراً)',
+                            'Payment Transfer Receipt (for Instant Confirmation)'
+                          )}
+                        </span>
+                      </span>
+                    </div>
+                    {preReceiptPreview ? (
+                      <div className="flex items-center gap-2.5">
+                        <img
+                          src={preReceiptPreview}
+                          alt={t('معاينة إيصال الدفع', 'Payment receipt preview')}
+                          className="w-12 h-12 rounded-lg object-cover border border-emerald-400 shrink-0"
+                        />
+                        <div className="flex items-center gap-1.5 flex-1">
+                          <button
+                            type="button"
+                            onClick={() => receiptFileRef.current?.click()}
+                            className="flex-1 py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold cursor-pointer"
+                          >
+                            {t('تغيير الإيصال', 'Replace Receipt')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPreReceiptPreview('')}
+                            className="flex-1 py-1.5 px-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>{t('إزالة', 'Remove')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => receiptFileRef.current?.click()}
+                        className="w-full min-h-[42px] px-3 py-2 rounded-xl border border-dashed border-emerald-400 bg-emerald-50/70 hover:bg-emerald-50 text-emerald-950 text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Receipt className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>
+                          {t(
+                            'إرفاق صورة إيصال التحويل المالي (إن وُجد)',
+                            'Attach Transfer Receipt Photo (if transferred)'
+                          )}
+                        </span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -439,7 +516,7 @@ Please share requirements and next steps. Thank you.`
                       <div className="flex items-center gap-2.5 min-w-0">
                         {activeTraveler.avatarUrl ? (
                           <img
-                            src={activeTraveler.avatarUrl}
+                            src={getDisplayableDriveImageUrl(activeTraveler.avatarUrl)}
                             alt={ownerNames?.fullDisplayName}
                             loading="lazy"
                             decoding="async"
@@ -495,7 +572,7 @@ Please share requirements and next steps. Thank you.`
                           <div className="flex items-center gap-2.5 min-w-0">
                             {member.personalPhotoUrl ? (
                               <img
-                                src={member.personalPhotoUrl}
+                                src={getDisplayableDriveImageUrl(member.personalPhotoUrl)}
                                 alt={mName}
                                 loading="lazy"
                                 decoding="async"

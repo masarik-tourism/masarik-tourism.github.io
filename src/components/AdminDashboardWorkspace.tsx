@@ -30,13 +30,18 @@ import {
   FileUp,
   Loader2,
   ExternalLink,
+  HardDrive,
+  RefreshCw,
+  QrCode,
 } from 'lucide-react';
 import {
   AdminPermission,
+  AppointmentDetails,
   SubAdminAccount,
   TravelerProfile,
   VisaOrderStatus,
 } from '../types/travel';
+import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
@@ -44,6 +49,9 @@ import {
   approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
+  buildOrderCodeFromPhone,
+  cleanupCompletedOrderAttachmentsCloud,
+  computeStorageUsageStats,
   deleteTravelerProfile,
   exportAllDataBackupJson,
   formatPhoneForDisplay,
@@ -53,11 +61,18 @@ import {
   getTravelerDisplayNames,
   normalizeOrderStatusValue,
   normalizePhone,
+  previewOldCompletedAttachmentsCleanup,
   removeIssuedDeliverableCloud,
   updateAdminPin,
   updateTravelerProfileDetails,
 } from '../utils/travelerStore';
-import { buildDescriptiveFilename, downloadCloudFile } from '../utils/firebaseStorageHelper';
+import {
+  MAX_PDF_BYTES,
+  buildDescriptiveFilename,
+  downloadCloudFile,
+  getDisplayableDriveImageUrl,
+  getDriveViewUrl,
+} from '../utils/firebaseStorageHelper';
 import {
   ALL_ADMIN_PERMISSIONS,
   ADMIN_AUTH_UPDATED_EVENT,
@@ -125,6 +140,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const [editNationality, setEditNationality] = useState('');
   const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('تم استلام الطلب');
   const [editAdminNotes, setEditAdminNotes] = useState('');
+  const [editApptServiceType, setEditApptServiceType] = useState('');
+  const [editApptDate, setEditApptDate] = useState('');
+  const [editApptTime, setEditApptTime] = useState('');
+  const [editApptLocation, setEditApptLocation] = useState('');
+  const [editApptReference, setEditApptReference] = useState('');
+  const [showAdminQrPreview, setShowAdminQrPreview] = useState(false);
   const [folderSavedMsg, setFolderSavedMsg] = useState('');
   const [stageUpdatedPhone, setStageUpdatedPhone] = useState<string | null>(null);
   const [confirmDeletePhone, setConfirmDeletePhone] = useState<string | null>(null);
@@ -146,6 +167,16 @@ export const AdminDashboardWorkspace: React.FC = () => {
     text: string;
   } | null>(null);
   const [confirmDeleteDeliverableId, setConfirmDeleteDeliverableId] = useState<string | null>(null);
+  const [replacingDeliverable, setReplacingDeliverable] = useState<{
+    id: string;
+    docTypeLabel: string;
+  } | null>(null);
+
+  // Storage Quota Monitor & Old Completed Attachments Cleanup
+  const [cleanupAgeDays, setCleanupAgeDays] = useState<60 | 90>(60);
+  const [confirmCleanupStep, setConfirmCleanupStep] = useState(false);
+  const [isCleaningStorage, setIsCleaningStorage] = useState(false);
+  const [cleanupFeedback, setCleanupFeedback] = useState<string | null>(null);
 
   // Tab 2: Announcements & Site Content
   const [siteDraft, setSiteDraft] = useState<SiteConfig>(() => getSiteConfig());
@@ -206,6 +237,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setEditNationality(selectedClient.nationality || '');
       setEditOrderStatus(normalizeOrderStatusValue(selectedClient.orderStatus));
       setEditAdminNotes(selectedClient.adminNotes || '');
+      setEditApptServiceType(
+        selectedClient.appointmentDetails?.serviceType || selectedClient.preferredVisaType || ''
+      );
+      setEditApptDate(selectedClient.appointmentDetails?.appointmentDate || '');
+      setEditApptTime(selectedClient.appointmentDetails?.appointmentTime || '');
+      setEditApptLocation(selectedClient.appointmentDetails?.location || '');
+      setEditApptReference(selectedClient.appointmentDetails?.referenceNumber || '');
+      setShowAdminQrPreview(false);
       setFolderSavedMsg('');
       setConfirmDeletePhone(null);
       setDeliverableFile(null);
@@ -214,6 +253,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setCustomDeliverableType('');
       setDeliverableFeedback(null);
       setConfirmDeleteDeliverableId(null);
+      setReplacingDeliverable(null);
     }
   }, [selectedClientPhone, travelers.length]);
 
@@ -309,6 +349,28 @@ export const AdminDashboardWorkspace: React.FC = () => {
     const cleanFirst = editFirstName.trim();
     const cleanLast = editLastName.trim();
     const combinedName = `${cleanFirst} ${cleanLast}`.trim() || selectedClient.name;
+
+    const cleanApptDate = editApptDate.trim();
+    const cleanApptTime = editApptTime.trim();
+    const cleanApptType = editApptServiceType.trim();
+    const cleanApptLocation = editApptLocation.trim();
+    const cleanApptRef = editApptReference.trim();
+
+    const nextAppointmentDetails: AppointmentDetails | undefined =
+      cleanApptDate || cleanApptTime || cleanApptLocation || cleanApptRef
+        ? {
+            serviceType:
+              cleanApptType ||
+              selectedClient.preferredVisaType ||
+              'موعد خدمة سياحية',
+            appointmentDate: cleanApptDate,
+            appointmentTime: cleanApptTime,
+            ...(cleanApptLocation ? { location: cleanApptLocation } : {}),
+            ...(cleanApptRef ? { referenceNumber: cleanApptRef } : {}),
+            updatedAt: new Date().toISOString(),
+          }
+        : undefined;
+
     updateTravelerProfileDetails(selectedClient.phone, {
       firstName: cleanFirst,
       lastName: cleanLast,
@@ -319,10 +381,11 @@ export const AdminDashboardWorkspace: React.FC = () => {
       nationality: editNationality.trim(),
       orderStatus: editOrderStatus,
       adminNotes: editAdminNotes.trim(),
+      appointmentDetails: nextAppointmentDetails,
     });
     loadTravelers();
     setFolderSavedMsg(
-      t('تم حفظ وتحديث ملف العميل بنجاح.', 'Client folder updated and saved successfully.')
+      t('تم حفظ وتحديث ملف العميل وبيانات الموعد بنجاح.', 'Client folder & appointment details saved successfully.')
     );
     setTimeout(() => setFolderSavedMsg(''), 3000);
   };
@@ -341,6 +404,25 @@ export const AdminDashboardWorkspace: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
     setDeliverableFeedback(null);
+    const isPdf =
+      file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (isPdf && file.size > MAX_PDF_BYTES) {
+      e.target.value = '';
+      if (deliverablePreviewUrl) {
+        URL.revokeObjectURL(deliverablePreviewUrl);
+      }
+      setDeliverableFile(null);
+      setDeliverablePreviewUrl(null);
+      setDeliverableFeedback({
+        ok: false,
+        text: t(
+          'حجم ملف PDF يتجاوز الحد الأقصى المسموح (5 ميجابايت). يرجى تقليل حجم الملف ثم المحاولة مرة أخرى.',
+          'PDF exceeds the maximum 5 MB limit. Please compress the file and try again.'
+        ),
+      });
+      return;
+    }
+
     if (deliverablePreviewUrl) {
       URL.revokeObjectURL(deliverablePreviewUrl);
     }
@@ -350,6 +432,27 @@ export const AdminDashboardWorkspace: React.FC = () => {
     } else {
       setDeliverablePreviewUrl(null);
     }
+  };
+
+  const handleStartReplaceDeliverable = (docId: string, docTypeLabel: string) => {
+    setReplacingDeliverable({ id: docId, docTypeLabel });
+    const presetValues = [
+      'تذكرة طيران',
+      'موعد تساهيل',
+      'كشف طبي جامكا',
+      'تأشيرة',
+      'شهادة تطعيم',
+      'حجز فندق مؤكد',
+      'تأمين طبي وإيصال إنجاز',
+    ];
+    if (presetValues.includes(docTypeLabel)) {
+      setDeliverableTypeChoice(docTypeLabel);
+      setCustomDeliverableType('');
+    } else {
+      setDeliverableTypeChoice('__custom__');
+      setCustomDeliverableType(docTypeLabel);
+    }
+    setDeliverableFeedback(null);
   };
 
   const handleApproveAndDeliverDocument = async (e: React.FormEvent) => {
@@ -373,13 +476,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setDeliverableFeedback({
         ok: false,
         text: t(
-          'يرجى اختيار ملف المستند (PDF أو صورة) أولاً.',
-          'Please select a PDF or image file first.'
+          'يرجى اختيار ملف المستند (PDF بحد أقصى 5 ميجابايت أو صورة) أولاً.',
+          'Please select a PDF (max 5 MB) or image file first.'
         ),
       });
       return;
     }
 
+    const wasReplacing = Boolean(replacingDeliverable);
     setIsSendingDeliverable(true);
     try {
       const res = await approveAndDeliverDocumentCloud(selectedClient.phone, {
@@ -387,6 +491,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
         docTypeLabel: effectiveDocType,
         notes: deliverableNotes.trim() || undefined,
         adminName: session?.name || 'المدير العام',
+        ...(replacingDeliverable ? { replaceDocId: replacingDeliverable.id } : {}),
       });
       if (!res.ok) {
         setDeliverableFeedback({
@@ -408,14 +513,20 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setDeliverablePreviewUrl(null);
       setDeliverableNotes('');
       setCustomDeliverableType('');
+      setReplacingDeliverable(null);
       setEditOrderStatus('تم تنفيذ الطلب');
       loadTravelers();
       setDeliverableFeedback({
         ok: true,
-        text: t(
-          `تم اعتماد وإرسال المستند (${effectiveDocType}) للعميل وتحديث حالة الطلب تلقائياً إلى "تم تنفيذ الطلب".`,
-          `Document (${effectiveDocType}) approved & sent to client! Order status updated to "Order Executed & Completed".`
-        ),
+        text: wasReplacing
+          ? t(
+              `تم استبدال وتحديث المستند (${effectiveDocType}) في حساب العميل بنجاح وحذف النسخة القديمة لتوفير المساحة.`,
+              `Document (${effectiveDocType}) replaced cleanly in client account and old file deleted.`
+            )
+          : t(
+              `تم اعتماد وإرسال المستند (${effectiveDocType}) للعميل وتحديث حالة الطلب تلقائياً إلى "تم تنفيذ الطلب".`,
+              `Document (${effectiveDocType}) approved & sent to client! Order status updated to "Order Executed & Completed".`
+            ),
       });
     } finally {
       setIsSendingDeliverable(false);
@@ -426,7 +537,36 @@ export const AdminDashboardWorkspace: React.FC = () => {
     if (!selectedClient || !canManageClients) return;
     await removeIssuedDeliverableCloud(selectedClient.phone, docId);
     setConfirmDeleteDeliverableId(null);
+    if (replacingDeliverable?.id === docId) {
+      setReplacingDeliverable(null);
+    }
     loadTravelers();
+  };
+
+  const handleRunStorageCleanup = async () => {
+    if (!canManageClients && !isSuperAdmin) return;
+    setIsCleaningStorage(true);
+    setCleanupFeedback(null);
+    try {
+      const res = await cleanupCompletedOrderAttachmentsCloud(cleanupAgeDays);
+      setConfirmCleanupStep(false);
+      loadTravelers();
+      const freedText = formatStorageSize(res.freedBytes);
+      setCleanupFeedback(
+        res.deletedFilesCount > 0
+          ? t(
+              `تم تنظيف ${res.deletedFilesCount} مرفق من ${res.cleanedOrdersCount} طلب مكتمل أقدم من ${cleanupAgeDays} يوماً، وتحرير مساحة (${freedText}) مع الحفاظ التام على سجلات العملاء.`,
+              `Cleaned ${res.deletedFilesCount} attachment(s) from ${res.cleanedOrdersCount} completed orders older than ${cleanupAgeDays} days (freed ${freedText}) while keeping all client records intact.`
+            )
+          : t(
+              `لا توجد مرفقات طلبات مكتملة أقدم من ${cleanupAgeDays} يوماً تحتاج إلى حذف حالياً.`,
+              `No completed order attachments older than ${cleanupAgeDays} days found to clean.`
+            )
+      );
+      setTimeout(() => setCleanupFeedback(null), 6000);
+    } finally {
+      setIsCleaningStorage(false);
+    }
   };
 
   const handleSaveSiteContent = (e: React.FormEvent) => {
@@ -537,13 +677,25 @@ export const AdminDashboardWorkspace: React.FC = () => {
     setTimeout(() => setBackupMsg(''), 3500);
   };
 
+  const formatStorageSize = (bytes: number): string => {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ${isAr ? 'جيجابايت' : 'GB'}`;
+    }
+    if (bytes >= 1024 * 1024) {
+      return `${(bytes / (1024 * 1024)).toFixed(1)} ${isAr ? 'ميجابايت' : 'MB'}`;
+    }
+    return `${Math.max(1, Math.round(bytes / 1024))} ${isAr ? 'كيلوبايت' : 'KB'}`;
+  };
+
   const filteredClients = travelers.filter((tr) => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return true;
+    const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
     return (
       tr.name.toLowerCase().includes(q) ||
       tr.phone.includes(q) ||
       formatPhoneForDisplay(tr.phone).includes(q) ||
+      orderCode.includes(q) ||
       (tr.passportNumber || '').toLowerCase().includes(q)
     );
   });
@@ -551,6 +703,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const pendingCount = travelers.filter((tr) => !tr.verified).length;
   const verifiedCount = travelers.filter((tr) => tr.verified).length;
   const overrideTextCount = Object.keys(cmsState.textOverrides).length;
+  const storageStats = computeStorageUsageStats(travelers);
+  const cleanupPreview = previewOldCompletedAttachmentsCleanup(travelers, cleanupAgeDays);
 
   return (
     <div className="min-h-screen bg-[#F1F5F9] pb-24 md:pb-16 text-[#0F2438]" dir={dir}>
@@ -689,6 +843,175 @@ export const AdminDashboardWorkspace: React.FC = () => {
               </div>
             </div>
 
+            {/* Storage Monitor & Smart Cleanup Card (15 GB Google Drive Free Quota) */}
+            {(isSuperAdmin || canManageClients) && (
+              <div
+                className={`bg-white rounded-2xl p-4 sm:p-5 border-2 shadow-xs space-y-4 ${
+                  storageStats.isNearLimit ? 'border-red-300 bg-red-50/20' : 'border-slate-200'
+                }`}
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                        storageStats.isNearLimit
+                          ? 'bg-red-600 text-white'
+                          : 'bg-[#0F2438] text-[#E5C887]'
+                      }`}
+                    >
+                      <HardDrive className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm sm:text-base font-black text-[#0F2438]">
+                          {t(
+                            'مراقبة مساحة الملفات (من أصل 15 جيجابايت - Google Drive)',
+                            'Storage Monitor (15 GB Google Drive Free Limit)'
+                          )}
+                        </h3>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[11px] font-black tabular-nums ${
+                            storageStats.isNearLimit
+                              ? 'bg-red-100 text-red-800 border border-red-300'
+                              : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          }`}
+                        >
+                          {storageStats.usagePercent}%
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-0.5 tabular-nums">
+                        {t(
+                          `المساحة المستخدمة حالياً: ${formatStorageSize(storageStats.usedBytes)} من أصل 15 جيجابايت · إجمالي الملفات: ${storageStats.totalFilesCount} (${storageStats.deliverablesCount} مستند تنفيذ + ${storageStats.vaultFilesCount} ملف عميل)`,
+                          `Used: ${formatStorageSize(storageStats.usedBytes)} / 15 GB · Total files: ${storageStats.totalFilesCount} (${storageStats.deliverablesCount} deliverables + ${storageStats.vaultFilesCount} client vault files)`
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-xl shrink-0">
+                    {t(
+                      'Google Drive المجاني · PDF <= 5 ميجا · ضغط الصور < 500 ك.ب',
+                      'Google Drive Free · PDF <= 5 MB · Images < 500 KB'
+                    )}
+                  </span>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="space-y-1.5">
+                  <div className="h-3 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        storageStats.usagePercent >= 80
+                          ? 'bg-red-600'
+                          : storageStats.usagePercent >= 60
+                          ? 'bg-amber-500'
+                          : 'bg-emerald-600'
+                      }`}
+                      style={{ width: `${Math.max(storageStats.usedBytes > 0 ? 2 : 0, storageStats.usagePercent)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* >= 80% Auto Warning Banner */}
+                {storageStats.isNearLimit && (
+                  <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-xs font-black text-red-900 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                    <span>
+                      {t(
+                        'تنبيه تحذيري: مساحة التخزين السحابي تجاوزت 80% من الحد المجاني (15 GB على Google Drive). يُنصح بتنظيف مرفقات الطلبات القديمة المكتملة الآن.',
+                        'Warning: Cloud storage usage exceeded 80% of the 15 GB Google Drive free quota. Clean up old completed order attachments below.'
+                      )}
+                    </span>
+                  </div>
+                )}
+
+                {/* Smart 1-Click Cleanup Tool for Old Completed Orders */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <span className="text-xs font-black text-[#0F2438] block">
+                      {t('تنظيف مرفقات الطلبات القديمة المكتملة', 'Clean Up Old Completed Order Attachments')}
+                    </span>
+                    <p className="text-[11px] text-slate-600 leading-relaxed tabular-nums">
+                      {t(
+                        `العناصر المؤهلة (أقدم من ${cleanupAgeDays} يوماً): ${cleanupPreview.eligibleOrdersCount} طلب مكتمل (${cleanupPreview.eligibleFilesCount} ملف · ~${formatStorageSize(cleanupPreview.estimatedFreedBytes)}) — تُحذف المرفقات فقط مع الاحتفاظ الكامل ببيانات وسجلات العملاء.`,
+                        `Eligible (> ${cleanupAgeDays} days): ${cleanupPreview.eligibleOrdersCount} completed orders (${cleanupPreview.eligibleFilesCount} files · ~${formatStorageSize(cleanupPreview.estimatedFreedBytes)}) — removes attachments only while keeping all client records.`
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <div className="inline-flex rounded-xl border border-slate-300 bg-white p-0.5 text-[11px] font-black">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCleanupAgeDays(60);
+                          setConfirmCleanupStep(false);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition ${
+                          cleanupAgeDays === 60
+                            ? 'bg-[#0F2438] text-[#E5C887]'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {t('أقدم من 60 يوم', '60+ Days')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCleanupAgeDays(90);
+                          setConfirmCleanupStep(false);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition ${
+                          cleanupAgeDays === 90
+                            ? 'bg-[#0F2438] text-[#E5C887]'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        {t('أقدم من 90 يوم', '90+ Days')}
+                      </button>
+                    </div>
+
+                    {confirmCleanupStep ? (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={isCleaningStorage}
+                          onClick={() => void handleRunStorageCleanup()}
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                        >
+                          {isCleaningStorage && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                          <span>{t('تأكيد حذف المرفقات القديمة', 'Confirm Cleanup')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmCleanupStep(false)}
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white border border-slate-300 text-slate-700 text-xs font-bold cursor-pointer"
+                        >
+                          {t('إلغاء', 'Cancel')}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmCleanupStep(true)}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{t('تنظيف المرفقات القديمة الآن', 'Clean Up Now')}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {cleanupFeedback && (
+                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{cleanupFeedback}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Search */}
             <div className="relative">
               <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
@@ -697,8 +1020,8 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t(
-                  'ابحث بالاسم أو رقم الواتساب أو رقم جواز السفر...',
-                  'Search by name, WhatsApp number, or passport number...'
+                  'ابحث بالاسم أو رقم الطلب (MSK-...) أو رقم الواتساب أو رقم جواز السفر...',
+                  'Search by name, Order Code (MSK-...), WhatsApp number, or passport number...'
                 )}
                 className="w-full ps-10 pe-4 py-3 rounded-2xl border border-slate-300 bg-white text-xs sm:text-sm text-[#0F2438] shadow-xs focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
               />
@@ -745,6 +1068,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               <div className="flex flex-wrap items-center gap-2">
                                 <span className="text-sm sm:text-base font-black text-[#0F2438]">
                                   {clientDisplayName}
+                                </span>
+                                <span
+                                  className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[10.5px] font-black text-[#0F2438] tabular-nums"
+                                  dir="ltr"
+                                >
+                                  {client.orderCode || buildOrderCodeFromPhone(client.phone)}
                                 </span>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border ${
@@ -912,7 +1241,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                             }`}
                           >
                             <span className="text-[11px] font-bold text-[#0F2438] tabular-nums">
-                              OTP: {client.otp}
+                              {t('كود التفعيل:', 'OTP:')} {client.otp}
                             </span>
                             <div className="flex flex-wrap items-center gap-1.5">
                               <button
@@ -1033,10 +1362,18 @@ export const AdminDashboardWorkspace: React.FC = () => {
                     </div>
                   )}
                   <div className="leading-tight">
-                    <span className="text-xs sm:text-sm font-black text-[#0F2438] block">
-                      {getTravelerDisplayNames(selectedClient).fullDisplayName}
-                    </span>
-                    <span className="text-[11px] text-slate-500 tabular-nums" dir="ltr">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs sm:text-sm font-black text-[#0F2438]">
+                        {getTravelerDisplayNames(selectedClient).fullDisplayName}
+                      </span>
+                      <span
+                        className="px-2 py-0.5 rounded-md bg-[#FAF8F2] border border-[#E5C887] text-[10.5px] font-black text-[#0F2438] tabular-nums"
+                        dir="ltr"
+                      >
+                        {selectedClient.orderCode || buildOrderCodeFromPhone(selectedClient.phone)}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-500 tabular-nums block" dir="ltr">
                       +{selectedClient.phoneNormalized || normalizePhone(selectedClient.phone)}
                     </span>
                   </div>
@@ -1087,7 +1424,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                     </span>
                   </div>
                   <span className="font-bold text-[#0284C7] tabular-nums">
-                    OTP: {selectedClient.otp}
+                    {t('كود التفعيل:', 'OTP:')} {selectedClient.otp}
                   </span>
                 </div>
                 <div
@@ -1257,6 +1594,87 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   />
                 </div>
 
+                {/* Appointment QR Pass Entry Section */}
+                <div className="bg-white border border-[#E5C887] rounded-xl p-3 space-y-2.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-[#0F2438] font-black">
+                      <QrCode className="w-4 h-4 text-[#9E7B33]" />
+                      <span>
+                        {t('بيانات بطاقة الموعد والباركود (Appointment QR Pass)', 'Appointment QR Pass Details')}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminQrPreview(true)}
+                      className="px-2.5 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>{t('معاينة بطاقة QR', 'Preview QR Pass')}</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="sm:col-span-2">
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('نوع الخدمة / الموعد', 'Service / Appointment Type')}
+                      </label>
+                      <input
+                        type="text"
+                        value={editApptServiceType}
+                        onChange={(e) => setEditApptServiceType(e.target.value)}
+                        placeholder={t('موعد تساهيل (VFS) / كشف طبي جامكا / تذكرة طيران', 'Tasheer VFS / GAMCA / Flight Ticket')}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('تاريخ الموعد', 'Appointment Date')}
+                      </label>
+                      <input
+                        type="date"
+                        value={editApptDate}
+                        onChange={(e) => setEditApptDate(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('وقت الموعد', 'Appointment Time')}
+                      </label>
+                      <input
+                        type="time"
+                        value={editApptTime}
+                        onChange={(e) => setEditApptTime(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('المركز / المطار / الموقع (اختياري)', 'Location / Branch (Optional)')}
+                      </label>
+                      <input
+                        type="text"
+                        value={editApptLocation}
+                        onChange={(e) => setEditApptLocation(e.target.value)}
+                        placeholder={t('مثال: فرع تساهيل المنصورة / مطار القاهرة', 'e.g. Tasheer Mansoura / Cairo Airport')}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('رقم الحجز / المرجع (اختياري)', 'Booking Ref / PNR (Optional)')}
+                      </label>
+                      <input
+                        type="text"
+                        value={editApptReference}
+                        onChange={(e) => setEditApptReference(e.target.value)}
+                        placeholder="VFS-849201"
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 {folderSavedMsg && (
                   <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
                     {folderSavedMsg}
@@ -1372,6 +1790,12 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               clientNames.firstName,
                               clientNames.lastName
                             )
+                          : docItem.docType === 'receipt'
+                          ? buildDescriptiveFilename(
+                              'Receipt',
+                              clientNames.firstName,
+                              clientNames.lastName
+                            )
                           : docItem.fileName || `${selectedClient.phone}-${docItem.docType}.jpg`;
                       return (
                         <div
@@ -1380,7 +1804,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         >
                           <div className="flex items-center gap-3">
                             <img
-                              src={docItem.dataUrl}
+                              src={getDisplayableDriveImageUrl(docItem.dataUrl)}
                               alt={docItem.label}
                               loading="lazy"
                               decoding="async"
@@ -1472,6 +1896,27 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 )}
               </div>
 
+              {replacingDeliverable && (
+                <div className="p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 font-black text-amber-950">
+                    <RefreshCw className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>
+                      {t(
+                        `وضع استبدال المستند: "${replacingDeliverable.docTypeLabel}" — اختر الملف الجديد ليحل محل النسخة السابقة تلقائياً.`,
+                        `Replacing document "${replacingDeliverable.docTypeLabel}" — select the new file to overwrite cleanly.`
+                      )}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setReplacingDeliverable(null)}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-900 font-bold cursor-pointer"
+                  >
+                    {t('إلغاء الاستبدال', 'Cancel Replace')}
+                  </button>
+                </div>
+              )}
+
               <form onSubmit={handleApproveAndDeliverDocument} className="space-y-3.5 text-xs">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
@@ -1557,14 +2002,18 @@ export const AdminDashboardWorkspace: React.FC = () => {
                       <span className="font-black text-[#0F2438] block truncate">
                         {deliverableFile
                           ? deliverableFile.name
-                          : t('اختر ملف المستند (PDF أو صورة)', 'Select Document File (PDF or Image)')}
+                          : t('اختر ملف المستند (PDF حتى 5 ميجا أو صورة)', 'Select Document File (PDF <= 5MB or Image)')}
                       </span>
                       <span className="text-[11px] text-slate-500 block">
                         {deliverableFile
-                          ? `${(deliverableFile.size / 1024).toFixed(0)} KB · ${deliverableFile.type || 'document'}`
+                          ? `${formatStorageSize(deliverableFile.size)}${
+                              deliverableFile.type.startsWith('image/')
+                                ? t(' · سيتم ضغط الصورة تلقائياً < 500 ك.ب', ' · Auto-compressed < 500 KB')
+                                : ''
+                            }`
                           : t(
-                              'يدعم ملفات PDF وصور JPG / PNG عالية الدقة',
-                              'Supports PDF files and high-resolution JPG / PNG images'
+                              'حد أقصى 5 ميجابايت لملفات PDF، وضغط تلقائي للصور لأقل من 500 كيلوبايت',
+                              'Max 5 MB for PDFs; images are auto-compressed under 500 KB before upload'
                             )}
                       </span>
                     </div>
@@ -1606,12 +2055,16 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 >
                   {isSendingDeliverable ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : replacingDeliverable ? (
+                    <RefreshCw className="w-4 h-4" />
                   ) : (
                     <CheckCircle2 className="w-4 h-4" />
                   )}
                   <span>
                     {isSendingDeliverable
-                      ? t('جاري الرفع والاعتماد...', 'Uploading & Sending...')
+                      ? t('جاري الضغط والرفع والاعتماد...', 'Compressing & Uploading...')
+                      : replacingDeliverable
+                      ? t('حفظ واستبدال المستند للعميل', 'Save & Replace Client Document')
                       : t('اعتماد وإرسال المستند للعميل', 'Approve & Send Document to Client')}
                   </span>
                 </button>
@@ -1628,10 +2081,13 @@ export const AdminDashboardWorkspace: React.FC = () => {
                       const isPdf =
                         delDoc.mimeType === 'application/pdf' ||
                         delDoc.fileName.toLowerCase().endsWith('.pdf');
+                      const isBeingReplaced = replacingDeliverable?.id === delDoc.id;
                       return (
                         <div
                           key={delDoc.id}
-                          className="bg-white border border-emerald-200 rounded-xl p-3 flex items-center justify-between gap-2.5"
+                          className={`bg-white border rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                            isBeingReplaced ? 'border-amber-400 ring-2 ring-amber-200' : 'border-emerald-200'
+                          }`}
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
                             <div className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
@@ -1641,19 +2097,26 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               <span className="text-xs font-black text-[#0F2438] block truncate">
                                 {delDoc.docTypeLabel}
                               </span>
-                              <span className="text-[10.5px] text-slate-500 block truncate">
+                              <span className="text-[10.5px] text-slate-500 block truncate tabular-nums">
                                 {delDoc.fileName} · {delDoc.issuedAt.slice(0, 10)}
+                                {typeof delDoc.fileSizeBytes === 'number'
+                                  ? ` · ${formatStorageSize(delDoc.fileSizeBytes)}`
+                                  : ''}
                               </span>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                             <a
-                              href={delDoc.downloadUrl}
+                              href={getDriveViewUrl(
+                                delDoc.downloadUrl,
+                                delDoc.viewUrl,
+                                delDoc.storagePath
+                              )}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438]"
-                              title={t('فتح', 'Open')}
+                              title={t('معاينة وفتح في Google Drive', 'Preview & Open in Drive')}
                             >
                               {isPdf ? <ExternalLink className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </a>
@@ -1665,7 +2128,18 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer"
                             >
                               <Download className="w-3 h-3" />
-                              <span>{t('تحميل', 'DL')}</span>
+                              <span>{t('تحميل', 'Download')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleStartReplaceDeliverable(delDoc.id, delDoc.docTypeLabel)
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                              title={t('استبدال المستند', 'Replace Document')}
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              <span>{t('استبدال', 'Replace')}</span>
                             </button>
                             {confirmDeleteDeliverableId === delDoc.id ? (
                               <button
@@ -1730,7 +2204,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         <div className="flex items-center gap-3">
                           {member.personalPhotoUrl ? (
                             <img
-                              src={member.personalPhotoUrl}
+                              src={getDisplayableDriveImageUrl(member.personalPhotoUrl)}
                               alt={memberName}
                               loading="lazy"
                               decoding="async"
@@ -2600,7 +3074,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
             </div>
             <div className="p-4 bg-slate-100 flex items-center justify-center max-h-[75vh] overflow-auto">
               <img
-                src={previewDocImage.dataUrl}
+                src={getDisplayableDriveImageUrl(previewDocImage.dataUrl)}
                 alt={previewDocImage.label}
                 loading="lazy"
                 decoding="async"
@@ -2609,6 +3083,32 @@ export const AdminDashboardWorkspace: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedClient && (
+        <AppointmentQrPassModal
+          isOpen={showAdminQrPreview}
+          onClose={() => setShowAdminQrPreview(false)}
+          traveler={{
+            ...selectedClient,
+            firstName: editFirstName.trim() || selectedClient.firstName,
+            lastName: editLastName.trim() || selectedClient.lastName,
+            passportNumber: editPassportNumber.trim() || selectedClient.passportNumber,
+            appointmentDetails:
+              editApptDate || editApptTime || editApptServiceType || editApptLocation || editApptReference
+                ? {
+                    serviceType:
+                      editApptServiceType.trim() ||
+                      selectedClient.preferredVisaType ||
+                      'موعد خدمة سياحية',
+                    appointmentDate: editApptDate.trim(),
+                    appointmentTime: editApptTime.trim(),
+                    location: editApptLocation.trim() || undefined,
+                    referenceNumber: editApptReference.trim() || undefined,
+                  }
+                : selectedClient.appointmentDetails,
+          }}
+        />
       )}
     </div>
   );

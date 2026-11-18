@@ -40,7 +40,7 @@ function masarikAutoUpdatePlugin(): Plugin {
         const swContent = fs
           .readFileSync(swPath, 'utf-8')
           .replace(
-            "const CACHE_VERSION = 'masarik-cache-v1';",
+            /const CACHE_VERSION = '[^']+';/,
             `const CACHE_VERSION = 'masarik-cache-${BUILD_VERSION}';`
           );
         this.emitFile({

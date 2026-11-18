@@ -3,6 +3,8 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
+  limit,
   onSnapshot,
   query,
   setDoc,
@@ -10,11 +12,13 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  AppointmentDetails,
   CanonicalVisaOrderStatus,
   ClientNotification,
   FamilyMember,
   FamilyRelationship,
   IssuedDocument,
+  PublicOrderStatusSummary,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
@@ -36,7 +40,10 @@ import {
   writeStoredSessionMeta,
 } from './deviceTrust';
 import {
+  MAX_IMAGE_BYTES,
+  STORAGE_FREE_LIMIT_BYTES,
   deleteTravelerDocumentFromStorage,
+  estimateDataUrlBytes,
   uploadFamilyMemberFileToStorage,
   uploadIssuedDeliverableToStorage,
   uploadTravelerAvatarToStorage,
@@ -69,6 +76,13 @@ export function getOrderStatusStageIndex(status?: string): number {
   }
   const idx = VISA_ORDER_STATUSES.indexOf(canonical);
   return idx >= 0 ? idx : 0;
+}
+
+export function buildOrderCodeFromPhone(rawPhone?: string): string {
+  const digits = normalizePhone(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return 'MSK-000000';
+  const suffix = digits.slice(-6).padStart(6, '0');
+  return `MSK-${suffix}`;
 }
 
 export { normalizeOrderStatusValue };
@@ -351,9 +365,13 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
         label: String(d.label || 'مستند مسافر').slice(0, 160),
         docType: d.docType || 'other',
         fileName: String(d.fileName || 'document.jpg').slice(0, 200),
-        // Never push multi-KB raw base64 blobs into Firestore; store Storage URLs only
+        // Never push multi-KB raw base64 blobs into Firestore; store Storage/Drive URLs only
         dataUrl: d.dataUrl && d.dataUrl.length <= 4096 ? d.dataUrl : '',
+        ...(d.viewUrl && d.viewUrl.length <= 4096 ? { viewUrl: String(d.viewUrl) } : {}),
         ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
+        ...(typeof d.sizeBytes === 'number'
+          ? { sizeBytes: Math.max(0, Math.round(d.sizeBytes)) }
+          : {}),
         uploadedAt: String(d.uploadedAt || new Date().toISOString()).slice(0, 64),
       }))
     : [];
@@ -382,10 +400,16 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
           ...(m.passportStoragePath
             ? { passportStoragePath: String(m.passportStoragePath).slice(0, 300) }
             : {}),
+          ...(typeof m.passportSizeBytes === 'number'
+            ? { passportSizeBytes: Math.max(0, Math.round(m.passportSizeBytes)) }
+            : {}),
           personalPhotoUrl:
             m.personalPhotoUrl && m.personalPhotoUrl.length <= 4096 ? m.personalPhotoUrl : '',
           ...(m.personalPhotoStoragePath
             ? { personalPhotoStoragePath: String(m.personalPhotoStoragePath).slice(0, 300) }
+            : {}),
+          ...(typeof m.personalPhotoSizeBytes === 'number'
+            ? { personalPhotoSizeBytes: Math.max(0, Math.round(m.personalPhotoSizeBytes)) }
             : {}),
           createdAt: String(m.createdAt || new Date().toISOString()).slice(0, 64),
           ...(m.updatedAt ? { updatedAt: String(m.updatedAt).slice(0, 64) } : {}),
@@ -421,7 +445,11 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
           mimeType: String(d.mimeType || 'application/pdf').slice(0, 120),
           downloadUrl:
             d.downloadUrl && d.downloadUrl.length <= 4096 ? String(d.downloadUrl) : '',
+          ...(d.viewUrl && d.viewUrl.length <= 4096 ? { viewUrl: String(d.viewUrl) } : {}),
           ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
+          ...(typeof d.fileSizeBytes === 'number'
+            ? { fileSizeBytes: Math.max(0, Math.round(d.fileSizeBytes)) }
+            : {}),
           ...(d.notes ? { notes: String(d.notes).trim().slice(0, 300) } : {}),
           issuedAt: String(d.issuedAt || new Date().toISOString()).slice(0, 64),
           ...(d.issuedBy ? { issuedBy: String(d.issuedBy).trim().slice(0, 100) } : {}),
@@ -448,6 +476,7 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
   const payload: Record<string, unknown> = {
     phone: normalized,
     phoneNormalized: normalized,
+    orderCode: String(profile.orderCode || buildOrderCodeFromPhone(normalized)).slice(0, 40),
     firstName,
     lastName,
     name: combinedName,
@@ -487,6 +516,30 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
   if (profile.avatarStoragePath) {
     payload.avatarStoragePath = String(profile.avatarStoragePath).slice(0, 300);
   }
+  if (profile.avatarSizeBytes !== undefined && typeof profile.avatarSizeBytes === 'number') {
+    payload.avatarSizeBytes = Math.max(0, Math.round(profile.avatarSizeBytes));
+  }
+  if (profile.appointmentDetails && typeof profile.appointmentDetails === 'object') {
+    const appt = profile.appointmentDetails;
+    const sType = String(appt.serviceType || '').trim().slice(0, 160);
+    const aDate = String(appt.appointmentDate || '').trim().slice(0, 40);
+    const aTime = String(appt.appointmentTime || '').trim().slice(0, 40);
+    const aLoc = String(appt.location || '').trim().slice(0, 200);
+    const aRef = String(appt.referenceNumber || '').trim().slice(0, 80);
+    if (sType || aDate || aTime) {
+      const cleanAppt: AppointmentDetails = {
+        serviceType:
+          sType ||
+          String(profile.preferredVisaType || 'موعد خدمة سياحية').trim().slice(0, 160),
+        appointmentDate: aDate,
+        appointmentTime: aTime,
+        ...(aLoc ? { location: aLoc } : {}),
+        ...(aRef ? { referenceNumber: aRef } : {}),
+        updatedAt: String(appt.updatedAt || new Date().toISOString()).slice(0, 64),
+      };
+      payload.appointmentDetails = cleanAppt;
+    }
+  }
 
   return payload;
 }
@@ -506,6 +559,7 @@ function mergeCloudClientWithLocal(
         return {
           ...d,
           dataUrl: d.dataUrl || localDoc?.dataUrl || '',
+          ...(d.viewUrl || localDoc?.viewUrl ? { viewUrl: d.viewUrl || localDoc?.viewUrl } : {}),
         };
       })
     : localExisting?.documents || [];
@@ -536,6 +590,7 @@ function mergeCloudClientWithLocal(
         return {
           ...d,
           downloadUrl: d.downloadUrl || localDoc?.downloadUrl || '',
+          ...(d.viewUrl || localDoc?.viewUrl ? { viewUrl: d.viewUrl || localDoc?.viewUrl } : {}),
         };
       })
     : localExisting?.issuedDocuments || [];
@@ -549,6 +604,7 @@ function mergeCloudClientWithLocal(
   return {
     ...cloudData,
     phoneNormalized: cloudData.phoneNormalized || normalizePhone(cloudData.phone),
+    orderCode: cloudData.orderCode || buildOrderCodeFromPhone(cloudData.phone),
     firstName: cloudData.firstName || split.firstName,
     lastName: cloudData.lastName || split.lastName,
     pinHash: cloudData.pinHash || localExisting?.pinHash || undefined,
@@ -558,11 +614,140 @@ function mergeCloudClientWithLocal(
       : localExisting?.trustedDevices || [],
     avatarUrl: cloudData.avatarUrl || localExisting?.avatarUrl || undefined,
     avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
+    avatarSizeBytes:
+      typeof cloudData.avatarSizeBytes === 'number'
+        ? cloudData.avatarSizeBytes
+        : localExisting?.avatarSizeBytes,
+    appointmentDetails: cloudData.appointmentDetails || localExisting?.appointmentDetails,
     documents: mergedDocs,
     familyMembers: mergedFamilyMembers,
     issuedDocuments: mergedIssuedDocs,
     notifications: mergedNotifications,
   };
+}
+
+export async function syncPublicOrderStatusDoc(profile: TravelerProfile): Promise<void> {
+  const phone = normalizePhone(profile.phone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return;
+
+  const summary: PublicOrderStatusSummary = {
+    phoneId: phone,
+    orderCode: (profile.orderCode || buildOrderCodeFromPhone(phone)).toUpperCase().slice(0, 32),
+    orderStatus: normalizeOrderStatusValue(profile.orderStatus),
+    hasIssuedDocuments: Array.isArray(profile.issuedDocuments) && profile.issuedDocuments.length > 0,
+    updatedAt: String(profile.updatedAt || new Date().toISOString()).slice(0, 64),
+  };
+
+  try {
+    await setDoc(doc(db, 'order_status', phone), summary);
+  } catch (err) {
+    console.warn('Public order_status sync skipped:', err);
+  }
+}
+
+/**
+ * Non-PII public lookup by Order Reference Code (e.g. MSK-5002428) OR Phone Number.
+ * Strictly returns ONLY general order status and whether final documents exist—never any personal info.
+ */
+export async function lookupPublicOrderStatusCloud(rawQuery: string): Promise<{
+  found: boolean;
+  statusSummary?: PublicOrderStatusSummary;
+}> {
+  const trimmed = normalizeArabicDigits(rawQuery || '').trim();
+  if (!trimmed || trimmed.length < 4) {
+    return { found: false };
+  }
+
+  const upperCode = trimmed.toUpperCase().replace(/\s+/g, '');
+  const normalizedCodeCandidate = upperCode.startsWith('MSK-')
+    ? upperCode
+    : /^[0-9]{6}$/.test(upperCode)
+    ? `MSK-${upperCode}`
+    : null;
+
+  const phoneDigits = normalizePhone(trimmed);
+  const isPhoneLike = /^[0-9]{8,20}$/.test(phoneDigits) && !upperCode.startsWith('MSK-');
+
+  // 1. Direct lookup on non-PII /order_status by phone
+  if (isPhoneLike) {
+    try {
+      const snap = await getDoc(doc(db, 'order_status', phoneDigits));
+      if (snap.exists()) {
+        const data = snap.data() as PublicOrderStatusSummary;
+        return { found: true, statusSummary: data };
+      }
+    } catch {
+      // Continue to fallback
+    }
+  }
+
+  // 2. Lookup on non-PII /order_status by exact orderCode
+  if (normalizedCodeCandidate) {
+    try {
+      const q = query(
+        collection(db, 'order_status'),
+        where('orderCode', '==', normalizedCodeCandidate),
+        limit(1)
+      );
+      const snaps = await getDocs(q);
+      if (!snaps.empty) {
+        return {
+          found: true,
+          statusSummary: snaps.docs[0].data() as PublicOrderStatusSummary,
+        };
+      }
+    } catch {
+      // Continue to legacy client fallback
+    }
+  }
+
+  // 3. Fallback for legacy clients created prior to /order_status split (extracts ONLY non-PII status fields)
+  if (isPhoneLike) {
+    try {
+      const clientSnap = await getDoc(doc(db, 'clients', phoneDigits));
+      if (clientSnap.exists()) {
+        const cData = clientSnap.data() as TravelerProfile;
+        const summary: PublicOrderStatusSummary = {
+          phoneId: phoneDigits,
+          orderCode: cData.orderCode || buildOrderCodeFromPhone(phoneDigits),
+          orderStatus: normalizeOrderStatusValue(cData.orderStatus),
+          hasIssuedDocuments: Array.isArray(cData.issuedDocuments) && cData.issuedDocuments.length > 0,
+          updatedAt: String(cData.updatedAt || cData.createdAt || new Date().toISOString()).slice(0, 64),
+        };
+        return { found: true, statusSummary: summary };
+      }
+    } catch {
+      // Ignore offline
+    }
+  }
+
+  // 4. Local cache fallback (extracting strictly non-PII status only)
+  const localMap = getAllTravelers();
+  const matchedLocal = Object.values(localMap).find((tr) => {
+    const code = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toUpperCase();
+    return (
+      (isPhoneLike && normalizePhone(tr.phone) === phoneDigits) ||
+      (normalizedCodeCandidate && code === normalizedCodeCandidate)
+    );
+  });
+
+  if (matchedLocal) {
+    return {
+      found: true,
+      statusSummary: {
+        phoneId: normalizePhone(matchedLocal.phone),
+        orderCode: matchedLocal.orderCode || buildOrderCodeFromPhone(matchedLocal.phone),
+        orderStatus: normalizeOrderStatusValue(matchedLocal.orderStatus),
+        hasIssuedDocuments:
+          Array.isArray(matchedLocal.issuedDocuments) && matchedLocal.issuedDocuments.length > 0,
+        updatedAt: String(
+          matchedLocal.updatedAt || matchedLocal.createdAt || new Date().toISOString()
+        ).slice(0, 64),
+      },
+    };
+  }
+
+  return { found: false };
 }
 
 export async function syncTravelerToCloud(profile: TravelerProfile): Promise<void> {
@@ -573,6 +758,12 @@ export async function syncTravelerToCloud(profile: TravelerProfile): Promise<voi
   const payload = sanitizeClientForFirestore({ ...profile, phone, phoneNormalized: phone });
   try {
     await setDoc(doc(db, 'clients', phone), payload);
+    await syncPublicOrderStatusDoc({
+      ...profile,
+      phone,
+      orderCode: String(payload.orderCode || buildOrderCodeFromPhone(phone)),
+      updatedAt: String(payload.updatedAt || new Date().toISOString()),
+    });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.toLowerCase().includes('permission')) {
@@ -1598,6 +1789,7 @@ export function updateTravelerProfileDetails(
       | 'verifiedAt'
       | 'issuedDocuments'
       | 'notifications'
+      | 'appointmentDetails'
     >
   >
 ): TravelerProfile | null {
@@ -1646,9 +1838,32 @@ export function updateTravelerProfileDetails(
     nextNotifications = [statusNote, ...nextNotifications].slice(0, 30);
   }
 
+  const nextAppointment =
+    'appointmentDetails' in cleanUpdates
+      ? cleanUpdates.appointmentDetails
+      : existing.appointmentDetails;
+
+  if (
+    cleanUpdates.appointmentDetails?.appointmentDate &&
+    cleanUpdates.appointmentDetails.appointmentDate !== existing.appointmentDetails?.appointmentDate
+  ) {
+    const apptNote: ClientNotification = {
+      id: `notif-appt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      titleAr: 'تم إصدار بطاقة الموعد والباركود',
+      titleEn: 'Appointment QR Pass Ready',
+      bodyAr: `تم تسجيل موعدك (${cleanUpdates.appointmentDetails.serviceType || 'موعد خدمة'}) بتاريخ ${cleanUpdates.appointmentDetails.appointmentDate} ${cleanUpdates.appointmentDetails.appointmentTime || ''}. يمكنك عرض الباركود من تبويب طلباتي.`,
+      bodyEn: `Your appointment (${cleanUpdates.appointmentDetails.serviceType || 'Service'}) is scheduled for ${cleanUpdates.appointmentDetails.appointmentDate} ${cleanUpdates.appointmentDetails.appointmentTime || ''}. Open My Orders to view your QR Pass.`,
+      type: 'status',
+      createdAt: new Date().toISOString(),
+      read: false,
+    };
+    nextNotifications = [apptNote, ...nextNotifications].slice(0, 30);
+  }
+
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
+    appointmentDetails: nextAppointment,
     notifications: nextNotifications,
     phone,
     phoneNormalized: phone,
@@ -1674,6 +1889,7 @@ export async function approveAndDeliverDocumentCloud(
     docTypeLabel: string;
     notes?: string;
     adminName?: string;
+    replaceDocId?: string;
   }
 ): Promise<{
   ok: boolean;
@@ -1693,19 +1909,23 @@ export async function approveAndDeliverDocumentCloud(
   const deliverableId = `del-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   let uploadResult: {
     downloadUrl: string;
+    viewUrl: string;
     storagePath: string;
     fileName: string;
     mimeType: string;
+    fileSizeBytes: number;
   };
 
   try {
     uploadResult = await uploadIssuedDeliverableToStorage(phone, deliverableId, input.file);
   } catch (err) {
-    console.warn('Issued deliverable Firebase Storage upload failed:', err);
+    console.warn('Issued deliverable Google Drive upload failed:', err);
+    const reason = err instanceof Error && err.message ? err.message : '';
     return {
       ok: false,
       error:
-        'تعذر رفع المستند إلى التخزين السحابي Firebase Storage. يرجى التحقق من الاتصال والمحاولة مجدداً.',
+        reason ||
+        'تعذر رفع المستند إلى التخزين السحابي Google Drive. يرجى التحقق من الحجم والاتصال والمحاولة مجدداً.',
     };
   }
 
@@ -1725,6 +1945,16 @@ export async function approveAndDeliverDocumentCloud(
     return { ok: false, error: 'لم يتم العثور على ملف العميل.' };
   }
 
+  // If replacing an existing deliverable, detach its old storage path reference
+  let remainingIssuedDocs = latestExisting.issuedDocuments || [];
+  if (input.replaceDocId) {
+    const oldTarget = remainingIssuedDocs.find((d) => d.id === input.replaceDocId);
+    if (oldTarget?.storagePath) {
+      void deleteTravelerDocumentFromStorage(oldTarget.storagePath);
+    }
+    remainingIssuedDocs = remainingIssuedDocs.filter((d) => d.id !== input.replaceDocId);
+  }
+
   const nowIso = new Date().toISOString();
   const deliverable: IssuedDocument = {
     id: deliverableId,
@@ -1732,7 +1962,9 @@ export async function approveAndDeliverDocumentCloud(
     fileName: uploadResult.fileName.slice(0, 220),
     mimeType: uploadResult.mimeType.slice(0, 120),
     downloadUrl: uploadResult.downloadUrl,
+    viewUrl: uploadResult.viewUrl,
     storagePath: uploadResult.storagePath,
+    fileSizeBytes: uploadResult.fileSizeBytes,
     ...(input.notes?.trim() ? { notes: input.notes.trim().slice(0, 300) } : {}),
     issuedAt: nowIso,
     ...(input.adminName?.trim() ? { issuedBy: input.adminName.trim().slice(0, 100) } : {}),
@@ -1740,10 +1972,14 @@ export async function approveAndDeliverDocumentCloud(
 
   const deliverableNotification: ClientNotification = {
     id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    titleAr: 'تم تنفيذ الطلب وإرفاق مستند',
-    titleEn: 'Order Completed & Document Ready',
-    bodyAr: `تم تنفيذ طلبك وإرفاق مستند: ${cleanLabel}، جاهز للتحميل الآن.`,
-    bodyEn: `Your order has been completed and "${cleanLabel}" is ready to download now.`,
+    titleAr: input.replaceDocId ? 'تم تحديث واستبدال مستند الطلب' : 'تم تنفيذ الطلب وإرفاق مستند',
+    titleEn: input.replaceDocId ? 'Order Document Updated' : 'Order Completed & Document Ready',
+    bodyAr: input.replaceDocId
+      ? `تم استبدال وتحديث مستند: ${cleanLabel}، جاهز للتحميل الآن.`
+      : `تم تنفيذ طلبك وإرفاق مستند: ${cleanLabel}، جاهز للتحميل الآن.`,
+    bodyEn: input.replaceDocId
+      ? `Your "${cleanLabel}" document has been updated and is ready to download.`
+      : `Your order has been completed and "${cleanLabel}" is ready to download now.`,
     type: 'deliverable',
     docId: deliverableId,
     createdAt: nowIso,
@@ -1753,7 +1989,8 @@ export async function approveAndDeliverDocumentCloud(
   const updated: TravelerProfile = {
     ...latestExisting,
     orderStatus: 'تم تنفيذ الطلب',
-    issuedDocuments: [deliverable, ...(latestExisting.issuedDocuments || [])].slice(0, 30),
+    updatedAt: nowIso,
+    issuedDocuments: [deliverable, ...remainingIssuedDocs].slice(0, 30),
     notifications: [deliverableNotification, ...(latestExisting.notifications || [])].slice(0, 30),
   };
 
@@ -1780,12 +2017,195 @@ export async function removeIssuedDeliverableCloud(
 
   const updated: TravelerProfile = {
     ...existing,
+    updatedAt: new Date().toISOString(),
     issuedDocuments: (existing.issuedDocuments || []).filter((d) => d.id !== docId),
   };
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(updated);
   return updated;
+}
+
+export interface StorageMonitorStats {
+  usedBytes: number;
+  limitBytes: number;
+  usagePercent: number;
+  isNearLimit: boolean;
+  totalFilesCount: number;
+  deliverablesCount: number;
+  vaultFilesCount: number;
+}
+
+const LEGACY_FALLBACK_FILE_BYTES = 160 * 1024; // Conservative fallback estimate for legacy files missing byte count
+
+export function computeStorageUsageStats(profiles: TravelerProfile[]): StorageMonitorStats {
+  let usedBytes = 0;
+  let deliverablesCount = 0;
+  let vaultFilesCount = 0;
+
+  for (const client of profiles) {
+    if (client.avatarStoragePath || (client.avatarUrl && client.avatarUrl.startsWith('http'))) {
+      vaultFilesCount += 1;
+      usedBytes += client.avatarSizeBytes ?? LEGACY_FALLBACK_FILE_BYTES;
+    }
+
+    for (const d of client.documents || []) {
+      vaultFilesCount += 1;
+      usedBytes +=
+        d.sizeBytes ??
+        (d.dataUrl.startsWith('data:') ? estimateDataUrlBytes(d.dataUrl) : LEGACY_FALLBACK_FILE_BYTES);
+    }
+
+    for (const fm of client.familyMembers || []) {
+      if (fm.passportPhotoUrl) {
+        vaultFilesCount += 1;
+        usedBytes +=
+          fm.passportSizeBytes ??
+          (fm.passportPhotoUrl.startsWith('data:')
+            ? estimateDataUrlBytes(fm.passportPhotoUrl)
+            : LEGACY_FALLBACK_FILE_BYTES);
+      }
+      if (fm.personalPhotoUrl) {
+        vaultFilesCount += 1;
+        usedBytes +=
+          fm.personalPhotoSizeBytes ??
+          (fm.personalPhotoUrl.startsWith('data:')
+            ? estimateDataUrlBytes(fm.personalPhotoUrl)
+            : LEGACY_FALLBACK_FILE_BYTES);
+      }
+    }
+
+    for (const delDoc of client.issuedDocuments || []) {
+      deliverablesCount += 1;
+      usedBytes += delDoc.fileSizeBytes ?? LEGACY_FALLBACK_FILE_BYTES;
+    }
+  }
+
+  const limitBytes = STORAGE_FREE_LIMIT_BYTES;
+  const usagePercent = Math.min(100, Number(((usedBytes / limitBytes) * 100).toFixed(2)));
+  return {
+    usedBytes,
+    limitBytes,
+    usagePercent,
+    isNearLimit: usagePercent >= 80,
+    totalFilesCount: deliverablesCount + vaultFilesCount,
+    deliverablesCount,
+    vaultFilesCount,
+  };
+}
+
+export function previewOldCompletedAttachmentsCleanup(
+  profiles: TravelerProfile[],
+  olderThanDays: 60 | 90
+): { eligibleOrdersCount: number; eligibleFilesCount: number; estimatedFreedBytes: number } {
+  const cutoffMs = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+  let eligibleOrdersCount = 0;
+  let eligibleFilesCount = 0;
+  let estimatedFreedBytes = 0;
+
+  for (const client of profiles) {
+    const isCompleted =
+      client.orderStatus === 'تم تنفيذ الطلب' || client.orderStatus === 'مكتمل';
+    if (!isCompleted) continue;
+
+    const oldIssued = (client.issuedDocuments || []).filter((d) => {
+      const ts = Date.parse(d.issuedAt || client.updatedAt || client.createdAt || '');
+      return Number.isFinite(ts) && ts <= cutoffMs;
+    });
+    const oldDocs = (client.documents || []).filter((d) => {
+      const ts = Date.parse(d.uploadedAt || client.updatedAt || client.createdAt || '');
+      return Number.isFinite(ts) && ts <= cutoffMs;
+    });
+
+    if (oldIssued.length > 0 || oldDocs.length > 0) {
+      eligibleOrdersCount += 1;
+      eligibleFilesCount += oldIssued.length + oldDocs.length;
+      oldIssued.forEach((d) => {
+        estimatedFreedBytes += d.fileSizeBytes ?? LEGACY_FALLBACK_FILE_BYTES;
+      });
+      oldDocs.forEach((d) => {
+        estimatedFreedBytes +=
+          d.sizeBytes ??
+          (d.dataUrl.startsWith('data:') ? estimateDataUrlBytes(d.dataUrl) : LEGACY_FALLBACK_FILE_BYTES);
+      });
+    }
+  }
+
+  return { eligibleOrdersCount, eligibleFilesCount, estimatedFreedBytes };
+}
+
+/**
+ * Deletes Firebase Storage attachments for completed orders older than 60 or 90 days
+ * to reclaim free-tier storage quota while keeping 100% of client profiles and order metadata intact.
+ */
+export async function cleanupCompletedOrderAttachmentsCloud(
+  olderThanDays: 60 | 90
+): Promise<{ cleanedOrdersCount: number; deletedFilesCount: number; freedBytes: number }> {
+  const cutoffMs = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+  const all = getAllTravelers();
+  let cleanedOrdersCount = 0;
+  let deletedFilesCount = 0;
+  let freedBytes = 0;
+
+  for (const phone of Object.keys(all)) {
+    const client = all[phone];
+    const isCompleted =
+      client.orderStatus === 'تم تنفيذ الطلب' || client.orderStatus === 'مكتمل';
+    if (!isCompleted) continue;
+
+    const keptIssued: IssuedDocument[] = [];
+    let modified = false;
+
+    for (const delDoc of client.issuedDocuments || []) {
+      const ts = Date.parse(delDoc.issuedAt || client.updatedAt || client.createdAt || '');
+      if (Number.isFinite(ts) && ts <= cutoffMs) {
+        if (delDoc.storagePath) {
+          await deleteTravelerDocumentFromStorage(delDoc.storagePath);
+        }
+        freedBytes += delDoc.fileSizeBytes ?? LEGACY_FALLBACK_FILE_BYTES;
+        deletedFilesCount += 1;
+        modified = true;
+      } else {
+        keptIssued.push(delDoc);
+      }
+    }
+
+    const keptDocs: TravelerDocument[] = [];
+    for (const docItem of client.documents || []) {
+      const ts = Date.parse(docItem.uploadedAt || client.updatedAt || client.createdAt || '');
+      if (Number.isFinite(ts) && ts <= cutoffMs) {
+        if (docItem.storagePath) {
+          await deleteTravelerDocumentFromStorage(docItem.storagePath);
+        }
+        freedBytes +=
+          docItem.sizeBytes ??
+          (docItem.dataUrl.startsWith('data:')
+            ? estimateDataUrlBytes(docItem.dataUrl)
+            : LEGACY_FALLBACK_FILE_BYTES);
+        deletedFilesCount += 1;
+        modified = true;
+      } else {
+        keptDocs.push(docItem);
+      }
+    }
+
+    if (modified) {
+      cleanedOrdersCount += 1;
+      const updatedClient: TravelerProfile = {
+        ...client,
+        issuedDocuments: keptIssued,
+        documents: keptDocs,
+      };
+      all[phone] = updatedClient;
+      await syncTravelerToCloud(updatedClient);
+    }
+  }
+
+  if (cleanedOrdersCount > 0) {
+    saveAllTravelersLocalOnly(all);
+  }
+
+  return { cleanedOrdersCount, deletedFilesCount, freedBytes };
 }
 
 export async function markClientNotificationsReadCloud(
@@ -1826,6 +2246,8 @@ export async function attachPreOrderFilesToTravelerCloud(
     passportDataUrl?: string;
     passportFileName?: string;
     avatarDataUrl?: string;
+    receiptDataUrl?: string;
+    receiptFileName?: string;
     serviceTitle?: string;
   }
 ): Promise<TravelerProfile | null> {
@@ -1836,6 +2258,7 @@ export async function attachPreOrderFilesToTravelerCloud(
 
   let nextAvatarUrl = existing.avatarUrl;
   let nextAvatarStoragePath = existing.avatarStoragePath;
+  let nextAvatarSizeBytes = existing.avatarSizeBytes;
   const addedDocs: TravelerDocument[] = [];
 
   if (input.avatarDataUrl && input.avatarDataUrl.startsWith('data:')) {
@@ -1846,21 +2269,55 @@ export async function attachPreOrderFilesToTravelerCloud(
       }
       nextAvatarUrl = upAvatar.downloadUrl;
       nextAvatarStoragePath = upAvatar.storagePath;
+      nextAvatarSizeBytes = upAvatar.sizeBytes;
     } else {
       nextAvatarUrl = input.avatarDataUrl;
+      nextAvatarSizeBytes = estimateDataUrlBytes(input.avatarDataUrl);
     }
   }
 
   if (input.passportDataUrl && input.passportDataUrl.startsWith('data:')) {
     const docId = `pre-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const upPass = await uploadTravelerDocumentToStorage(phone, docId, input.passportDataUrl);
+    const upPass = await uploadTravelerDocumentToStorage(
+      phone,
+      docId,
+      input.passportDataUrl,
+      input.passportFileName || `Passport_${phone}_${docId}.jpg`
+    );
     addedDocs.push({
       id: docId,
       label: 'صورة جواز السفر (مرفوعة مع الطلب)',
       docType: 'passport',
       fileName: input.passportFileName || 'passport.jpg',
       dataUrl: upPass ? upPass.downloadUrl : input.passportDataUrl,
-      ...(upPass ? { storagePath: upPass.storagePath } : {}),
+      ...(upPass
+        ? { viewUrl: upPass.viewUrl, storagePath: upPass.storagePath, sizeBytes: upPass.sizeBytes }
+        : { sizeBytes: estimateDataUrlBytes(input.passportDataUrl) }),
+      uploadedAt: new Date().toISOString(),
+    });
+  }
+
+  if (input.receiptDataUrl && input.receiptDataUrl.startsWith('data:')) {
+    const receiptId = `rcp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const upReceipt = await uploadTravelerDocumentToStorage(
+      phone,
+      receiptId,
+      input.receiptDataUrl,
+      input.receiptFileName || `Receipt_${phone}_${receiptId}.jpg`
+    );
+    addedDocs.push({
+      id: receiptId,
+      label: 'إيصال دفع / تحويل مالي',
+      docType: 'receipt',
+      fileName: input.receiptFileName || 'payment-receipt.jpg',
+      dataUrl: upReceipt ? upReceipt.downloadUrl : input.receiptDataUrl,
+      ...(upReceipt
+        ? {
+            viewUrl: upReceipt.viewUrl,
+            storagePath: upReceipt.storagePath,
+            sizeBytes: upReceipt.sizeBytes,
+          }
+        : { sizeBytes: estimateDataUrlBytes(input.receiptDataUrl) }),
       uploadedAt: new Date().toISOString(),
     });
   }
@@ -1872,6 +2329,7 @@ export async function attachPreOrderFilesToTravelerCloud(
     ...(input.serviceTitle ? { preferredVisaType: input.serviceTitle.slice(0, 200) } : {}),
     ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
     ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
+    ...(typeof nextAvatarSizeBytes === 'number' ? { avatarSizeBytes: nextAvatarSizeBytes } : {}),
     documents: [...addedDocs, ...(latest.documents || [])].slice(0, 30),
   };
 
@@ -1879,6 +2337,52 @@ export async function attachPreOrderFilesToTravelerCloud(
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
   return updated;
+}
+
+export async function uploadAndAddDocumentToTravelerCloud(
+  rawPhone: string,
+  input: {
+    docType: TravelerDocument['docType'];
+    label: string;
+    dataUrl: string;
+    fileName: string;
+  }
+): Promise<{ profile: TravelerProfile; document: TravelerDocument } | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  const docId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const uploaded = await uploadTravelerDocumentToStorage(phone, docId, input.dataUrl, input.fileName);
+
+  const newDoc: TravelerDocument = {
+    id: docId,
+    label: input.label.trim().slice(0, 160) || 'إيصال دفع / مستند',
+    docType: input.docType,
+    fileName: input.fileName.trim().slice(0, 200) || 'document.jpg',
+    dataUrl: uploaded ? uploaded.downloadUrl : input.dataUrl,
+    ...(uploaded
+      ? {
+          viewUrl: uploaded.viewUrl,
+          storagePath: uploaded.storagePath,
+          sizeBytes: uploaded.sizeBytes,
+        }
+      : { sizeBytes: estimateDataUrlBytes(input.dataUrl) }),
+    uploadedAt: new Date().toISOString(),
+  };
+
+  const latestAll = getAllTravelers();
+  const latest = latestAll[phone] || existing;
+  const updated: TravelerProfile = {
+    ...latest,
+    documents: [newDoc, ...(latest.documents || [])].slice(0, 30),
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
+  return { profile: updated, document: newDoc };
 }
 
 /**
@@ -1897,6 +2401,7 @@ export async function commitTravelerProfileDraftCloud(
   // 1. Upload staged personal avatar if changed
   let nextAvatarUrl = existing.avatarUrl;
   let nextAvatarStoragePath = existing.avatarStoragePath;
+  let nextAvatarSizeBytes = existing.avatarSizeBytes;
 
   if (draft.pendingAvatarPreviewUrl) {
     if (draft.pendingAvatarPreviewUrl.startsWith('data:')) {
@@ -1910,9 +2415,11 @@ export async function commitTravelerProfileDraftCloud(
         }
         nextAvatarUrl = uploadedAvatar.downloadUrl;
         nextAvatarStoragePath = uploadedAvatar.storagePath;
+        nextAvatarSizeBytes = uploadedAvatar.sizeBytes;
       } else {
         // Offline local fallback (sanitizeClientForFirestore skips >4096 base64 from Firestore)
         nextAvatarUrl = draft.pendingAvatarPreviewUrl;
+        nextAvatarSizeBytes = estimateDataUrlBytes(draft.pendingAvatarPreviewUrl);
       }
     } else {
       nextAvatarUrl = draft.pendingAvatarPreviewUrl;
@@ -1932,17 +2439,28 @@ export async function commitTravelerProfileDraftCloud(
     }
   }
 
-  // 3. Upload newly staged documents
+  // 3. Upload newly staged documents to Google Drive
   const uploadedNewDocs: TravelerDocument[] = [];
   for (const staged of draft.pendingDocuments || []) {
-    const uploaded = await uploadTravelerDocumentToStorage(phone, staged.id, staged.dataUrl);
+    const uploaded = await uploadTravelerDocumentToStorage(
+      phone,
+      staged.id,
+      staged.dataUrl,
+      staged.fileName
+    );
     uploadedNewDocs.push({
       id: staged.id,
       label: staged.label,
       docType: staged.docType,
       fileName: staged.fileName,
       dataUrl: uploaded ? uploaded.downloadUrl : staged.dataUrl,
-      ...(uploaded ? { storagePath: uploaded.storagePath } : {}),
+      ...(uploaded
+        ? {
+            viewUrl: uploaded.viewUrl,
+            storagePath: uploaded.storagePath,
+            sizeBytes: uploaded.sizeBytes,
+          }
+        : { sizeBytes: estimateDataUrlBytes(staged.dataUrl) }),
       uploadedAt: new Date().toISOString(),
     });
   }
@@ -1969,6 +2487,7 @@ export async function commitTravelerProfileDraftCloud(
     preferredVisaType: draft.preferredVisaType.trim(),
     ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
     ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
+    ...(typeof nextAvatarSizeBytes === 'number' ? { avatarSizeBytes: nextAvatarSizeBytes } : {}),
     documents: [...uploadedNewDocs, ...keptDocs],
   };
 
@@ -2005,6 +2524,7 @@ export async function saveFamilyMemberCloud(
   // Upload passport photo to Firebase Storage if a fresh dataUrl was provided
   let finalPassportPhotoUrl = memberInput.passportPhotoUrl || existingMember?.passportPhotoUrl || '';
   let finalPassportStoragePath = existingMember?.passportStoragePath;
+  let finalPassportSizeBytes = existingMember?.passportSizeBytes;
 
   if (finalPassportPhotoUrl.startsWith('data:')) {
     const uploadedPassport = await uploadFamilyMemberFileToStorage(
@@ -2022,12 +2542,14 @@ export async function saveFamilyMemberCloud(
       }
       finalPassportPhotoUrl = uploadedPassport.downloadUrl;
       finalPassportStoragePath = uploadedPassport.storagePath;
+      finalPassportSizeBytes = uploadedPassport.sizeBytes;
     }
   }
 
   // Upload personal photo to Firebase Storage if a fresh dataUrl was provided
   let finalPersonalPhotoUrl = memberInput.personalPhotoUrl || existingMember?.personalPhotoUrl || '';
   let finalPersonalStoragePath = existingMember?.personalPhotoStoragePath;
+  let finalPersonalSizeBytes = existingMember?.personalPhotoSizeBytes;
 
   if (finalPersonalPhotoUrl.startsWith('data:')) {
     const uploadedPersonal = await uploadFamilyMemberFileToStorage(
@@ -2045,6 +2567,7 @@ export async function saveFamilyMemberCloud(
       }
       finalPersonalPhotoUrl = uploadedPersonal.downloadUrl;
       finalPersonalStoragePath = uploadedPersonal.storagePath;
+      finalPersonalSizeBytes = uploadedPersonal.sizeBytes;
     }
   }
 
@@ -2067,8 +2590,10 @@ export async function saveFamilyMemberCloud(
     ...(memberInput.nationality?.trim() ? { nationality: memberInput.nationality.trim() } : {}),
     passportPhotoUrl: finalPassportPhotoUrl,
     ...(finalPassportStoragePath ? { passportStoragePath: finalPassportStoragePath } : {}),
+    ...(typeof finalPassportSizeBytes === 'number' ? { passportSizeBytes: finalPassportSizeBytes } : {}),
     personalPhotoUrl: finalPersonalPhotoUrl,
     ...(finalPersonalStoragePath ? { personalPhotoStoragePath: finalPersonalStoragePath } : {}),
+    ...(typeof finalPersonalSizeBytes === 'number' ? { personalPhotoSizeBytes: finalPersonalSizeBytes } : {}),
     createdAt: existingMember?.createdAt || nowIso,
     updatedAt: nowIso,
   };
@@ -2171,6 +2696,7 @@ export function deleteTravelerProfile(rawPhone: string): boolean {
       }
       console.warn('Cloud delete client deferred:', msg);
     });
+    void deleteDoc(doc(db, 'order_status', phone)).catch(() => {});
   }
 
   return true;
@@ -2210,7 +2736,12 @@ export async function uploadAndAddDocumentToTraveler(
   if (!existing) return null;
 
   const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  const uploaded = await uploadTravelerDocumentToStorage(phone, docId, docInput.dataUrl);
+  const uploaded = await uploadTravelerDocumentToStorage(
+    phone,
+    docId,
+    docInput.dataUrl,
+    docInput.fileName
+  );
 
   const newDoc: TravelerDocument = {
     id: docId,
@@ -2218,7 +2749,13 @@ export async function uploadAndAddDocumentToTraveler(
     docType: docInput.docType,
     fileName: docInput.fileName,
     dataUrl: uploaded ? uploaded.downloadUrl : docInput.dataUrl,
-    ...(uploaded ? { storagePath: uploaded.storagePath } : {}),
+    ...(uploaded
+      ? {
+          viewUrl: uploaded.viewUrl,
+          storagePath: uploaded.storagePath,
+          sizeBytes: uploaded.sizeBytes,
+        }
+      : { sizeBytes: estimateDataUrlBytes(docInput.dataUrl) }),
     uploadedAt: new Date().toISOString(),
   };
 
@@ -2379,7 +2916,7 @@ export function exportAllDataBackupJson(): string {
 export async function compressImageToDataUrl(
   file: File,
   maxDimension = 1100,
-  quality = 0.74
+  initialQuality = 0.74
 ): Promise<{ dataUrl: string; base64: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -2389,30 +2926,49 @@ export async function compressImageToDataUrl(
       const img = new Image();
       img.onerror = () => reject(new Error('الملف المختار ليس صورة صالحة.'));
       img.onload = () => {
-        let { width, height } = img;
-        if (width > maxDimension || height > maxDimension) {
-          if (width >= height) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
+        const targetMaxBytes = Math.min(MAX_IMAGE_BYTES - 16 * 1024, 480 * 1024);
+        let currentMaxDim = maxDimension;
+        let currentQuality = initialQuality;
+        let compressed = resultStr;
+
+        for (let attempt = 0; attempt < 7; attempt++) {
+          let { width, height } = img;
+          if (width > currentMaxDim || height > currentMaxDim) {
+            if (width >= height) {
+              height = Math.max(1, Math.round((height * currentMaxDim) / width));
+              width = currentMaxDim;
+            } else {
+              width = Math.max(1, Math.round((width * currentMaxDim) / height));
+              height = currentMaxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            const base64 = resultStr.includes(',') ? resultStr.split(',')[1] : resultStr;
+            resolve({ dataUrl: resultStr, base64, mimeType: file.type || 'image/jpeg' });
+            return;
+          }
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          compressed = canvas.toDataURL('image/jpeg', currentQuality);
+
+          if (estimateDataUrlBytes(compressed) <= targetMaxBytes) {
+            break;
+          }
+
+          if (currentQuality > 0.5) {
+            currentQuality = Math.max(0.44, Number((currentQuality - 0.1).toFixed(2)));
           } else {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
+            currentMaxDim = Math.max(600, Math.round(currentMaxDim * 0.78));
           }
         }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          const base64 = resultStr.includes(',') ? resultStr.split(',')[1] : resultStr;
-          resolve({ dataUrl: resultStr, base64, mimeType: file.type || 'image/jpeg' });
-          return;
-        }
-        ctx.drawImage(img, 0, 0, width, height);
-        const outMime = 'image/jpeg';
-        const compressed = canvas.toDataURL(outMime, quality);
+
         const base64 = compressed.split(',')[1] || '';
-        resolve({ dataUrl: compressed, base64, mimeType: outMime });
+        resolve({ dataUrl: compressed, base64, mimeType: 'image/jpeg' });
       };
       img.src = resultStr;
     };
