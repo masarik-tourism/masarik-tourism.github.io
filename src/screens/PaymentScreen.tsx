@@ -7,7 +7,8 @@ import {
   Check,
   ExternalLink,
   Zap,
-  Building2,
+  CreditCard,
+  Wrench,
   Smartphone,
   Upload,
   CheckCircle2,
@@ -16,6 +17,7 @@ import {
   FileCheck2,
   Receipt,
   ShieldCheck,
+  Lock,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
@@ -134,8 +136,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
     const orderCode = activeTraveler
       ? activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)
       : null;
-    const driveUrl =
-      uploadedReceiptDoc?.viewUrl || uploadedReceiptDoc?.dataUrl || '';
+    const driveUrl = uploadedReceiptDoc?.viewUrl || uploadedReceiptDoc?.dataUrl || '';
     const refText = transferReference.trim();
 
     const msg =
@@ -191,8 +192,8 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               </span>
               <p className="text-xs text-slate-200 leading-relaxed">
                 {t(
-                  'انسخ الرقم بضغطة واحدة وأتمم التحويل عبر إنستاباي أو المحفظة أو الحساب البنكي، ثم أرفق صورة الإيصال بالأسفل لتأكيد الحجز فوراً.',
-                  'Copy the transfer number in one click, send your transfer via InstaPay, E-Wallet, or Bank Transfer, then attach your receipt below.'
+                  'أتمم التحويل بضغطة واحدة عبر إنستاباي أو المحافظ الإلكترونية، ثم أرفق صورة الإيصال بالأسفل لتأكيد الحجز فوراً.',
+                  'Complete your transfer via InstaPay or E-Wallets, then attach your payment receipt below to confirm your booking immediately.'
                 )}
               </p>
             </div>
@@ -207,7 +208,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
           )}
         </div>
 
-        {/* 1. InstaPay Official Channel */}
+        {/* 1. InstaPay Official Channel (Button + IPA Handle Only) */}
         <div className="bg-gradient-to-br from-[#FAF8F2] via-white to-[#F6EFFC] border-2 border-[#7E22CE]/45 hover:border-[#7E22CE] rounded-2xl p-5 shadow-md space-y-4 transition-all">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -244,94 +245,33 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             <ExternalLink className="w-4 h-4" />
           </a>
 
-          {/* One-Click Copy Details Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-            {/* InstaPay Mobile Number */}
-            <div className="bg-white border border-[#E9D5FF] rounded-xl p-3 flex flex-col justify-between gap-2">
-              <div>
-                <span className="text-[11px] font-bold text-[#678093] block">
-                  {t('رقم إنستاباي (هاتف):', 'InstaPay Phone Number:')}
-                </span>
-                <span dir="ltr" className="text-sm font-black text-[#0F2438] tabular-nums block mt-0.5">
-                  {TravelRepository.PHONE_NUMBER}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyValue('instapay_phone', TravelRepository.PHONE_NUMBER)}
-                className="w-full py-2 px-3 rounded-lg bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
-              >
-                {copiedKey === 'instapay_phone' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700">{t('تم النسخ!', 'Copied!')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{t('نسخ الرقم بضغطة واحدة', '1-Click Copy Number')}</span>
-                  </>
-                )}
-              </button>
+          {/* InstaPay Payment Address (IPA) Box Only */}
+          <div className="bg-white border border-[#E9D5FF] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0">
+              <span className="text-[11px] font-bold text-[#678093] block">
+                {t('عنوان الدفع (IPA):', 'InstaPay Address (IPA):')}
+              </span>
+              <span dir="ltr" className="text-base font-black text-[#7E22CE] font-mono block mt-0.5 truncate">
+                {instapayHandle}
+              </span>
             </div>
-
-            {/* InstaPay IPA Handle */}
-            <div className="bg-white border border-[#E9D5FF] rounded-xl p-3 flex flex-col justify-between gap-2">
-              <div>
-                <span className="text-[11px] font-bold text-[#678093] block">
-                  {t('عنوان الدفع (IPA):', 'InstaPay Address (IPA):')}
-                </span>
-                <span dir="ltr" className="text-sm font-black text-[#7E22CE] font-mono block mt-0.5 truncate">
-                  {instapayHandle}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyValue('instapay_ipa', instapayHandle)}
-                className="w-full py-2 px-3 rounded-lg bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
-              >
-                {copiedKey === 'instapay_ipa' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700">{t('تم النسخ!', 'Copied!')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{t('نسخ العنوان بضغطة واحدة', '1-Click Copy Handle')}</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-            {/* InstaPay Direct URL */}
-            <div className="bg-white border border-[#E9D5FF] rounded-xl p-3 flex flex-col justify-between gap-2">
-              <div>
-                <span className="text-[11px] font-bold text-[#678093] block">
-                  {t('الرابط المباشر:', 'Direct Payment Link:')}
-                </span>
-                <span dir="ltr" className="text-xs font-bold text-[#0F2438] font-mono block mt-1 truncate">
-                  {TravelRepository.INSTAPAY_URL}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyValue('instapay_url', TravelRepository.INSTAPAY_URL)}
-                className="w-full py-2 px-3 rounded-lg bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
-              >
-                {copiedKey === 'instapay_url' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700">{t('تم نسخ الرابط!', 'Copied!')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{t('نسخ الرابط', 'Copy Link')}</span>
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => handleCopyValue('instapay_ipa', instapayHandle)}
+              className="min-h-[42px] px-4 py-2 rounded-xl bg-[#F3E8FF] hover:bg-[#E9D5FF] text-[#6B21A8] border border-[#D8B4FE] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0 whitespace-nowrap"
+            >
+              {copiedKey === 'instapay_ipa' ? (
+                <>
+                  <Check className="w-4 h-4 text-emerald-600" />
+                  <span className="text-emerald-700">{t('تم نسخ العنوان!', 'Address Copied!')}</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4" />
+                  <span>{t('نسخ العنوان بضغطة واحدة', '1-Click Copy Address')}</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
 
@@ -406,102 +346,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
           </div>
         </div>
 
-        {/* 3. Official Bank Transfer Card */}
-        <div className="bg-white border border-[#E2DAC8] rounded-2xl p-5 shadow-sm space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-xl bg-[#EAF4F6] text-[#2A7688] flex items-center justify-center shrink-0">
-              <Building2 className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-sm md:text-base font-black text-[#17344F]">
-                {t('التحويل البنكي الرسمي', 'Official Bank Transfer')}
-              </h2>
-              <span className="text-[11px] md:text-xs text-[#678093]">
-                {t(
-                  'البنك الأهلي المصري • بنك مصر • CIB (باسم شركة مسارك للإنجاز السياحي ذ.م.م)',
-                  'NBE • Banque Misr • CIB (Masarik Tourism L.L.C)'
-                )}
-              </span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3 flex items-center justify-between gap-2">
-              <div>
-                <span className="text-[11px] font-bold text-[#678093] block">
-                  {t('رقم السجل التجاري المعتمد:', 'Official Commercial Record:')}
-                </span>
-                <span dir="ltr" className="text-sm font-black text-[#0F2438] tabular-nums">
-                  {TravelRepository.COMMERCIAL_RECORD}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyValue('bank_cr', TravelRepository.COMMERCIAL_RECORD)}
-                className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-[#C6A052]/60 text-[#0F2438] text-xs font-bold flex items-center gap-1 cursor-pointer"
-              >
-                {copiedKey === 'bank_cr' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700">{t('نُسخ', 'Copied')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{t('نسخ', 'Copy')}</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-            <div className="bg-[#FAF8F2] border border-[#E2DAC8] rounded-xl p-3 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <span className="text-[11px] font-bold text-[#678093] block">
-                  {t('الرقم الضريبي الموحد للشركة:', 'Unified Registration ID:')}
-                </span>
-                <span dir="ltr" className="text-sm font-black text-[#0F2438] tabular-nums block truncate">
-                  {TravelRepository.UNIFIED_NUMBER}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleCopyValue('bank_unified', TravelRepository.UNIFIED_NUMBER)}
-                className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-[#C6A052]/60 text-[#0F2438] text-xs font-bold flex items-center gap-1 shrink-0 cursor-pointer"
-              >
-                {copiedKey === 'bank_unified' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-600" />
-                    <span className="text-emerald-700">{t('نُسخ', 'Copied')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>{t('نسخ', 'Copy')}</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              const text =
-                lang === 'en'
-                  ? 'Hello Masarik Tourism, please share your official IBAN / bank account number (NBE / Banque Misr / CIB) for transfer.'
-                  : 'السلام عليكم، أود الحصول على رقم الحساب البنكي الرسمي (IBAN) للشركة للتحويل وتأكيد الحجز.';
-              openWhatsApp(text);
-            }}
-            className="w-full bg-[#17344F] hover:bg-[#0F2437] text-white py-2.5 px-4 rounded-xl text-xs md:text-sm font-bold shadow-sm transition active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
-          >
-            <MessageCircle className="w-4 h-4" />
-            <span>
-              {t('الحصول على رقم الحساب البنكي (IBAN) عبر واتساب', 'Request Official IBAN via WhatsApp')}
-            </span>
-          </button>
-        </div>
-
-        {/* 4. Interactive Attach Payment Receipt Inside Order */}
+        {/* 3. Interactive Attach Payment Receipt Inside Order */}
         <div className="bg-white border-2 border-[#C6A052] rounded-2xl p-5 shadow-md space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">
@@ -542,7 +387,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               >
                 <option value="إنستاباي (InstaPay)">{t('إنستاباي (InstaPay)', 'InstaPay')}</option>
                 <option value="محفظة إلكترونية (كاش)">{t('محفظة إلكترونية (كاش)', 'E-Wallet Cash')}</option>
-                <option value="تحويل بنكي رسمي">{t('تحويل بنكي رسمي', 'Official Bank Transfer')}</option>
+                <option value="سداد نقدي بالفرع">{t('سداد نقدي بالمقر الرسمي', 'Cash at Office')}</option>
               </select>
             </div>
 
@@ -581,9 +426,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
                   <span className="text-xs font-black text-[#0F2438] block truncate">
                     {receiptFileName}
                   </span>
-                  <span className="text-[11px] text-slate-500 block">
-                    {transferChannel}
-                  </span>
+                  <span className="text-[11px] text-slate-500 block">{transferChannel}</span>
                 </div>
               </div>
 
@@ -671,11 +514,13 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
             </button>
           </div>
 
-          {/* Previously attached receipts in active client profile */}
           {existingReceipts.length > 0 && (
             <div className="pt-2 border-t border-slate-100 space-y-2">
               <span className="text-[11px] font-black text-[#0F2438] block">
-                {t(`إيصالات الدفع المرفقة بطلبك (${existingReceipts.length}):`, `Receipts Attached to Your Order (${existingReceipts.length}):`)}
+                {t(
+                  `إيصالات الدفع المرفقة بطلبك (${existingReceipts.length}):`,
+                  `Receipts Attached to Your Order (${existingReceipts.length}):`
+                )}
               </span>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {existingReceipts.slice(0, 4).map((rcp) => (
@@ -705,7 +550,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
           )}
         </div>
 
-        {/* 5. Cash at Branch */}
+        {/* 4. Cash at Branch */}
         <div className="bg-white border border-[#E2DAC8] rounded-2xl p-5 shadow-sm space-y-3">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-[#FAF8F2] text-[#9E7B33] border border-[#E5C887] flex items-center justify-center shrink-0">
@@ -735,7 +580,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
           </button>
         </div>
 
-        {/* 6. Financial Guarantee Summary */}
+        {/* 5. Financial Guarantee Summary */}
         <div className="bg-[#F7F4EB] border border-[#E2DAC8] rounded-xl p-4 space-y-2">
           <div className="flex items-center gap-2 text-[#0F2437] font-bold text-xs md:text-sm">
             <Info className="w-4 h-4 text-[#17344F]" />
@@ -749,15 +594,59 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               )}
             </li>
             <li>
-              {t('رابط إنستاباي المباشر:', 'Direct InstaPay Link:')} {TravelRepository.INSTAPAY_URL}
-            </li>
-            <li>
               {t('البريد الرسمي للمتابعة المالية:', 'Official Billing Email:')} {TravelRepository.OFFICIAL_EMAIL}
             </li>
             <li>
-              {t('للاستفسارات والتحصيلات المالية والواتساب:', 'WhatsApp & Billing Inquiries:')} {TravelRepository.PHONE_NUMBER}
+              {t('للاستفسارات والتحصيلات المالية والواتساب:', 'WhatsApp & Billing Inquiries:')}{' '}
+              <span dir="ltr" className="tabular-nums font-bold">
+                {TravelRepository.PHONE_NUMBER}
+              </span>
             </li>
           </ul>
+        </div>
+
+        {/* 6. Online Payment Gateway Card (Under Maintenance & Upgrade — Replacing Bank Transfer) */}
+        <div className="bg-white border-2 border-amber-300 rounded-2xl p-5 shadow-sm space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 border border-amber-200 flex items-center justify-center shrink-0">
+                <CreditCard className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm md:text-base font-black text-[#17344F]">
+                  {t(
+                    'بوابة الدفع الإلكتروني (البطاقات البنكية والمحافظ الذكية)',
+                    'Online Payment Gateway (Bank Cards & Smart Wallets)'
+                  )}
+                </h2>
+                <span className="text-[11px] md:text-xs text-[#678093]">
+                  {t('بطاقات فيزا / ماستركارد / ميزة والمحافظ الذكية', 'Visa / Mastercard / Meeza & Smart Wallets')}
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-amber-100 border border-amber-400 text-amber-950 text-xs font-black px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 shadow-xs">
+              <Wrench className="w-3.5 h-3.5 text-amber-700" />
+              <span>{t('تحت الصيانة والتحديث حالياً', 'Under Maintenance & Upgrade')}</span>
+            </div>
+          </div>
+
+          <p className="text-xs md:text-sm text-[#324D61] leading-relaxed">
+            {t(
+              'نعمل حالياً على تحديث بوابة الدفع الإلكتروني بالبطاقات البنكية لخدمتكم بأعلى معايير الأمان. يمكنكم السداد الفوري حالياً عبر إنستاباي أو المحافظ الإلكترونية بالأعلى وإرفاق صورة الإيصال داخل الطلب.',
+              'We are upgrading our direct bank-card payment gateway. Meanwhile, please complete instant transfers via InstaPay or E-Wallets above and attach your receipt.'
+            )}
+          </p>
+
+          <button
+            type="button"
+            disabled
+            aria-disabled="true"
+            className="w-full min-h-[46px] py-3 px-4 rounded-xl bg-slate-200 text-slate-500 border border-slate-300 text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-not-allowed opacity-85"
+          >
+            <Lock className="w-4 h-4" />
+            <span>{t('الدفع الإلكتروني المباشر (قريباً)', 'Direct Online Payment (Coming Soon)')}</span>
+          </button>
         </div>
       </div>
     </div>

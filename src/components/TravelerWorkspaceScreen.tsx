@@ -721,11 +721,6 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // Step 2: Request Login OTP cleanly via official WhatsApp number 201119227270 (zero-leak short message)
-  const handleRequestWhatsAppOtp = () => {
-    openWhatsApp(buildClientOtpWhatsAppUrl(lang));
-  };
-
   const otpDigits = Array.from({ length: 6 }, (_, i) => {
     const clean = normalizeArabicDigits(otpInput).replace(/\D/g, '');
     return clean[i] || '';
@@ -1778,16 +1773,17 @@ Please advise on the next steps for my application.`
                 </div>
 
                 <div className="space-y-2.5">
-                  <button
-                    type="button"
-                    onClick={handleRequestWhatsAppOtp}
+                  <a
+                    href={buildClientOtpWhatsAppUrl(lang)}
+                    target="_blank"
+                    rel="noopener noreferrer"
                     className="w-full min-h-[48px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
                   >
                     <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
                     <span>
                       {t('اطلب كود التفعيل عبر واتساب', 'Request Activation Code via WhatsApp')}
                     </span>
-                  </button>
+                  </a>
 
                   <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-2.5 flex items-center gap-2 text-emerald-950">
                     <Clock className="w-4 h-4 text-emerald-700 shrink-0" />
@@ -3622,16 +3618,17 @@ Please advise on the next steps for my application.`
                           'For security, please verify via WhatsApp OTP before changing your PIN.'
                         )}
                       </p>
-                      <button
-                        type="button"
-                        onClick={handleRequestWhatsAppOtp}
+                      <a
+                        href={buildClientOtpWhatsAppUrl(lang)}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
                       >
                         <WhatsAppIcon className="w-4 h-4 shrink-0" variant="white" />
                         <span>
                           {t('اطلب كود التفعيل عبر واتساب', 'Request Activation Code via WhatsApp')}
                         </span>
-                      </button>
+                      </a>
                       <p className="text-[10.5px] font-bold text-emerald-800 text-center">
                         {t('الرد بالكود يتم آلياً عبر واتساب خلال ثوانٍ', 'Code sent automatically via WhatsApp within seconds')}
                       </p>

@@ -1726,6 +1726,8 @@ export async function activateViaMagicLinkCloud(
           return { ok: true, profile: updated, needsPinSetup: false, isDeviceTrusted: true };
         }
 
+        // Clear any pre-existing local active session so PIN Setup / Device Trust prompt renders cleanly
+        setActiveTravelerPhone(null);
         const all = getAllTravelers();
         all[phone] = updated;
         saveAllTravelersLocalOnly(all);
