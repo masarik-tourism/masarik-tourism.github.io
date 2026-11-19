@@ -57,13 +57,13 @@ jobs:
           cp release.keystore debug.keystore
           ls -lh release.keystore
 
-      - name: Set Official Release Version 1.0.0
+      - name: Set Official Release Version 1.0.1
         run: |
-          echo "VERSION_CODE=1" > version.properties
-          echo "VERSION_NAME=1.0.0" >> version.properties
-          echo "VERSION_CODE=1" >> "$GITHUB_ENV"
-          echo "VERSION_NAME=1.0.0" >> "$GITHUB_ENV"
-          echo "Release Version: v1.0.0 (Code: 1)"
+          echo "VERSION_CODE=2" > version.properties
+          echo "VERSION_NAME=1.0.1" >> version.properties
+          echo "VERSION_CODE=2" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=1.0.1" >> "$GITHUB_ENV"
+          echo "Release Version: v1.0.1 (Code: 2)"
           cat version.properties
 
       - name: Setup Gradle
@@ -112,10 +112,10 @@ jobs:
       - name: Publish Signed APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name || 'v1.0.0' }}
-          name: "مسارك للسياحة ${{ github.event.release.tag_name || 'v1.0.0' }}"
+          tag_name: ${{ github.event.release.tag_name || 'v1.0.1' }}
+          name: "مسارك للسياحة ${{ github.event.release.tag_name || 'v1.0.1' }}"
           body: |
-            الإصدار الرسمي من تطبيق **مسارك للسياحة** (`v1.0.0` - Build `1`).
+            الإصدار الرسمي من تطبيق **مسارك للسياحة** (`v1.0.1` - Build `2`).
             - بناء وتوقيع تلقائي للملف الرسمي `Masarik-Tourism.apk` مع كل تحديث للمنصة.
             - تقليص حجم التطبيق عبر R8 + shrinkResources لسرعة تحميل فائقة.
             - دعم مباشر لجسر `AndroidBridge` والفحص التلقائي للتحديثات داخل التطبيق.

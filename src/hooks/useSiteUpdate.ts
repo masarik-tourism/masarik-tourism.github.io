@@ -60,7 +60,7 @@ export function useSiteUpdate() {
       const data: { version?: string } = await response.json();
       if (
         data?.version &&
-        data.version !== '1.0.0-dev' &&
+        data.version !== '1.0.1-dev' &&
         CURRENT_BUILD_VERSION &&
         data.version !== CURRENT_BUILD_VERSION
       ) {

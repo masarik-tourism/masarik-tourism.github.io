@@ -3229,7 +3229,7 @@ export function exportAllDataBackupJson(): string {
   const payload = {
     exportedAt: new Date().toISOString(),
     platform: 'Masarik Tourism LLC',
-    version: '1.0.0',
+    version: '1.0.1',
     clients: Object.values(getAllTravelers()),
     siteConfig: getSiteConfig(),
     cmsData: getCmsState(),

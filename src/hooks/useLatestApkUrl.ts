@@ -2,7 +2,7 @@ import { useState, useEffect, type MouseEvent } from 'react';
 
 const REPO_OWNER = 'masarik-tourism';
 const REPO_NAME = 'masarik-tourism.github.io';
-export const CURRENT_APP_VERSION = 'v1.0.0';
+export const CURRENT_APP_VERSION = 'v1.0.1';
 export const FALLBACK_PAGES_APK_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/Masarik-Tourism.apk`;
 export const FAST_CDN_APK_URL = FALLBACK_PAGES_APK_URL;
 export const OPEN_APK_UPDATER_EVENT = 'masarik-open-apk-updater';
@@ -16,9 +16,9 @@ export interface LatestApkInfo {
 }
 
 export function getInstalledAndroidAppVersion(): string {
-  if (typeof navigator === 'undefined') return '1.0.0';
+  if (typeof navigator === 'undefined') return '1.0.1';
   const match = navigator.userAgent.match(/MasarikApp\/([0-9]+(?:\.[0-9]+)*)/i);
-  return match?.[1] || '1.0.0';
+  return match?.[1] || '1.0.1';
 }
 
 export function isVersionNewer(remoteTag: string, localVersion: string): boolean {
