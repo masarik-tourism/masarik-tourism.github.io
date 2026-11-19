@@ -12,9 +12,11 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  AccountType,
   AppointmentDetails,
   CanonicalVisaOrderStatus,
   ClientNotification,
+  DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
   IssuedDocument,
@@ -44,11 +46,13 @@ import {
   STORAGE_FREE_LIMIT_BYTES,
   deleteTravelerDocumentFromStorage,
   estimateDataUrlBytes,
+  uploadChatAttachmentToDrive,
   uploadFamilyMemberFileToStorage,
   uploadIssuedDeliverableToStorage,
   uploadTravelerAvatarToStorage,
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
+import { sendChatMessageCloud } from './chatStore';
 import { getSiteConfig } from './siteConfigStore';
 import { getCmsState } from './cmsStore';
 
@@ -428,6 +432,14 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
           ? { sizeBytes: Math.max(0, Math.round(d.sizeBytes)) }
           : {}),
         uploadedAt: String(d.uploadedAt || new Date().toISOString()).slice(0, 64),
+        ...(d.status &&
+        ['pending_completion', 'received', 'completed'].includes(d.status)
+          ? { status: d.status }
+          : {}),
+        ...(d.statusNote ? { statusNote: String(d.statusNote).trim().slice(0, 300) } : {}),
+        ...(d.statusUpdatedAt
+          ? { statusUpdatedAt: String(d.statusUpdatedAt).slice(0, 64) }
+          : {}),
       }))
     : [];
 
@@ -532,6 +544,17 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     phone: normalized,
     phoneNormalized: normalized,
     orderCode: String(profile.orderCode || buildOrderCodeFromPhone(normalized)).slice(0, 40),
+    accountType: profile.accountType === 'b2b_partner' ? 'b2b_partner' : 'individual',
+    ...(profile.companyName
+      ? { companyName: String(profile.companyName).trim().slice(0, 160) }
+      : {}),
+    ...(profile.contactPersonName
+      ? { contactPersonName: String(profile.contactPersonName).trim().slice(0, 120) }
+      : {}),
+    ...(typeof profile.isOnline === 'boolean' ? { isOnline: profile.isOnline } : {}),
+    ...(profile.lastSeenAt
+      ? { lastSeenAt: String(profile.lastSeenAt).slice(0, 64) }
+      : {}),
     firstName,
     lastName,
     name: combinedName,
@@ -674,6 +697,15 @@ function mergeCloudClientWithLocal(
     ...cloudData,
     phoneNormalized: cloudData.phoneNormalized || normalizePhone(cloudData.phone),
     orderCode: cloudData.orderCode || buildOrderCodeFromPhone(cloudData.phone),
+    accountType:
+      cloudData.accountType === 'b2b_partner' || localExisting?.accountType === 'b2b_partner'
+        ? cloudData.accountType || localExisting?.accountType || 'individual'
+        : 'individual',
+    companyName: cloudData.companyName ?? localExisting?.companyName,
+    contactPersonName: cloudData.contactPersonName ?? localExisting?.contactPersonName,
+    isOnline:
+      typeof cloudData.isOnline === 'boolean' ? cloudData.isOnline : localExisting?.isOnline,
+    lastSeenAt: cloudData.lastSeenAt || localExisting?.lastSeenAt,
     accountStatus:
       cloudData.accountStatus ||
       (cloudData.verified ? 'verified' : 'pending_verification'),
@@ -1035,10 +1067,111 @@ export function startTravelerSession(
   return meta;
 }
 
+export const ONLINE_HEARTBEAT_TIMEOUT_MS = 85 * 1000;
+
+export function isUserCurrentlyOnline(profile?: Partial<TravelerProfile> | null): boolean {
+  if (!profile || profile.isOnline !== true) return false;
+  if (!profile.lastSeenAt) return true;
+  const lastMs = Date.parse(profile.lastSeenAt);
+  if (!Number.isFinite(lastMs)) return true;
+  return Date.now() - lastMs <= ONLINE_HEARTBEAT_TIMEOUT_MS;
+}
+
+export function formatLastSeenRelative(
+  lastSeenAt?: string,
+  isOnline?: boolean,
+  lang: 'ar' | 'en' = 'ar'
+): string {
+  if (isOnline) {
+    return lang === 'en' ? 'Online now' : 'متصل الآن';
+  }
+  if (!lastSeenAt) {
+    return lang === 'en' ? 'Not signed in yet' : 'لم يسجل دخول بعد';
+  }
+  const ts = Date.parse(lastSeenAt);
+  if (!Number.isFinite(ts)) {
+    return lang === 'en' ? 'Offline' : 'غير متصل';
+  }
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) {
+    return lang === 'en' ? 'Last seen moments ago' : 'آخر ظهور منذ لحظات';
+  }
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) {
+    return lang === 'en'
+      ? `Last seen ${diffMin}m ago`
+      : `آخر ظهور منذ ${diffMin} ${diffMin === 1 ? 'دقيقة' : diffMin <= 10 ? 'دقائق' : 'دقيقة'}`;
+  }
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) {
+    return lang === 'en'
+      ? `Last seen ${diffHours}h ago`
+      : `آخر ظهور منذ ${diffHours === 1 ? 'ساعة' : diffHours === 2 ? 'ساعتين' : `${diffHours} ساعات`}`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 30) {
+    return lang === 'en'
+      ? `Last seen ${diffDays}d ago`
+      : `آخر ظهور منذ ${diffDays === 1 ? 'يوم' : diffDays === 2 ? 'يومين' : `${diffDays} أيام`}`;
+  }
+  return lang === 'en'
+    ? `Last seen ${lastSeenAt.slice(0, 10)}`
+    : `آخر ظهور ${lastSeenAt.slice(0, 10)}`;
+}
+
+export function sortProfilesByPresence(profiles: TravelerProfile[]): TravelerProfile[] {
+  return [...profiles].sort((a, b) => {
+    const aOnline = isUserCurrentlyOnline(a) ? 1 : 0;
+    const bOnline = isUserCurrentlyOnline(b) ? 1 : 0;
+    if (aOnline !== bOnline) {
+      return bOnline - aOnline;
+    }
+    const aTs = Date.parse(a.lastSeenAt || a.updatedAt || a.createdAt || '') || 0;
+    const bTs = Date.parse(b.lastSeenAt || b.updatedAt || b.createdAt || '') || 0;
+    return bTs - aTs;
+  });
+}
+
+export async function updateUserPresenceCloud(
+  rawPhone: string,
+  isOnline: boolean
+): Promise<void> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return;
+
+  const nowIso = new Date().toISOString();
+  const all = getAllTravelers();
+  if (all[phone]) {
+    all[phone] = {
+      ...all[phone],
+      isOnline,
+      lastSeenAt: nowIso,
+    };
+    saveAllTravelersLocalOnly(all);
+  }
+
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      isOnline,
+      lastSeenAt: nowIso,
+      updatedAt: nowIso,
+    });
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code === 'not-found' && all[phone]) {
+      void syncTravelerToCloud(all[phone]);
+    }
+  }
+}
+
 export function logoutTravelerSession(reason: 'manual' | 'expired' = 'manual'): void {
   if (typeof window === 'undefined') return;
+  const prevPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
   window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
   writeStoredSessionMeta(null);
+  if (prevPhone) {
+    void updateUserPresenceCloud(prevPhone, false);
+  }
   if (reason === 'expired') {
     markSessionExpiredNotice();
   }
@@ -1050,6 +1183,10 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
   phone: string;
   exists: boolean;
   profile?: TravelerProfile;
+  accountType: AccountType;
+  companyName: string;
+  contactPersonName: string;
+  isB2BPartner: boolean;
   hasPin: boolean;
   isTrustedDevice: boolean;
   currentDeviceId: string;
@@ -1062,6 +1199,10 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
       validPhone: false,
       phone: '',
       exists: false,
+      accountType: 'individual',
+      companyName: '',
+      contactPersonName: '',
+      isB2BPartner: false,
       hasPin: false,
       isTrustedDevice: false,
       currentDeviceId: deviceId,
@@ -1093,6 +1234,10 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
       validPhone: true,
       phone,
       exists: false,
+      accountType: 'individual',
+      companyName: '',
+      contactPersonName: '',
+      isB2BPartner: false,
       hasPin: false,
       isTrustedDevice: false,
       currentDeviceId: deviceId,
@@ -1100,11 +1245,18 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
     };
   }
 
+  const accountType: AccountType =
+    target.accountType === 'b2b_partner' ? 'b2b_partner' : 'individual';
+
   return {
     validPhone: true,
     phone,
     exists: true,
     profile: target,
+    accountType,
+    companyName: target.companyName || '',
+    contactPersonName: target.contactPersonName || '',
+    isB2BPartner: accountType === 'b2b_partner',
     hasPin: Boolean(target.pinHash && /^[a-f0-9]{64}$/.test(target.pinHash)),
     isTrustedDevice: isDeviceInTrustedList(target.trustedDevices, deviceId),
     currentDeviceId: deviceId,
@@ -1146,7 +1298,10 @@ export async function loginWithTrustedDevicePinCloud(
     };
   }
 
-  if (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash) {
+  const canDirectB2BPinLogin =
+    check.isB2BPartner && check.profile.verified && check.hasPin && Boolean(check.profile.pinHash);
+
+  if (!canDirectB2BPinLogin && (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash)) {
     return {
       ok: false,
       fallbackToOtp: true,
@@ -1169,14 +1324,28 @@ export async function loginWithTrustedDevicePinCloud(
   }
 
   const nowIso = new Date().toISOString();
-  const updatedDevices: TrustedDevice[] = (check.profile.trustedDevices || []).map((d) =>
-    d.deviceId === check.currentDeviceId
-      ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
-      : d
-  );
+  const currentList = check.profile.trustedDevices || [];
+  const hasCurrentDevice = currentList.some((d) => d.deviceId === check.currentDeviceId);
+  const updatedDevices: TrustedDevice[] = hasCurrentDevice
+    ? currentList.map((d) =>
+        d.deviceId === check.currentDeviceId
+          ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
+          : d
+      )
+    : [
+        {
+          deviceId: check.currentDeviceId,
+          label: check.currentDeviceLabel,
+          addedAt: nowIso,
+          lastUsedAt: nowIso,
+        },
+        ...currentList,
+      ].slice(0, 15);
 
   const updated: TravelerProfile = {
     ...check.profile,
+    isOnline: true,
+    lastSeenAt: nowIso,
     trustedDevices: updatedDevices,
   };
   const all = getAllTravelers();
@@ -1802,6 +1971,115 @@ export async function adminInstantActivateClientCloud(
   return updated;
 }
 
+/**
+ * Admin Action: Creates a dedicated Business/Travel Company (B2B Partner) account OR upgrades an existing individual account.
+ */
+export async function adminCreateOrUpgradeB2BPartnerCloud(input: {
+  companyName: string;
+  contactPersonName: string;
+  phone: string;
+  initialPin?: string;
+}): Promise<{ ok: boolean; profile?: TravelerProfile; error?: string }> {
+  const phone = normalizePhone(input.phone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, error: 'رقم الهاتف المربوط غير صالح (أرقام 0-9 فقط).' };
+  }
+
+  const cleanCompany = input.companyName.trim().slice(0, 160);
+  const cleanContact = input.contactPersonName.trim().slice(0, 120);
+  if (!cleanCompany) {
+    return { ok: false, error: 'يرجى إدخال اسم الشركة أو الوكالة السياحية.' };
+  }
+
+  const cleanPin = normalizeArabicDigits(input.initialPin || '').replace(/\D/g, '');
+  if (cleanPin && cleanPin.length !== 6) {
+    return { ok: false, error: 'الرقم السري (PIN) للشركة يجب أن يتكون من 6 أرقام (0-9).' };
+  }
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  const path = `clients/${phone}`;
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const splitContact = splitPassportName(cleanContact || cleanCompany);
+
+  const profile: TravelerProfile = existing
+    ? {
+        ...existing,
+        phone,
+        phoneNormalized: phone,
+        accountType: 'b2b_partner',
+        companyName: cleanCompany,
+        ...(cleanContact ? { contactPersonName: cleanContact } : {}),
+        name: cleanCompany,
+        firstName: splitContact.firstName || existing.firstName,
+        lastName: splitContact.lastName || existing.lastName,
+        verified: true,
+        accountStatus: 'verified',
+        verifiedAt: existing.verifiedAt || nowIso,
+        activatedByAdmin: true,
+        adminBypassOtpAt: nowIso,
+        otpConsumed: true,
+        otpExpiresAt: new Date(0).toISOString(),
+        ...(cleanPin
+          ? {
+              pinHash: hashClientPin(phone, cleanPin),
+              pinUpdatedAt: nowIso,
+            }
+          : {}),
+        updatedAt: nowIso,
+      }
+    : {
+        phone,
+        phoneNormalized: phone,
+        orderCode: buildOrderCodeFromPhone(phone),
+        accountType: 'b2b_partner',
+        companyName: cleanCompany,
+        ...(cleanContact ? { contactPersonName: cleanContact } : {}),
+        firstName: splitContact.firstName || cleanCompany,
+        lastName: splitContact.lastName || '',
+        name: cleanCompany,
+        otp: generateSixDigitOtp(),
+        otpGeneratedAt: nowIso,
+        otpExpiresAt: new Date(0).toISOString(),
+        otpConsumed: true,
+        activatedByAdmin: true,
+        adminBypassOtpAt: nowIso,
+        ...(cleanPin
+          ? {
+              pinHash: hashClientPin(phone, cleanPin),
+              pinUpdatedAt: nowIso,
+            }
+          : {}),
+        trustedDevices: [],
+        verified: true,
+        accountStatus: 'verified',
+        verifiedAt: nowIso,
+        isOnline: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        orderStatus: 'تم استلام الطلب',
+        documents: [],
+      };
+
+  all[phone] = profile;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(profile);
+  return { ok: true, profile };
+}
+
 export function registerOrLoginTraveler(name: string, rawPhone: string): TravelerProfile {
   const phone = normalizePhone(rawPhone);
   const cleanName = name.trim();
@@ -2089,6 +2367,9 @@ export function updateTravelerProfileDetails(
   updates: Partial<
     Pick<
       TravelerProfile,
+      | 'accountType'
+      | 'companyName'
+      | 'contactPersonName'
       | 'firstName'
       | 'lastName'
       | 'name'
@@ -2707,6 +2988,198 @@ export async function uploadAndAddDocumentToTravelerCloud(
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
   return { profile: updated, document: newDoc };
+}
+
+/**
+ * Immediately uploads & saves a newly captured/selected profile avatar to Google Drive + Firestore,
+ * updating Navbar, Chat & Admin lists instantly without needing an extra Save Draft step.
+ */
+export async function uploadAndSaveAvatarImmediateCloud(
+  rawPhone: string,
+  dataUrl: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing || !dataUrl.startsWith('data:')) return null;
+
+  const uploaded = await uploadTravelerAvatarToStorage(phone, dataUrl);
+  const latestAll = getAllTravelers();
+  const latest = latestAll[phone] || existing;
+
+  let nextAvatarUrl = dataUrl;
+  let nextAvatarStoragePath = latest.avatarStoragePath;
+  let nextAvatarSizeBytes = estimateDataUrlBytes(dataUrl);
+
+  if (uploaded) {
+    if (latest.avatarStoragePath && latest.avatarStoragePath !== uploaded.storagePath) {
+      void deleteTravelerDocumentFromStorage(latest.avatarStoragePath);
+    }
+    nextAvatarUrl = uploaded.downloadUrl;
+    nextAvatarStoragePath = uploaded.storagePath;
+    nextAvatarSizeBytes = uploaded.sizeBytes;
+  }
+
+  const updated: TravelerProfile = {
+    ...latest,
+    avatarUrl: nextAvatarUrl,
+    ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
+    avatarSizeBytes: nextAvatarSizeBytes,
+    updatedAt: new Date().toISOString(),
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+/**
+ * Multi-file / batch passport & PDF uploader for Client & B2B Partner Document Wallets.
+ */
+export async function uploadBatchFilesToTravelerCloud(
+  rawPhone: string,
+  files: File[],
+  docType: TravelerDocument['docType'] = 'passport',
+  labelPrefix = ''
+): Promise<{ uploadedCount: number; profile: TravelerProfile | null; errors: string[] }> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing || !files.length) {
+    return { uploadedCount: 0, profile: existing || null, errors: [] };
+  }
+
+  const addedDocs: TravelerDocument[] = [];
+  const errors: string[] = [];
+
+  for (const file of files) {
+    try {
+      const uploaded = await uploadChatAttachmentToDrive(phone, file, 'client_docs');
+      const nowIso = new Date().toISOString();
+      addedDocs.push({
+        id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        label: labelPrefix ? `${labelPrefix} — ${file.name}` : file.name,
+        docType,
+        fileName: uploaded.fileName,
+        dataUrl: uploaded.downloadUrl,
+        viewUrl: uploaded.viewUrl,
+        storagePath: uploaded.storagePath,
+        sizeBytes: uploaded.sizeBytes,
+        uploadedAt: nowIso,
+        status: 'received',
+        statusUpdatedAt: nowIso,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${file.name}: ${msg}`);
+    }
+  }
+
+  if (addedDocs.length === 0) {
+    return { uploadedCount: 0, profile: getAllTravelers()[phone] || existing, errors };
+  }
+
+  const latestAll = getAllTravelers();
+  const latest = latestAll[phone] || existing;
+  const updated: TravelerProfile = {
+    ...latest,
+    documents: [...addedDocs, ...(latest.documents || [])].slice(0, 30),
+    updatedAt: new Date().toISOString(),
+  };
+
+  latestAll[phone] = updated;
+  saveAllTravelersLocalOnly(latestAll);
+  await syncTravelerToCloud(updated);
+  return { uploadedCount: addedDocs.length, profile: updated, errors };
+}
+
+/**
+ * Admin Action: Updates per-document review status ('pending_completion' | 'received' | 'completed')
+ * on an uploaded client/partner document and notifies the client in real time.
+ */
+export async function updateDocumentReviewStatusCloud(
+  rawPhone: string,
+  docId: string,
+  status: DocumentReviewStatus,
+  statusNote?: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch {
+    // Fallback to local
+  }
+  if (!existing) return null;
+
+  const targetDoc = (existing.documents || []).find((d) => d.id === docId);
+  if (!targetDoc) return existing;
+
+  const nowIso = new Date().toISOString();
+  const cleanNote = String(statusNote || '').trim().slice(0, 300);
+
+  const nextDocs = (existing.documents || []).map((d) =>
+    d.id === docId
+      ? {
+          ...d,
+          status,
+          ...(cleanNote ? { statusNote: cleanNote } : { statusNote: undefined }),
+          statusUpdatedAt: nowIso,
+        }
+      : d
+  );
+
+  const statusLabels: Record<DocumentReviewStatus, { ar: string; en: string }> = {
+    pending_completion: { ar: 'مطلوب استكماله / إعادة رفعه', en: 'Needs Completion / Re-upload' },
+    received: { ar: 'تم الاستلام', en: 'Received' },
+    completed: { ar: 'مكتمل ومعتمد', en: 'Completed & Approved' },
+  };
+  const labelInfo = statusLabels[status];
+
+  const notif: ClientNotification = {
+    id: `notif-doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    titleAr: `تحديث حالة مستند: ${targetDoc.label}`,
+    titleEn: `Document Review: ${targetDoc.label}`,
+    bodyAr: `الحالة الجديدة: ${labelInfo.ar}${cleanNote ? ` — ملاحظة الإدارة: ${cleanNote}` : ''}`,
+    bodyEn: `New status: ${labelInfo.en}${cleanNote ? ` — Note: ${cleanNote}` : ''}`,
+    type: 'status',
+    docId,
+    createdAt: nowIso,
+    read: false,
+  };
+
+  const updated: TravelerProfile = {
+    ...existing,
+    documents: nextDocs,
+    notifications: [notif, ...(existing.notifications || [])].slice(0, 30),
+    updatedAt: nowIso,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+
+  // Also post a clear status notice in the private chat thread
+  void sendChatMessageCloud({
+    phone,
+    senderRole: 'admin',
+    senderName: 'إدارة مسارك',
+    text: `📄 تحديث حالة المستند (${targetDoc.label}): ${labelInfo.ar}${
+      cleanNote ? `\nملاحظة: ${cleanNote}` : ''
+    }`,
+    messageType: 'status_notice',
+    accountType: updated.accountType || 'individual',
+    clientName: updated.name,
+    companyName: updated.companyName,
+  });
+
+  return updated;
 }
 
 /**

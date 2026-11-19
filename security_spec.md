@@ -22,3 +22,4 @@
 10. **Invalid Site Config Key:** Writing `/site_config/arbitrary_doc` -> Denied by `configId in ['general', 'cms']`.
 11. **Malformed Admin PIN Hash:** Creating `/admins/sa-1` with invalid 4-char `pinHash` -> Denied by `pinHash.matches('^[a-f0-9]{64}$')`.
 12. **Master Admin Deletion:** Deleting `/admins/master` -> Denied by `adminId != 'master'`.
+13. **Cross-Thread Chat Isolation:** Listing `/chats/{phoneId}/messages` requires matching `phoneId`, and creating/updating `/chats/{phoneId}` or messages enforces parent client existence (`exists(/databases/$(database)/documents/clients/$(phoneId))`), strict key allowlists (`affectedKeys().hasOnly(['readByAdmin', 'readByClient'])` on updates), and attachment count <= 10.

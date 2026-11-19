@@ -512,6 +512,83 @@ export async function uploadIssuedDeliverableToStorage(
   };
 }
 
+export async function uploadChatAttachmentToDrive(
+  phone: string,
+  file: File,
+  purpose: DriveUploadPurpose = 'client_docs'
+): Promise<{
+  id: string;
+  fileName: string;
+  mimeType: string;
+  downloadUrl: string;
+  viewUrl: string;
+  storagePath: string;
+  sizeBytes: number;
+}> {
+  const cleanPhone = phone.replace(/\D/g, '');
+  if (!cleanPhone) {
+    throw new Error('رقم الهاتف غير صالح لمسار التخزين.');
+  }
+
+  const lowerName = (file.name || '').toLowerCase();
+  const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
+
+  if (isPdf && file.size > MAX_PDF_BYTES) {
+    throw new Error('حجم ملف الـ PDF يتجاوز الحد الأقصى المسموح به (5 ميجابايت).');
+  }
+
+  let fileToUpload = file;
+  if (!isPdf && file.type.startsWith('image/')) {
+    fileToUpload = await compressImageFileUnderLimit(file, MAX_IMAGE_BYTES);
+    if (fileToUpload.size > MAX_IMAGE_BYTES) {
+      throw new Error('حجم الصورة يتجاوز الحد المسموح بعد الضغط (500 كيلوبايت).');
+    }
+  } else if (!isPdf && file.size > MAX_PDF_BYTES) {
+    throw new Error('حجم الملف المختار يتجاوز الحد الأقصى المسموح (5 ميجابايت).');
+  }
+
+  const finalLower = (fileToUpload.name || '').toLowerCase();
+  const mime =
+    fileToUpload.type ||
+    (isPdf
+      ? 'application/pdf'
+      : finalLower.endsWith('.png')
+      ? 'image/png'
+      : finalLower.endsWith('.webp')
+      ? 'image/webp'
+      : 'image/jpeg');
+
+  const ext =
+    mime === 'application/pdf' || isPdf
+      ? 'pdf'
+      : mime === 'image/png' || finalLower.endsWith('.png')
+      ? 'png'
+      : mime === 'image/webp' || finalLower.endsWith('.webp')
+      ? 'webp'
+      : 'jpg';
+
+  const attId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const finalFileName = fileToUpload.name || `Masarik_Chat_${cleanPhone}_${attId}.${ext}`;
+  const base64 = await fileToRawBase64(fileToUpload);
+
+  const uploaded = await uploadToGoogleDriveWebApp({
+    fileName: finalFileName,
+    mimeType: mime,
+    base64,
+    purpose,
+  });
+
+  return {
+    id: attId,
+    fileName: finalFileName.slice(0, 220),
+    mimeType: mime.slice(0, 120),
+    downloadUrl: uploaded.downloadUrl,
+    viewUrl: uploaded.viewUrl,
+    storagePath: uploaded.storagePath,
+    sizeBytes: fileToUpload.size,
+  };
+}
+
 export async function deleteTravelerDocumentFromStorage(_storagePath?: string): Promise<void> {
   // Files stored via Google Drive Web App do not use Firebase Storage deletion;
   // metadata and links are safely detached from Firestore upon cleanup/removal.

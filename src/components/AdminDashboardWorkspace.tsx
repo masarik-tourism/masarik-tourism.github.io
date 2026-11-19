@@ -39,10 +39,13 @@ import {
   Bell,
   Plus,
   Volume2,
+  Building2,
 } from 'lucide-react';
 import {
   AdminPermission,
   AppointmentDetails,
+  ChatThreadSummary,
+  DocumentReviewStatus,
   DriveEndpointScope,
   DriveStorageEndpoint,
   SubAdminAccount,
@@ -50,10 +53,12 @@ import {
   VisaOrderStatus,
 } from '../types/travel';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
+import { DirectChatPanel } from './DirectChatPanel';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
   adminCreateClientCloud,
+  adminCreateOrUpgradeB2BPartnerCloud,
   adminInstantActivateClientCloud,
   approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
@@ -64,19 +69,27 @@ import {
   deleteTravelerProfile,
   digitsOnly,
   exportAllDataBackupJson,
+  formatLastSeenRelative,
   formatPhoneForDisplay,
   getAllTravelers,
   getOrderStatusStageIndex,
   getRelationshipLabel,
   getTravelerDisplayNames,
   isOtpActiveAndUnexpired,
+  isUserCurrentlyOnline,
   normalizeOrderStatusValue,
   normalizePhone,
   previewOldCompletedAttachmentsCleanup,
   removeIssuedDeliverableCloud,
+  sortProfilesByPresence,
   updateAdminPin,
+  updateDocumentReviewStatusCloud,
   updateTravelerProfileDetails,
 } from '../utils/travelerStore';
+import {
+  playChatNotificationChime,
+  subscribeAllChatThreads,
+} from '../utils/chatStore';
 import {
   MAX_PDF_BYTES,
   buildDescriptiveFilename,
@@ -113,8 +126,14 @@ import { openWhatsApp } from '../utils/communication';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
-type DashboardTab = 'requests' | 'messages_otp' | 'ads' | 'settings';
-type OrderFilter = 'all' | 'active' | 'with_files' | 'completed';
+type DashboardTab =
+  | 'individuals'
+  | 'b2b_partners'
+  | 'live_chat'
+  | 'messages_otp'
+  | 'ads'
+  | 'settings';
+type OrderFilter = 'all' | 'online' | 'active' | 'with_files' | 'completed';
 
 export const AdminDashboardWorkspace: React.FC = () => {
   const { lang, isAr, dir, t } = useLanguage();
@@ -137,7 +156,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const canDeleteRecords = hasPermission('delete_records');
 
   const getDefaultTab = (): DashboardTab => {
-    if (canManageClients) return 'requests';
+    if (canManageClients) return 'individuals';
     if (canActivateOtp) return 'messages_otp';
     if (canEditContent) return 'ads';
     return 'settings';
@@ -145,10 +164,30 @@ export const AdminDashboardWorkspace: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<DashboardTab>(getDefaultTab);
 
-  // Tab 1 & 2: Clients, Orders, Files & OTP
+  // Tab 1 & 2: Clients, B2B Partners, Live Chat, Orders, Files & OTP
   const [travelers, setTravelers] = useState<TravelerProfile[]>([]);
+  const [chatThreads, setChatThreads] = useState<Record<string, ChatThreadSummary>>({});
+  const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
+  const [chatInboxFilter, setChatInboxFilter] = useState<'all' | 'individual' | 'b2b_partner'>('all');
+  const [chatSearchQuery, setChatSearchQuery] = useState('');
+  const [, setPresenceTick] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [orderFilter, setOrderFilter] = useState<OrderFilter>('all');
+  const [b2bSearchQuery, setB2bSearchQuery] = useState('');
+  const [b2bOnlineOnly, setB2bOnlineOnly] = useState(false);
+  const [b2bCompanyName, setB2bCompanyName] = useState('');
+  const [b2bContactName, setB2bContactName] = useState('');
+  const [b2bPhone, setB2bPhone] = useState('');
+  const [b2bPin, setB2bPin] = useState('');
+  const [isCreatingB2B, setIsCreatingB2B] = useState(false);
+  const [b2bCreateFeedback, setB2bCreateFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [showUpgradeB2B, setShowUpgradeB2B] = useState(false);
+  const [upgradeCompanyName, setUpgradeCompanyName] = useState('');
+  const [upgradeContactName, setUpgradeContactName] = useState('');
+  const [isUpgradingB2B, setIsUpgradingB2B] = useState(false);
+  const [upgradeB2BFeedback, setUpgradeB2BFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [docNoteDrafts, setDocNoteDrafts] = useState<Record<string, string>>({});
+  const [updatingDocStatusId, setUpdatingDocStatusId] = useState<string | null>(null);
   const [showAllOtpClients, setShowAllOtpClients] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
   const [newFirstName, setNewFirstName] = useState('');
@@ -287,6 +326,9 @@ export const AdminDashboardWorkspace: React.FC = () => {
     setTravelers(list);
   };
 
+  const chatUnreadBaselineRef = useRef(false);
+  const prevTotalUnreadChatRef = useRef(0);
+
   useEffect(() => {
     loadTravelers();
     setSiteDraft(getSiteConfig());
@@ -300,6 +342,35 @@ export const AdminDashboardWorkspace: React.FC = () => {
       window.removeEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
     };
   }, []);
+
+  // Live Firestore Chat Threads Inbox Subscription & 15s Presence UI Ticker
+  useEffect(() => {
+    const unsubChats = subscribeAllChatThreads((threadsMap) => {
+      setChatThreads(threadsMap);
+      const nextTotalUnread = Object.values(threadsMap).reduce(
+        (acc, th) => acc + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
+        0
+      );
+      if (!chatUnreadBaselineRef.current) {
+        chatUnreadBaselineRef.current = true;
+        prevTotalUnreadChatRef.current = nextTotalUnread;
+      } else {
+        if (nextTotalUnread > prevTotalUnreadChatRef.current && alertSoundEnabled) {
+          playChatNotificationChime();
+        }
+        prevTotalUnreadChatRef.current = nextTotalUnread;
+      }
+    });
+
+    const tickId = window.setInterval(() => {
+      setPresenceTick((n) => n + 1);
+    }, 15000);
+
+    return () => {
+      unsubChats();
+      window.clearInterval(tickId);
+    };
+  }, [alertSoundEnabled]);
 
   // Arm instant audio + visual alert whenever a new pending OTP request arrives live
   useEffect(() => {
@@ -388,13 +459,116 @@ export const AdminDashboardWorkspace: React.FC = () => {
       setDeliverableFeedback(null);
       setConfirmDeleteDeliverableId(null);
       setReplacingDeliverable(null);
+      setShowUpgradeB2B(false);
+      setUpgradeCompanyName(selectedClient.companyName || '');
+      setUpgradeContactName(selectedClient.contactPersonName || names.fullDisplayName || '');
+      setUpgradeB2BFeedback(null);
+      const initialDocNotes: Record<string, string> = {};
+      for (const docItem of selectedClient.documents || []) {
+        if (docItem.statusNote) {
+          initialDocNotes[docItem.id] = docItem.statusNote;
+        }
+      }
+      setDocNoteDrafts(initialDocNotes);
     }
   }, [selectedClientPhone, travelers.length]);
 
   const handleOpenClientFromAnyTab = (phone: string) => {
     if (!canManageClients) return;
+    const target = travelers.find((tr) => tr.phone === phone);
     setSelectedClientPhone(phone);
-    setActiveTab('requests');
+    setActiveTab(target?.accountType === 'b2b_partner' ? 'b2b_partners' : 'individuals');
+  };
+
+  const handleOpenClientChat = (phone: string) => {
+    setActiveChatPhone(phone);
+    setSelectedClientPhone(null);
+    setActiveTab('live_chat');
+  };
+
+  const handleCreateB2BPartner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManageClients) return;
+    setB2bCreateFeedback(null);
+    setIsCreatingB2B(true);
+    try {
+      const res = await adminCreateOrUpgradeB2BPartnerCloud({
+        companyName: b2bCompanyName,
+        contactPersonName: b2bContactName,
+        phone: b2bPhone,
+        initialPin: b2bPin,
+      });
+      if (!res.ok) {
+        setB2bCreateFeedback({
+          ok: false,
+          text: res.error || t('تعذر إنشاء حساب الشركة الشريكة.', 'Could not create B2B partner.'),
+        });
+        return;
+      }
+      setB2bCompanyName('');
+      setB2bContactName('');
+      setB2bPhone('');
+      setB2bPin('');
+      loadTravelers();
+      setB2bCreateFeedback({
+        ok: true,
+        text: t(
+          'تم إنشاء وتفعيل حساب الشركة الشريكة (B2B) وحفظه في السحابة بنجاح ✓',
+          'B2B Partner account created, verified, and synced to cloud ✓'
+        ),
+      });
+    } finally {
+      setIsCreatingB2B(false);
+    }
+  };
+
+  const handleUpgradeSelectedToB2B = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedClient || !canManageClients) return;
+    setUpgradeB2BFeedback(null);
+    setIsUpgradingB2B(true);
+    try {
+      const res = await adminCreateOrUpgradeB2BPartnerCloud({
+        companyName: upgradeCompanyName,
+        contactPersonName: upgradeContactName,
+        phone: selectedClient.phone,
+      });
+      if (!res.ok) {
+        setUpgradeB2BFeedback({
+          ok: false,
+          text: res.error || t('تعذر ترقية الحساب.', 'Could not upgrade account.'),
+        });
+        return;
+      }
+      loadTravelers();
+      setShowUpgradeB2B(false);
+      setActiveTab('b2b_partners');
+      setUpgradeB2BFeedback({
+        ok: true,
+        text: t('تمت الترقية إلى حساب شركة شريكة (B2B) بنجاح ✓', 'Upgraded to B2B Partner ✓'),
+      });
+    } finally {
+      setIsUpgradingB2B(false);
+    }
+  };
+
+  const handleUpdateDocumentStatus = async (
+    docId: string,
+    status: DocumentReviewStatus
+  ) => {
+    if (!selectedClient || !canManageClients) return;
+    setUpdatingDocStatusId(docId);
+    try {
+      await updateDocumentReviewStatusCloud(
+        selectedClient.phone,
+        docId,
+        status,
+        docNoteDrafts[docId]
+      );
+      loadTravelers();
+    } finally {
+      setUpdatingDocStatusId(null);
+    }
   };
 
   const handleAdminAddClient = async (e: React.FormEvent) => {
@@ -956,26 +1130,95 @@ export const AdminDashboardWorkspace: React.FC = () => {
     return `${Math.max(1, Math.round(bytes / 1024))} ${isAr ? 'كيلوبايت' : 'KB'}`;
   };
 
-  const filteredRequests = travelers.filter((tr) => {
-    const normalizedSt = normalizeOrderStatusValue(tr.orderStatus);
-    const isCompleted = normalizedSt === 'تم تنفيذ الطلب';
-    const hasFiles = (tr.documents?.length || 0) > 0;
+  const individualTravelers = travelers.filter((tr) => tr.accountType !== 'b2b_partner');
+  const b2bPartners = travelers.filter((tr) => tr.accountType === 'b2b_partner');
 
-    if (orderFilter === 'active' && isCompleted) return false;
-    if (orderFilter === 'with_files' && !hasFiles) return false;
-    if (orderFilter === 'completed' && !isCompleted) return false;
+  const individualsOnlineCount = individualTravelers.filter((tr) =>
+    isUserCurrentlyOnline(tr)
+  ).length;
+  const b2bOnlineCount = b2bPartners.filter((tr) => isUserCurrentlyOnline(tr)).length;
+  const totalUnreadChatCount = Object.values(chatThreads).reduce(
+    (sum, th) => sum + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
+    0
+  );
 
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return true;
-    const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
-    return (
-      tr.name.toLowerCase().includes(q) ||
-      tr.phone.includes(q) ||
-      formatPhoneForDisplay(tr.phone).includes(q) ||
-      orderCode.includes(q) ||
-      (tr.passportNumber || '').toLowerCase().includes(q)
-    );
-  });
+  const filteredRequests = sortProfilesByPresence(
+    individualTravelers.filter((tr) => {
+      const normalizedSt = normalizeOrderStatusValue(tr.orderStatus);
+      const isCompleted = normalizedSt === 'تم تنفيذ الطلب';
+      const hasFiles = (tr.documents?.length || 0) > 0;
+      const online = isUserCurrentlyOnline(tr);
+
+      if (orderFilter === 'online' && !online) return false;
+      if (orderFilter === 'active' && isCompleted) return false;
+      if (orderFilter === 'with_files' && !hasFiles) return false;
+      if (orderFilter === 'completed' && !isCompleted) return false;
+
+      const q = searchQuery.trim().toLowerCase();
+      if (!q) return true;
+      const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
+      return (
+        tr.name.toLowerCase().includes(q) ||
+        tr.phone.includes(q) ||
+        formatPhoneForDisplay(tr.phone).includes(q) ||
+        orderCode.includes(q) ||
+        (tr.passportNumber || '').toLowerCase().includes(q)
+      );
+    })
+  );
+
+  const filteredB2BPartners = sortProfilesByPresence(
+    b2bPartners.filter((tr) => {
+      if (b2bOnlineOnly && !isUserCurrentlyOnline(tr)) return false;
+      const q = b2bSearchQuery.trim().toLowerCase();
+      if (!q) return true;
+      const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
+      return (
+        (tr.companyName || tr.name || '').toLowerCase().includes(q) ||
+        (tr.contactPersonName || '').toLowerCase().includes(q) ||
+        tr.phone.includes(q) ||
+        formatPhoneForDisplay(tr.phone).includes(q) ||
+        orderCode.includes(q)
+      );
+    })
+  );
+
+  const chatDirectoryClients = [...travelers]
+    .filter((tr) => {
+      if (chatInboxFilter === 'individual' && tr.accountType === 'b2b_partner') return false;
+      if (chatInboxFilter === 'b2b_partner' && tr.accountType !== 'b2b_partner') return false;
+      const q = chatSearchQuery.trim().toLowerCase();
+      if (!q) return true;
+      return (
+        (tr.companyName || '').toLowerCase().includes(q) ||
+        (tr.contactPersonName || '').toLowerCase().includes(q) ||
+        tr.name.toLowerCase().includes(q) ||
+        tr.phone.includes(q) ||
+        formatPhoneForDisplay(tr.phone).includes(q)
+      );
+    })
+    .sort((a, b) => {
+      const thA = chatThreads[a.phone];
+      const thB = chatThreads[b.phone];
+      const unA = thA?.unreadAdminCount || 0;
+      const unB = thB?.unreadAdminCount || 0;
+      if (unA > 0 && unB === 0) return -1;
+      if (unB > 0 && unA === 0) return 1;
+      const tMsgA = thA?.lastMessageAt ? Date.parse(thA.lastMessageAt) : 0;
+      const tMsgB = thB?.lastMessageAt ? Date.parse(thB.lastMessageAt) : 0;
+      if (tMsgA !== tMsgB) return tMsgB - tMsgA;
+      const onA = isUserCurrentlyOnline(a);
+      const onB = isUserCurrentlyOnline(b);
+      if (onA !== onB) return onA ? -1 : 1;
+      const seenA = Date.parse(a.lastSeenAt || a.createdAt || '');
+      const seenB = Date.parse(b.lastSeenAt || b.createdAt || '');
+      return (Number.isFinite(seenB) ? seenB : 0) - (Number.isFinite(seenA) ? seenA : 0);
+    });
+
+  const activeChatClient =
+    (activeChatPhone && travelers.find((tr) => tr.phone === activeChatPhone)) ||
+    chatDirectoryClients[0] ||
+    null;
 
   const pendingOtpClients = travelers.filter((tr) => !tr.verified);
   const otpQueueClients = showAllOtpClients ? travelers : pendingOtpClients;
@@ -988,12 +1231,18 @@ export const AdminDashboardWorkspace: React.FC = () => {
   );
 
   const pendingCount = pendingOtpClients.length;
-  const activeOrdersCount = travelers.filter(
+  const activeOrdersCount = individualTravelers.filter(
     (tr) => normalizeOrderStatusValue(tr.orderStatus) !== 'تم تنفيذ الطلب'
   ).length;
-  const withFilesCount = travelers.filter((tr) => (tr.documents?.length || 0) > 0).length;
-  const completedCount = travelers.length - activeOrdersCount;
-  const messagesBadgeCount = pendingCount + travelers.filter((tr) => !tr.verified || (tr.documents || []).some((d) => d.docType === 'receipt')).length;
+  const withFilesCount = individualTravelers.filter(
+    (tr) => (tr.documents?.length || 0) > 0
+  ).length;
+  const completedCount = individualTravelers.length - activeOrdersCount;
+  const messagesBadgeCount =
+    pendingCount +
+    travelers.filter(
+      (tr) => !tr.verified || (tr.documents || []).some((d) => d.docType === 'receipt')
+    ).length;
   const overrideTextCount = Object.keys(cmsState.textOverrides).length;
   const storageStats = computeStorageUsageStats(travelers);
   const cleanupPreview = previewOldCompletedAttachmentsCleanup(travelers, cleanupAgeDays);
@@ -1203,26 +1452,81 @@ export const AdminDashboardWorkspace: React.FC = () => {
           </div>
         )}
 
-        {/* 4-Tab Organized CRM Navigation */}
+        {/* Organized 6-Tab CRM, B2B Partners & Live Chat Navigation */}
         <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs flex items-center gap-2 overflow-x-auto">
           {canManageClients && (
             <button
               type="button"
               onClick={() => {
-                setActiveTab('requests');
+                setActiveTab('individuals');
                 setSelectedClientPhone(null);
               }}
-              className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
-                activeTab === 'requests'
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'individuals'
                   ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
                   : 'text-slate-700 hover:bg-slate-100'
               }`}
             >
               <Inbox className="w-4 h-4 shrink-0" />
-              <span>{t('الطلبات والملفات الواردة', 'Incoming Orders & Files')}</span>
+              <span>{t('العملاء الأفراد', 'Individual Clients')}</span>
               <span className="px-1.5 py-0.5 rounded-full bg-white/15 text-[10.5px] tabular-nums font-black border border-current/20">
-                {travelers.length}
+                {individualTravelers.length}
               </span>
+              {individualsOnlineCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] tabular-nums font-black flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                  <span>{individualsOnlineCount}</span>
+                </span>
+              )}
+            </button>
+          )}
+
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('b2b_partners');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'b2b_partners'
+                  ? 'bg-gradient-to-l from-[#0F2438] to-[#163B65] text-[#E5C887] ring-1 ring-[#C6A052] shadow-xs'
+                  : 'text-slate-700 hover:bg-amber-50/70'
+              }`}
+            >
+              <Building2 className="w-4 h-4 shrink-0 text-[#C6A052]" />
+              <span>{t('الشركات والشركاء (B2B)', 'B2B Partners')}</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-[#C6A052]/20 text-[10.5px] tabular-nums font-black border border-[#C6A052]/40">
+                {b2bPartners.length}
+              </span>
+              {b2bOnlineCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] tabular-nums font-black">
+                  {b2bOnlineCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('live_chat');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'live_chat'
+                  ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <MessageCircle className="w-4 h-4 shrink-0" />
+              <span>{t('المحادثات الفورية', 'Live Chat Inbox')}</span>
+              {totalUnreadChatCount > 0 && (
+                <span className="min-w-[20px] h-[20px] px-1.5 rounded-full bg-red-600 text-white text-[10.5px] font-black flex items-center justify-center tabular-nums">
+                  {totalUnreadChatCount}
+                </span>
+              )}
             </button>
           )}
 
@@ -1233,14 +1537,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 setActiveTab('messages_otp');
                 setSelectedClientPhone(null);
               }}
-              className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
                 activeTab === 'messages_otp'
                   ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
                   : 'text-slate-700 hover:bg-slate-100'
               }`}
             >
               <MessageSquare className="w-4 h-4 shrink-0" />
-              <span>{t('الرسائل وتفعيل الحسابات', 'Messages & Account OTP')}</span>
+              <span>{t('الرسائل وتفعيل OTP', 'OTP & Receipts')}</span>
               {pendingCount > 0 ? (
                 <span className="min-w-[20px] h-[20px] px-1.5 rounded-full bg-red-600 text-white text-[10.5px] font-black flex items-center justify-center tabular-nums">
                   {pendingCount}
@@ -1260,14 +1564,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 setActiveTab('ads');
                 setSelectedClientPhone(null);
               }}
-              className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
                 activeTab === 'ads'
                   ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
                   : 'text-slate-700 hover:bg-slate-100'
               }`}
             >
               <Megaphone className="w-4 h-4 shrink-0" />
-              <span>{t('إدارة الإعلانات والعروض', 'Ads & Offers Manager')}</span>
+              <span>{t('الإعلانات والعروض', 'Ads & Offers')}</span>
               {!isEditUnlocked && <Lock className="w-3.5 h-3.5 opacity-60 shrink-0" />}
             </button>
           )}
@@ -1278,30 +1582,41 @@ export const AdminDashboardWorkspace: React.FC = () => {
               setActiveTab('settings');
               setSelectedClientPhone(null);
             }}
-            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+            className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
               activeTab === 'settings'
                 ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
                 : 'text-slate-700 hover:bg-slate-100'
             }`}
           >
             <Settings className="w-4 h-4 shrink-0" />
-            <span>{t('الخدمات والإعدادات', 'Services & Settings')}</span>
+            <span>{t('الخدمات والإعدادات', 'Settings')}</span>
             {!isEditUnlocked && <Lock className="w-3.5 h-3.5 opacity-60 shrink-0" />}
           </button>
         </div>
 
         {/* ===================================================================== */}
-        {/* TAB 1: INCOMING REQUESTS & UPLOADED CLIENT FILES (DIRECTORY VIEW)     */}
+        {/* TAB 1: INDIVIDUAL CLIENTS DIRECTORY (ONLINE-FIRST PRESENCE SORTING)   */}
         {/* ===================================================================== */}
-        {activeTab === 'requests' && canManageClients && !selectedClient && (
+        {activeTab === 'individuals' && canManageClients && !selectedClient && (
           <div className="space-y-4">
             {/* Compact Real-Time KPI Summary */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center tabular-nums">
               <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-xs">
                 <span className="text-[11px] text-slate-500 block font-bold">
-                  {t('إجمالي الطلبات', 'Total Requests')}
+                  {t('إجمالي الأفراد', 'Total Individuals')}
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-[#0F2438]">{travelers.length}</span>
+                <span className="text-xl sm:text-2xl font-black text-[#0F2438]">
+                  {individualTravelers.length}
+                </span>
+              </div>
+              <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3.5 shadow-xs">
+                <span className="text-[11px] text-emerald-900 block font-bold flex items-center justify-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>{t('متصلون الآن', 'Online Now')}</span>
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-emerald-800">
+                  {individualsOnlineCount}
+                </span>
               </div>
               <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 shadow-xs">
                 <span className="text-[11px] text-sky-900 block font-bold">
@@ -1311,11 +1626,11 @@ export const AdminDashboardWorkspace: React.FC = () => {
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 shadow-xs">
                 <span className="text-[11px] text-amber-900 block font-bold">
-                  {t('ملفات وإيصالات مرفوعة', 'With Uploaded Files')}
+                  {t('ملفات وإيصالات', 'With Files')}
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-amber-900">{withFilesCount}</span>
               </div>
-              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 shadow-xs">
+              <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-3.5 shadow-xs col-span-2 sm:col-span-1">
                 <span className="text-[11px] text-emerald-900 block font-bold">
                   {t('طلبات مكتملة', 'Completed')}
                 </span>
@@ -1342,10 +1657,26 @@ export const AdminDashboardWorkspace: React.FC = () => {
               <div className="flex flex-wrap items-center gap-1.5">
                 {(
                   [
-                    { id: 'all', label: t(`الكل (${travelers.length})`, `All (${travelers.length})`) },
-                    { id: 'active', label: t(`جارية (${activeOrdersCount})`, `Active (${activeOrdersCount})`) },
-                    { id: 'with_files', label: t(`بها مرفقات (${withFilesCount})`, `With Files (${withFilesCount})`) },
-                    { id: 'completed', label: t(`مكتملة (${completedCount})`, `Completed (${completedCount})`) },
+                    {
+                      id: 'all',
+                      label: t(`الكل (${individualTravelers.length})`, `All (${individualTravelers.length})`),
+                    },
+                    {
+                      id: 'online',
+                      label: t(`متصلون الآن (${individualsOnlineCount})`, `Online (${individualsOnlineCount})`),
+                    },
+                    {
+                      id: 'active',
+                      label: t(`جارية (${activeOrdersCount})`, `Active (${activeOrdersCount})`),
+                    },
+                    {
+                      id: 'with_files',
+                      label: t(`بها مرفقات (${withFilesCount})`, `With Files (${withFilesCount})`),
+                    },
+                    {
+                      id: 'completed',
+                      label: t(`مكتملة (${completedCount})`, `Completed (${completedCount})`),
+                    },
                   ] as { id: OrderFilter; label: string }[]
                 ).map((f) => (
                   <button
@@ -1364,7 +1695,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
               </div>
             </div>
 
-            {/* Client Order Cards */}
+            {/* Client Order Cards (Sorted Online First, then Latest Last Seen) */}
             {filteredRequests.length === 0 ? (
               <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-8 text-center text-xs sm:text-sm text-slate-500">
                 {t('لا توجد طلبات أو ملفات عملاء تطابق البحث حالياً.', 'No client requests match your filter.')}
@@ -1375,31 +1706,44 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   const docsCount = client.documents?.length || 0;
                   const receiptsCount = (client.documents || []).filter((d) => d.docType === 'receipt').length;
                   const clientDisplayName = getTravelerDisplayNames(client).fullDisplayName;
+                  const isOnline = isUserCurrentlyOnline(client);
+                  const unreadChat = chatThreads[client.phone]?.unreadAdminCount || 0;
                   return (
                     <div
                       key={client.phone}
                       onClick={() => setSelectedClientPhone(client.phone)}
-                      className="bg-white border border-slate-200 hover:border-[#C6A052]/80 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between"
+                      className={`bg-white border rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between ${
+                        isOnline
+                          ? 'border-emerald-300 ring-1 ring-emerald-200/70'
+                          : 'border-slate-200 hover:border-[#C6A052]/80'
+                      }`}
                     >
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-start justify-between gap-2">
                           <div className="flex items-start gap-3 min-w-0">
-                            {client.avatarUrl ? (
-                              <img
-                                src={getDisplayableDriveImageUrl(client.avatarUrl)}
-                                alt={clientDisplayName}
-                                loading="lazy"
-                                decoding="async"
-                                className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
+                            <div className="relative shrink-0">
+                              {client.avatarUrl ? (
+                                <img
+                                  src={getDisplayableDriveImageUrl(client.avatarUrl)}
+                                  alt={clientDisplayName}
+                                  loading="lazy"
+                                  decoding="async"
+                                  className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
+                                />
+                              ) : (
+                                <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-sm font-black">
+                                  {clientDisplayName.slice(0, 1) || 'م'}
+                                </div>
+                              )}
+                              <span
+                                className={`absolute -bottom-0.5 -end-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
+                                  isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                                }`}
                               />
-                            ) : (
-                              <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-sm font-black shrink-0">
-                                {clientDisplayName.slice(0, 1) || 'م'}
-                              </div>
-                            )}
+                            </div>
 
                             <div className="space-y-1 min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <span className="text-sm sm:text-base font-black text-[#0F2438]">
                                   {clientDisplayName}
                                 </span>
@@ -1408,6 +1752,20 @@ export const AdminDashboardWorkspace: React.FC = () => {
                                   dir="ltr"
                                 >
                                   {client.orderCode || buildOrderCodeFromPhone(client.phone)}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-black flex items-center gap-1 border ${
+                                    isOnline
+                                      ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                      : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}
+                                >
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full ${
+                                      isOnline ? 'bg-emerald-500' : 'bg-slate-400'
+                                    }`}
+                                  />
+                                  <span>{formatLastSeenRelative(client.lastSeenAt, isOnline, lang)}</span>
                                 </span>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border ${
@@ -1536,6 +1894,23 @@ export const AdminDashboardWorkspace: React.FC = () => {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
+                              handleOpenClientChat(client.phone);
+                            }}
+                            className="px-3 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[#0284C7] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <MessageCircle className="w-3.5 h-3.5" />
+                            <span>{t('محادثة فورية', 'Live Chat')}</span>
+                            {unreadChat > 0 && (
+                              <span className="px-1.5 py-0.2 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums">
+                                {unreadChat}
+                              </span>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
                               handleDirectWhatsAppChat(client);
                             }}
                             className="px-3 py-2 rounded-xl bg-[#25D366]/15 hover:bg-[#25D366]/25 text-[#128C7E] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
@@ -1566,9 +1941,499 @@ export const AdminDashboardWorkspace: React.FC = () => {
         )}
 
         {/* ===================================================================== */}
-        {/* TAB 1 DETAIL: FULL CLIENT FOLDER VIEW                                 */}
+        {/* TAB 2: B2B PARTNERS (TRAVEL COMPANIES & AGENCIES) DIRECTORY + CREATE  */}
         {/* ===================================================================== */}
-        {activeTab === 'requests' && canManageClients && selectedClient && (
+        {activeTab === 'b2b_partners' && canManageClients && !selectedClient && (
+          <div className="space-y-5">
+            {/* B2B Header & KPI Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
+              <div className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/60 rounded-2xl p-3.5 shadow-xs">
+                <span className="text-[11px] text-[#0F2438] block font-black">
+                  {t('إجمالي الشركات الشريكة (B2B)', 'Total B2B Partners')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-[#0F2438]">
+                  {b2bPartners.length}
+                </span>
+              </div>
+              <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3.5 shadow-xs">
+                <span className="text-[11px] text-emerald-900 block font-bold flex items-center justify-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>{t('شركات متصلة الآن', 'Partners Online')}</span>
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-emerald-800">
+                  {b2bOnlineCount}
+                </span>
+              </div>
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 shadow-xs">
+                <span className="text-[11px] text-sky-900 block font-bold">
+                  {t('طلبات شركات جارية', 'Active Partner Orders')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-sky-900">
+                  {b2bPartners.filter((p) => normalizeOrderStatusValue(p.orderStatus) !== 'تم تنفيذ الطلب').length}
+                </span>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 shadow-xs">
+                <span className="text-[11px] text-amber-900 block font-bold">
+                  {t('رسائل غير مقروءة', 'Unread B2B Chats')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-amber-900">
+                  {b2bPartners.reduce((acc, p) => acc + (chatThreads[p.phone]?.unreadAdminCount || 0), 0)}
+                </span>
+              </div>
+            </div>
+
+            {/* Dedicated Add & Activate B2B Partner Form */}
+            <form
+              onSubmit={handleCreateB2BPartner}
+              className="bg-gradient-to-br from-[#FAF8F2] via-white to-[#FAF8F2] border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xs"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+                    <Building2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-black text-[#0F2438]">
+                      {t(
+                        'إضافة وتفعيل حساب شركة شريكة جديدة (B2B Partner)',
+                        'Create & Activate New B2B Partner Account'
+                      )}
+                    </h3>
+                    <p className="text-[11px] text-slate-600">
+                      {t(
+                        'تُسجّل الشركة وتُفعّل تلقائياً برقم الهاتف والرمز السري (PIN) للدخول الفوري بدون انتظار OTP',
+                        'Partner account is instantly activated so they can log in directly using phone + PIN'
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <span className="px-2.5 py-1 rounded-full bg-[#C6A052] text-[#0A1926] text-[10.5px] font-black">
+                  {t('تفعيل فوري للشركات', 'Instant B2B Activation')}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
+                <input
+                  type="text"
+                  required
+                  value={b2bCompanyName}
+                  onChange={(e) => setB2bCompanyName(e.target.value)}
+                  placeholder={t('اسم الشركة / الوكالة السياحية *', 'Company / Agency Name *')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold"
+                />
+                <input
+                  type="text"
+                  required
+                  value={b2bContactName}
+                  onChange={(e) => setB2bContactName(e.target.value)}
+                  placeholder={t('اسم مسؤول التواصل *', 'Contact Person Name *')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                />
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  required
+                  dir="ltr"
+                  value={b2bPhone}
+                  onChange={(e) => setB2bPhone(digitsOnly(e.target.value, 20))}
+                  placeholder={t('رقم الواتساب / الهاتف (0-9) *', 'Partner Phone (0-9) *')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                />
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  dir="ltr"
+                  value={b2bPin}
+                  onChange={(e) => setB2bPin(digitsOnly(e.target.value, 6))}
+                  placeholder={t('الرمز السري (6 أرقام 0-9)', '6-Digit PIN (Optional)')}
+                  className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums tracking-widest"
+                />
+                <button
+                  type="submit"
+                  disabled={isCreatingB2B}
+                  className="min-h-[42px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  {isCreatingB2B ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Plus className="w-4 h-4" />
+                  )}
+                  <span>{t('إنشاء وتفعيل الشركة', 'Create B2B Account')}</span>
+                </button>
+              </div>
+
+              {b2bCreateFeedback && (
+                <div
+                  className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                    b2bCreateFeedback.ok
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : 'bg-red-50 border-red-200 text-red-900'
+                  }`}
+                >
+                  {b2bCreateFeedback.ok ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>{b2bCreateFeedback.text}</span>
+                </div>
+              )}
+            </form>
+
+            {/* B2B Search & Online Filter */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center gap-3 shadow-xs">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={b2bSearchQuery}
+                  onChange={(e) => setB2bSearchQuery(e.target.value)}
+                  placeholder={t(
+                    'ابحث باسم الشركة، مسؤول التواصل، رقم الهاتف أو رقم الملف...',
+                    'Search B2B partners by company name, contact person, phone or order code...'
+                  )}
+                  className="w-full ps-10 pe-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#C6A052]"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setB2bOnlineOnly((v) => !v)}
+                className={`px-3.5 py-2.5 rounded-xl text-xs font-black border transition cursor-pointer shrink-0 flex items-center gap-1.5 ${
+                  b2bOnlineOnly
+                    ? 'bg-emerald-600 text-white border-emerald-700'
+                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${b2bOnlineOnly ? 'bg-white' : 'bg-emerald-500'}`} />
+                <span>{t(`المتصلون الآن فقط (${b2bOnlineCount})`, `Online Only (${b2bOnlineCount})`)}</span>
+              </button>
+            </div>
+
+            {/* B2B Partners List */}
+            {filteredB2BPartners.length === 0 ? (
+              <div className="bg-white border border-dashed border-[#C6A052]/60 rounded-2xl p-8 text-center text-xs sm:text-sm text-slate-500">
+                {t(
+                  'لا توجد شركات شريكة مسجلة تطابق البحث حالياً. يمكنك إضافة شركة جديدة من النموذج أعلاه أو ترقية أي عميل حالي.',
+                  'No matching B2B Partners found yet. Create a partner above or upgrade an existing client.'
+                )}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {filteredB2BPartners.map((partner) => {
+                  const docsCount = partner.documents?.length || 0;
+                  const isOnline = isUserCurrentlyOnline(partner);
+                  const unreadChat = chatThreads[partner.phone]?.unreadAdminCount || 0;
+                  const companyTitle = partner.companyName || getTravelerDisplayNames(partner).fullDisplayName;
+                  return (
+                    <div
+                      key={partner.phone}
+                      onClick={() => setSelectedClientPhone(partner.phone)}
+                      className={`bg-white border-2 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between ${
+                        isOnline
+                          ? 'border-emerald-400 ring-1 ring-emerald-200'
+                          : 'border-[#C6A052]/60 hover:border-[#C6A052]'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="flex items-start gap-3 min-w-0">
+                          <div className="relative shrink-0">
+                            {partner.avatarUrl ? (
+                              <img
+                                src={getDisplayableDriveImageUrl(partner.avatarUrl)}
+                                alt={companyTitle}
+                                loading="lazy"
+                                className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052]"
+                              />
+                            ) : (
+                              <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
+                                <Building2 className="w-5 h-5" />
+                              </div>
+                            )}
+                            <span
+                              className={`absolute -bottom-0.5 -end-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
+                                isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                              }`}
+                            />
+                          </div>
+
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-sm sm:text-base font-black text-[#0F2438]">
+                                {companyTitle}
+                              </span>
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
+                                <Building2 className="w-3 h-3" />
+                                <span>{t('شركة شريكة B2B', 'B2B Partner')}</span>
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                  isOnline
+                                    ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                                }`}
+                              >
+                                {formatLastSeenRelative(partner.lastSeenAt, isOnline, lang)}
+                              </span>
+                            </div>
+
+                            <div className="text-xs text-slate-600 tabular-nums flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                              {partner.contactPersonName && (
+                                <span>
+                                  {t('المسؤول:', 'Contact:')}{' '}
+                                  <strong className="text-[#0F2438]">{partner.contactPersonName}</strong>
+                                </span>
+                              )}
+                              <span>·</span>
+                              <span dir="ltr" className="font-bold text-[#0F2438]">
+                                {formatPhoneForDisplay(partner.phone)}
+                              </span>
+                              <span>·</span>
+                              <span>
+                                {t('الملفات:', 'Files:')} <strong className="text-[#0284C7]">{docsCount}</strong>
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <span className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#E5C887] text-[11px] font-black text-[#0F2438]">
+                          {translateOrderStatus(partner.orderStatus, lang)}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenClientChat(partner.phone);
+                          }}
+                          className="px-3 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[#0284C7] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                          <span>{t('المحادثة المباشرة', 'Direct Chat')}</span>
+                          {unreadChat > 0 && (
+                            <span className="px-1.5 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums">
+                              {unreadChat}
+                            </span>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDirectWhatsAppChat(partner);
+                          }}
+                          className="px-3 py-2 rounded-xl bg-[#25D366]/15 hover:bg-[#25D366]/25 text-[#128C7E] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                          <span>{t('واتساب', 'WhatsApp')}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedClientPhone(partner.phone);
+                          }}
+                          className="flex-1 px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" />
+                          <span>{t('فتح ملف الشركة والمستندات', 'Open Partner Folder')}</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* TAB 3: LIVE REAL-TIME CHAT INBOX (SPLIT-PANE CRM MESSAGING)          */}
+        {/* ===================================================================== */}
+        {activeTab === 'live_chat' && canManageClients && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            {/* Conversations Thread List */}
+            <div className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs flex flex-col max-h-[620px]">
+              <div className="p-3 bg-slate-50 border-b border-slate-200 space-y-2.5">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute start-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={chatSearchQuery}
+                    onChange={(e) => setChatSearchQuery(e.target.value)}
+                    placeholder={t('بحث في المحادثات...', 'Search chats...')}
+                    className="w-full ps-8 pe-3 py-2 rounded-xl border border-slate-300 bg-white text-xs text-[#0F2438]"
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { id: 'all', label: t('الكل', 'All') },
+                      { id: 'individual', label: t('الأفراد', 'Individuals') },
+                      { id: 'b2b_partner', label: t('الشركات B2B', 'B2B') },
+                    ] as { id: 'all' | 'individual' | 'b2b_partner'; label: string }[]
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setChatInboxFilter(f.id)}
+                      className={`flex-1 py-1.5 rounded-lg text-[11px] font-black cursor-pointer transition ${
+                        chatInboxFilter === f.id
+                          ? 'bg-[#0F2438] text-[#E5C887]'
+                          : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+                {chatDirectoryClients.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-slate-500">
+                    {t('لا توجد محادثات مطابقة.', 'No matching conversations.')}
+                  </div>
+                ) : (
+                  chatDirectoryClients.map((cl) => {
+                    const thread = chatThreads[cl.phone];
+                    const isOnline = isUserCurrentlyOnline(cl);
+                    const isSelected = activeChatClient?.phone === cl.phone;
+                    const unread = thread?.unreadAdminCount || 0;
+                    const title =
+                      cl.accountType === 'b2b_partner' && cl.companyName
+                        ? cl.companyName
+                        : getTravelerDisplayNames(cl).fullDisplayName;
+                    return (
+                      <button
+                        key={cl.phone}
+                        type="button"
+                        onClick={() => setActiveChatPhone(cl.phone)}
+                        className={`w-full text-start p-3 flex items-center gap-2.5 transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-[#FAF8F2] border-s-4 border-[#C6A052]'
+                            : unread > 0
+                            ? 'bg-red-50/40 hover:bg-slate-50'
+                            : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="relative shrink-0">
+                          {cl.avatarUrl ? (
+                            <img
+                              src={getDisplayableDriveImageUrl(cl.avatarUrl)}
+                              alt={title}
+                              className="w-10 h-10 rounded-full object-cover border border-[#C6A052]"
+                            />
+                          ) : cl.accountType === 'b2b_partner' ? (
+                            <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052] flex items-center justify-center">
+                              <Building2 className="w-4.5 h-4.5" />
+                            </div>
+                          ) : (
+                            <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] flex items-center justify-center text-xs font-black">
+                              {title.slice(0, 1) || 'م'}
+                            </div>
+                          )}
+                          <span
+                            className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                              isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
+                            }`}
+                          />
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="text-xs font-black text-[#0F2438] truncate">
+                              {title}
+                            </span>
+                            {unread > 0 && (
+                              <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black flex items-center justify-center tabular-nums shrink-0">
+                                {unread}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between gap-1.5 mt-0.5">
+                            <span className="text-[11px] text-slate-500 truncate">
+                              {thread?.lastMessageText ||
+                                formatLastSeenRelative(cl.lastSeenAt, isOnline, lang)}
+                            </span>
+                            {cl.accountType === 'b2b_partner' && (
+                              <span className="px-1.5 py-0.2 rounded bg-[#C6A052]/25 text-[#0F2438] text-[9px] font-black shrink-0">
+                                B2B
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Active Conversation Stream */}
+            <div className="lg:col-span-8 space-y-2.5">
+              {activeChatClient ? (
+                <>
+                  <div className="bg-white border border-slate-200 rounded-xl px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="font-bold text-slate-600 tabular-nums" dir="ltr">
+                      +{activeChatClient.phoneNormalized || normalizePhone(activeChatClient.phone)} ·{' '}
+                      {activeChatClient.orderCode || buildOrderCodeFromPhone(activeChatClient.phone)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenClientFromAnyTab(activeChatClient.phone)}
+                      className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      <span>{t('فتح ملف العميل الكامل', 'Open Full Client Folder')}</span>
+                    </button>
+                  </div>
+                  <DirectChatPanel
+                    phone={activeChatClient.phone}
+                    recipientTitle={
+                      activeChatClient.accountType === 'b2b_partner' && activeChatClient.companyName
+                        ? activeChatClient.companyName
+                        : getTravelerDisplayNames(activeChatClient).fullDisplayName
+                    }
+                    recipientSubtitle={
+                      activeChatClient.accountType === 'b2b_partner' &&
+                      activeChatClient.contactPersonName
+                        ? `${t('مسؤول التواصل:', 'Contact:')} ${activeChatClient.contactPersonName}`
+                        : formatPhoneForDisplay(activeChatClient.phone)
+                    }
+                    avatarUrl={activeChatClient.avatarUrl}
+                    accountType={activeChatClient.accountType || 'individual'}
+                    isOnline={isUserCurrentlyOnline(activeChatClient)}
+                    lastSeenAt={activeChatClient.lastSeenAt}
+                    senderRole="admin"
+                    senderName={session?.name || 'المدير العام'}
+                    clientName={getTravelerDisplayNames(activeChatClient).fullDisplayName}
+                    companyName={activeChatClient.companyName}
+                    onInspectImage={(url, title) =>
+                      setPreviewDocImage({ label: title, dataUrl: url })
+                    }
+                  />
+                </>
+              ) : (
+                <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-12 text-center text-sm text-slate-500">
+                  {t('اختر عميلاً أو شركة شريكة لبدء المحادثة المباشرة.', 'Select a client or B2B partner to start chatting.')}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* CLIENT / PARTNER FULL FOLDER DETAIL VIEW                              */}
+        {/* ===================================================================== */}
+        {(activeTab === 'individuals' || activeTab === 'b2b_partners') &&
+          canManageClients &&
+          selectedClient && (
           <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200">
               <div className="flex items-center gap-3">
@@ -1578,37 +2443,79 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
                 >
                   <BackArrow className="w-4 h-4" />
-                  <span>{t('العودة للطلبات', 'Back to Requests')}</span>
+                  <span>
+                    {selectedClient.accountType === 'b2b_partner'
+                      ? t('العودة للشركات الشريكة', 'Back to B2B Partners')
+                      : t('العودة للعملاء الأفراد', 'Back to Individuals')}
+                  </span>
                 </button>
 
                 <div className="flex items-center gap-2.5">
-                  {selectedClient.avatarUrl ? (
-                    <img
-                      src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
-                      alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
-                      loading="lazy"
-                      decoding="async"
-                      className="w-10 h-10 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100"
+                  <div className="relative shrink-0">
+                    {selectedClient.avatarUrl ? (
+                      <img
+                        src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
+                        alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
+                        loading="lazy"
+                        decoding="async"
+                        className="w-10 h-10 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
+                      />
+                    ) : selectedClient.accountType === 'b2b_partner' ? (
+                      <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
+                        <Building2 className="w-5 h-5" />
+                      </div>
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-xs font-black">
+                        {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
+                      </div>
+                    )}
+                    <span
+                      className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-white ${
+                        isUserCurrentlyOnline(selectedClient)
+                          ? 'bg-emerald-500 animate-pulse'
+                          : 'bg-slate-400'
+                      }`}
                     />
-                  ) : (
-                    <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-xs font-black shrink-0">
-                      {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
-                    </div>
-                  )}
+                  </div>
                   <div className="leading-tight">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-xs sm:text-sm font-black text-[#0F2438]">
-                        {getTravelerDisplayNames(selectedClient).fullDisplayName}
+                        {selectedClient.accountType === 'b2b_partner' && selectedClient.companyName
+                          ? selectedClient.companyName
+                          : getTravelerDisplayNames(selectedClient).fullDisplayName}
                       </span>
+                      {selectedClient.accountType === 'b2b_partner' && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
+                          <Building2 className="w-3 h-3" />
+                          <span>{t('شركة شريكة B2B', 'B2B Partner')}</span>
+                        </span>
+                      )}
                       <span
                         className="px-2 py-0.5 rounded-md bg-[#FAF8F2] border border-[#E5C887] text-[10.5px] font-black text-[#0F2438] tabular-nums"
                         dir="ltr"
                       >
                         {selectedClient.orderCode || buildOrderCodeFromPhone(selectedClient.phone)}
                       </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                          isUserCurrentlyOnline(selectedClient)
+                            ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                            : 'bg-slate-50 border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        {formatLastSeenRelative(
+                          selectedClient.lastSeenAt,
+                          isUserCurrentlyOnline(selectedClient),
+                          lang
+                        )}
+                      </span>
                     </div>
                     <span className="text-[11px] text-slate-500 tabular-nums block" dir="ltr">
                       +{selectedClient.phoneNormalized || normalizePhone(selectedClient.phone)}
+                      {selectedClient.accountType === 'b2b_partner' &&
+                      selectedClient.contactPersonName
+                        ? ` · ${selectedClient.contactPersonName}`
+                        : ''}
                     </span>
                   </div>
                 </div>
@@ -1637,6 +2544,26 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   </button>
                 )}
 
+                {selectedClient.accountType !== 'b2b_partner' && (
+                  <button
+                    type="button"
+                    onClick={() => setShowUpgradeB2B((v) => !v)}
+                    className="px-3 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#f2ebd7] border border-[#C6A052] text-[#0F2438] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Building2 className="w-3.5 h-3.5 text-[#9E7B33]" />
+                    <span>{t('ترقية إلى شركة شريكة B2B', 'Upgrade to B2B')}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleOpenClientChat(selectedClient.phone)}
+                  className="px-3.5 py-2 rounded-xl bg-[#0284C7] hover:bg-[#0369A1] text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  <span>{t('المحادثة المباشرة', 'Direct Chat')}</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => handleDirectWhatsAppChat(selectedClient)}
@@ -1647,6 +2574,63 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 </button>
               </div>
             </div>
+
+            {showUpgradeB2B && selectedClient.accountType !== 'b2b_partner' && (
+              <form
+                onSubmit={handleUpgradeSelectedToB2B}
+                className="bg-[#FAF8F2] border-2 border-[#C6A052] rounded-2xl p-4 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-[#9E7B33]" />
+                    <span>
+                      {t(
+                        'ترقية هذا الحساب إلى حساب شركة شريكة (B2B Partner)',
+                        'Upgrade Account to B2B Travel Company'
+                      )}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowUpgradeB2B(false)}
+                    className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer"
+                  >
+                    {t('إلغاء', 'Cancel')}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                  <input
+                    type="text"
+                    required
+                    value={upgradeCompanyName}
+                    onChange={(e) => setUpgradeCompanyName(e.target.value)}
+                    placeholder={t('اسم الشركة / الوكالة *', 'Company Name *')}
+                    className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                  />
+                  <input
+                    type="text"
+                    required
+                    value={upgradeContactName}
+                    onChange={(e) => setUpgradeContactName(e.target.value)}
+                    placeholder={t('اسم مسؤول التواصل *', 'Contact Person *')}
+                    className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isUpgradingB2B}
+                    className="min-h-[38px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {isUpgradingB2B && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>{t('تأكيد الترقية إلى B2B', 'Confirm B2B Upgrade')}</span>
+                  </button>
+                </div>
+                {upgradeB2BFeedback && (
+                  <p className={`text-xs font-bold ${upgradeB2BFeedback.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                    {upgradeB2BFeedback.text}
+                  </p>
+                )}
+              </form>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
               {/* Left/Start: Editable Details & Status */}
@@ -1960,6 +2944,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {selectedClient.documents.map((docItem) => {
                       const clientNames = getTravelerDisplayNames(selectedClient);
+                      const isPdf = docItem.fileName?.toLowerCase().endsWith('.pdf');
                       const dlFilename =
                         docItem.docType === 'passport'
                           ? buildDescriptiveFilename(
@@ -1980,47 +2965,149 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               clientNames.lastName
                             )
                           : docItem.fileName || `${selectedClient.phone}-${docItem.docType}.jpg`;
+                      const docStatus: DocumentReviewStatus = docItem.status || 'received';
+                      const isUpdatingThisDoc = updatingDocStatusId === docItem.id;
                       return (
                         <div
                           key={docItem.id}
-                          className="bg-white border border-slate-200 rounded-xl p-3 space-y-2.5"
+                          className={`bg-white border rounded-xl p-3 space-y-2.5 ${
+                            docStatus === 'pending_completion'
+                              ? 'border-amber-300 ring-1 ring-amber-100'
+                              : docStatus === 'completed'
+                              ? 'border-emerald-300'
+                              : 'border-slate-200'
+                          }`}
                         >
                           <div className="flex items-center gap-3">
-                            <img
-                              src={getDisplayableDriveImageUrl(docItem.dataUrl)}
-                              alt={docItem.label}
-                              loading="lazy"
-                              decoding="async"
-                              className="w-16 h-16 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
-                            />
-                            <div className="min-w-0 flex-1">
+                            {isPdf ? (
+                              <div className="w-14 h-14 rounded-lg bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center shrink-0">
+                                <FileText className="w-6 h-6" />
+                                <span className="text-[9px] font-black">PDF</span>
+                              </div>
+                            ) : (
+                              <img
+                                src={getDisplayableDriveImageUrl(docItem.dataUrl)}
+                                alt={docItem.label}
+                                loading="lazy"
+                                decoding="async"
+                                className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1 space-y-0.5">
                               <span className="text-xs font-black text-[#0F2438] block truncate">
                                 {docItem.label}
                               </span>
                               <span className="text-[11px] text-slate-500 block truncate">
                                 {docItem.fileName}
                               </span>
-                              <span className="text-[10px] text-slate-400 block tabular-nums">
-                                {docItem.uploadedAt?.slice(0, 10)}
-                              </span>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[10px] text-slate-400 tabular-nums">
+                                  {docItem.uploadedAt?.slice(0, 10)}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[9.5px] font-black border ${
+                                    docStatus === 'completed'
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                      : docStatus === 'pending_completion'
+                                      ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                      : 'bg-sky-50 border-sky-200 text-sky-900'
+                                  }`}
+                                >
+                                  {docStatus === 'completed'
+                                    ? t('مكتمل ✓', 'Completed ✓')
+                                    : docStatus === 'pending_completion'
+                                    ? t('مطلوب استكماله', 'Needs Completion')
+                                    : t('تم الاستلام', 'Received')}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Per-Document Admin Review Status Controls */}
+                          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2 space-y-1.5">
+                            <input
+                              type="text"
+                              value={docNoteDrafts[docItem.id] ?? docItem.statusNote ?? ''}
+                              onChange={(e) =>
+                                setDocNoteDrafts((prev) => ({
+                                  ...prev,
+                                  [docItem.id]: e.target.value,
+                                }))
+                              }
+                              placeholder={t(
+                                'ملاحظة على هذا المستند (مثال: يرجى توضيح الصورة)...',
+                                'Optional note on this document...'
+                              )}
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-[11px] text-[#0F2438]"
+                            />
+                            <div className="grid grid-cols-3 gap-1">
+                              {(
+                                [
+                                  {
+                                    id: 'pending_completion' as DocumentReviewStatus,
+                                    label: t('مطلوب استكماله', 'Incomplete'),
+                                    activeCls: 'bg-amber-500 text-white border-amber-600',
+                                  },
+                                  {
+                                    id: 'received' as DocumentReviewStatus,
+                                    label: t('تم الاستلام', 'Received'),
+                                    activeCls: 'bg-[#0284C7] text-white border-[#0284C7]',
+                                  },
+                                  {
+                                    id: 'completed' as DocumentReviewStatus,
+                                    label: t('مكتمل ✓', 'Complete'),
+                                    activeCls: 'bg-emerald-600 text-white border-emerald-700',
+                                  },
+                                ]
+                              ).map((stBtn) => (
+                                <button
+                                  key={stBtn.id}
+                                  type="button"
+                                  disabled={isUpdatingThisDoc}
+                                  onClick={() => void handleUpdateDocumentStatus(docItem.id, stBtn.id)}
+                                  className={`py-1 px-1.5 rounded-lg text-[10px] font-black border transition cursor-pointer disabled:opacity-50 ${
+                                    docStatus === stBtn.id
+                                      ? stBtn.activeCls
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
+                                  }`}
+                                >
+                                  {stBtn.label}
+                                </button>
+                              ))}
                             </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setPreviewDocImage({
-                                  label: docItem.label,
-                                  dataUrl: docItem.dataUrl,
-                                  downloadName: dlFilename,
-                                })
-                              }
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                              <span>{t('معاينة', 'Inspect')}</span>
-                            </button>
+                            {isPdf ? (
+                              <a
+                                href={getDriveViewUrl(
+                                  docItem.dataUrl,
+                                  docItem.viewUrl,
+                                  docItem.storagePath
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                                <span>{t('فتح PDF', 'Open PDF')}</span>
+                              </a>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewDocImage({
+                                    label: docItem.label,
+                                    dataUrl: docItem.dataUrl,
+                                    downloadName: dlFilename,
+                                  })
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>{t('معاينة', 'Inspect')}</span>
+                              </button>
+                            )}
 
                             <button
                               type="button"

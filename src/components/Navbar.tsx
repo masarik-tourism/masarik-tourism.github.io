@@ -20,6 +20,8 @@ import {
   Bell,
   CheckCheck,
   FileCheck2,
+  MessageSquare,
+  Building2,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import {
@@ -50,6 +52,7 @@ interface NavbarProps {
   onOpenTravelerProfile: () => void;
   onSecretAdminTap?: () => void;
   hasUnsavedTravelerDraft?: boolean;
+  chatUnreadCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -61,6 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenTravelerProfile,
   onSecretAdminTap,
   hasUnsavedTravelerDraft = false,
+  chatUnreadCount = 0,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
   const {
@@ -363,6 +367,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                   decoding="async"
                   className="w-6 h-6 sm:w-6.5 sm:h-6.5 rounded-full object-cover border border-[#C6A052] shrink-0 bg-white"
                 />
+              ) : activeTraveler?.accountType === 'b2b_partner' ? (
+                <Building2 className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
               ) : activeTraveler?.verified ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
               ) : (
@@ -371,6 +377,11 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="max-w-[95px] sm:max-w-[140px] truncate">
                 {activeTraveler ? travelerShortFullName : t('حسابي', 'My Account')}
               </span>
+              {chatUnreadCount > 0 && (
+                <span className="min-w-[17px] h-[17px] px-1 rounded-full bg-red-600 text-white text-[9.5px] font-black flex items-center justify-center tabular-nums">
+                  {chatUnreadCount}
+                </span>
+              )}
             </button>
           )}
 
@@ -456,6 +467,26 @@ export const Navbar: React.FC<NavbarProps> = ({
                   )}
                   {hasUnsavedTravelerDraft && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleTravelerTabClick('chat')}
+                  className={`px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                    travelerSection === 'chat'
+                      ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                      : chatUnreadCount > 0
+                      ? 'bg-red-50 text-red-900 border border-red-200 hover:bg-red-100'
+                      : 'text-slate-600 hover:text-[#0F2438] hover:bg-white'
+                  }`}
+                >
+                  <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('المحادثة الفورية', 'Live Chat')}</span>
+                  {chatUnreadCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-red-600 text-white text-[9.5px] font-black tabular-nums">
+                      {chatUnreadCount}
+                    </span>
                   )}
                 </button>
 

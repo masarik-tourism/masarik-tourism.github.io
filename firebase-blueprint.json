@@ -24,6 +24,30 @@
           "description": "Deterministic non-PII order code for quick order status lookup (e.g. MSK-5002428).",
           "maxLength": 32
         },
+        "accountType": {
+          "type": "string",
+          "description": "Account classification separating individuals from corporate B2B partners.",
+          "enum": ["individual", "b2b_partner"]
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Registered company or agency name for B2B Partner accounts.",
+          "maxLength": 160
+        },
+        "contactPersonName": {
+          "type": "string",
+          "description": "Designated manager/contact person name for B2B Partner accounts.",
+          "maxLength": 120
+        },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Live connection heartbeat status."
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "description": "ISO timestamp of last active heartbeat or graceful disconnect.",
+          "maxLength": 64
+        },
         "firstName": {
           "type": "string",
           "description": "Passport first name.",
@@ -394,12 +418,88 @@
         "hasIssuedDocuments",
         "updatedAt"
       ]
+    },
+    "ChatThread": {
+      "title": "Private Real-Time Chat Thread",
+      "description": "Thread metadata and unread counters isolated per client or B2B partner phone ID.",
+      "type": "object",
+      "properties": {
+        "phoneId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "accountType": {
+          "type": "string",
+          "enum": ["individual", "b2b_partner"]
+        },
+        "clientName": { "type": "string", "maxLength": 160 },
+        "companyName": { "type": "string", "maxLength": 160 },
+        "lastMessageText": { "type": "string", "maxLength": 500 },
+        "lastMessageAt": { "type": "string", "maxLength": 64 },
+        "lastSenderRole": { "type": "string", "enum": ["admin", "client"] },
+        "unreadAdminCount": { "type": "number" },
+        "unreadClientCount": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "phoneId",
+        "lastMessageText",
+        "lastMessageAt",
+        "lastSenderRole",
+        "unreadAdminCount",
+        "unreadClientCount",
+        "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "Private Chat Message",
+      "description": "Individual message with optional compressed Google Drive attachments and read-receipt flags inside /chats/{phoneId}/messages/{messageId}.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phoneId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "senderRole": { "type": "string", "enum": ["admin", "client"] },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "attachments": { "type": "array" },
+        "messageType": {
+          "type": "string",
+          "enum": ["text", "files", "status_notice", "quick_reply"]
+        },
+        "readByAdmin": { "type": "boolean" },
+        "readByClient": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "phoneId",
+        "senderRole",
+        "senderName",
+        "text",
+        "attachments",
+        "messageType",
+        "readByAdmin",
+        "readByClient",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
     "/clients/{phoneId}": {
       "schema": { "$ref": "#/entities/ClientProfile" },
-      "description": "Traveler profiles keyed by normalized WhatsApp phone digits."
+      "description": "Traveler & B2B partner profiles keyed by normalized WhatsApp phone digits."
     },
     "/order_status/{phoneId}": {
       "schema": { "$ref": "#/entities/OrderStatusLookup" },
@@ -412,6 +512,14 @@
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminAccount" },
       "description": "Master General Manager config ('master') and Sub-Admin permission accounts."
+    },
+    "/chats/{phoneId}": {
+      "schema": { "$ref": "#/entities/ChatThread" },
+      "description": "Private chat thread summaries isolated per client/B2B partner phoneId."
+    },
+    "/chats/{phoneId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Subcollection of private real-time chat messages and Drive attachment references."
     }
   }
 }

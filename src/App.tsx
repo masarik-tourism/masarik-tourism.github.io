@@ -37,7 +37,9 @@ import {
   setPendingVerificationPhone,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
+  updateUserPresenceCloud,
 } from './utils/travelerStore';
+import { playChatNotificationChime, subscribeChatThread } from './utils/chatStore';
 import { consumeSessionExpiredNotice } from './utils/deviceTrust';
 import { TravelerProfile, TravelerSessionMeta } from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
@@ -114,6 +116,8 @@ export const App: React.FC = () => {
     getTravelerSessionMeta()
   );
   const [sessionExpiredAlert, setSessionExpiredAlert] = useState<string | null>(null);
+  const [chatUnreadCount, setChatUnreadCount] = useState<number>(0);
+  const prevChatUnreadRef = useRef<number | null>(null);
 
   // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
   useEffect(() => {
@@ -224,6 +228,63 @@ export const App: React.FC = () => {
     if (!activeTravelerPhone) return;
     return subscribeActiveTravelerCloud(activeTravelerPhone);
   }, [activeTravelerPhone]);
+
+  // 30-second Live Online/Offline Heartbeat + page exit & visibility presence updater
+  useEffect(() => {
+    if (!activeTravelerPhone) return;
+
+    void updateUserPresenceCloud(activeTravelerPhone, true);
+
+    const heartbeatId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void updateUserPresenceCloud(activeTravelerPhone, true);
+      }
+    }, 30_000);
+
+    const handleVisibility = () => {
+      void updateUserPresenceCloud(
+        activeTravelerPhone,
+        document.visibilityState === 'visible'
+      );
+    };
+
+    const handlePageExit = () => {
+      void updateUserPresenceCloud(activeTravelerPhone, false);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('pagehide', handlePageExit);
+    window.addEventListener('beforeunload', handlePageExit);
+
+    return () => {
+      window.clearInterval(heartbeatId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pagehide', handlePageExit);
+      window.removeEventListener('beforeunload', handlePageExit);
+    };
+  }, [activeTravelerPhone]);
+
+  // Real-time unread chat counter & chime for signed-in traveler / B2B partner
+  useEffect(() => {
+    prevChatUnreadRef.current = null;
+    if (!activeTravelerPhone) {
+      setChatUnreadCount(0);
+      return;
+    }
+
+    return subscribeChatThread(activeTravelerPhone, (thread) => {
+      const nextCount = thread?.unreadClientCount || 0;
+      if (
+        prevChatUnreadRef.current !== null &&
+        nextCount > prevChatUnreadRef.current &&
+        travelerSection !== 'chat'
+      ) {
+        playChatNotificationChime();
+      }
+      prevChatUnreadRef.current = nextCount;
+      setChatUnreadCount(nextCount);
+    });
+  }, [activeTravelerPhone, travelerSection]);
 
   // Real-time cloud subscription for all clients when Admin/Sub-Admin session is active
   useEffect(() => {
@@ -377,6 +438,7 @@ export const App: React.FC = () => {
         onOpenTravelerProfile={() => handleSelectTravelerSection('account')}
         onSecretAdminTap={handleSecretAdminTap}
         hasUnsavedTravelerDraft={travelerDraft.isDirty}
+        chatUnreadCount={chatUnreadCount}
       />
 
       {/* Global Notice Banner if 1-hour Temporary Session Expired while on another page */}
@@ -422,6 +484,7 @@ export const App: React.FC = () => {
             onClearMagicLinkFeedback={() => setMagicLinkFeedback(null)}
             sessionExpiredAlert={sessionExpiredAlert}
             onClearSessionExpiredAlert={() => setSessionExpiredAlert(null)}
+            chatUnreadCount={chatUnreadCount}
             onNavigateToAiScanner={handleNavigateToAiScanner}
             onNavigateToServices={() => handleSelectTab(1)}
             onGoHome={() => handleSelectTab(0)}

@@ -37,9 +37,14 @@ import {
   ExternalLink,
   QrCode,
   MapPin,
+  Building2,
+  MessageSquare,
 } from 'lucide-react';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
+import { DirectChatPanel } from './DirectChatPanel';
 import {
+  AccountType,
+  DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
   PassportAiCheckResult,
@@ -76,6 +81,8 @@ import {
   startTravelerSession,
   subscribePendingClientCloud,
   trustCurrentDeviceCloud,
+  uploadAndSaveAvatarImmediateCloud,
+  uploadBatchFilesToTravelerCloud,
   verifyAccountSecurityOtpCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
@@ -96,7 +103,7 @@ import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
 
-export type TravelerSubTab = 'account' | 'orders' | 'documents';
+export type TravelerSubTab = 'account' | 'orders' | 'documents' | 'chat';
 
 export interface PendingPostAuthFlow {
   phone: string;
@@ -130,6 +137,7 @@ interface TravelerWorkspaceScreenProps {
   onClearMagicLinkFeedback?: () => void;
   sessionExpiredAlert?: string | null;
   onClearSessionExpiredAlert?: () => void;
+  chatUnreadCount?: number;
   onNavigateToAiScanner?: () => void;
   onNavigateToServices?: () => void;
   onGoHome?: () => void;
@@ -151,6 +159,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   onClearMagicLinkFeedback,
   sessionExpiredAlert,
   onClearSessionExpiredAlert,
+  chatUnreadCount = 0,
   onNavigateToAiScanner,
   onNavigateToServices,
   onGoHome,
@@ -164,6 +173,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [otpPurpose, setOtpPurpose] = useState<OtpPurpose>('first_login');
   const [trustedPhone, setTrustedPhone] = useState('');
   const [detectedClientName, setDetectedClientName] = useState('');
+  const [detectedAccountType, setDetectedAccountType] = useState<AccountType>('individual');
+  const [detectedCompanyName, setDetectedCompanyName] = useState('');
   const [loginFirstName, setLoginFirstName] = useState('');
   const [loginLastName, setLoginLastName] = useState('');
   const [loginPhone, setLoginPhone] = useState('');
@@ -250,7 +261,18 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const [showQrPassModal, setShowQrPassModal] = useState(false);
 
+  // Live Camera Capture & Immediate Avatar / Batch Document Upload State
+  const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [capturedSnapshotDataUrl, setCapturedSnapshotDataUrl] = useState<string | null>(null);
+  const [isUploadingAvatarImmediate, setIsUploadingAvatarImmediate] = useState(false);
+  const [isUploadingBatchDocs, setIsUploadingBatchDocs] = useState(false);
+
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const cameraFallbackInputRef = useRef<HTMLInputElement>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const cameraCanvasRef = useRef<HTMLCanvasElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const accountPassportInputRef = useRef<HTMLInputElement>(null);
   const walletFileInputRef = useRef<HTMLInputElement>(null);
   const memberPassportInputRef = useRef<HTMLInputElement>(null);
@@ -688,6 +710,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
 
       if (check.exists && check.profile) {
         setDetectedClientName(check.profile.name || '');
+        setDetectedAccountType(check.accountType);
+        setDetectedCompanyName(check.companyName || check.profile.companyName || '');
 
         const isPendingVerification =
           !check.profile.verified || check.profile.accountStatus === 'pending_verification';
@@ -713,7 +737,11 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           return;
         }
 
-        if (check.isTrustedDevice && check.hasPin) {
+        // Trusted Device OR Verified B2B Partner Account with PIN -> Direct PIN Login (with B2B auto-detect badge)
+        if (
+          (check.isTrustedDevice && check.hasPin) ||
+          (check.isB2BPartner && check.profile.verified && check.hasPin)
+        ) {
           setPinLoginInput('');
           setPinLoginError('');
           onSetPendingOtpPhone(null);
@@ -1334,6 +1362,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setAuthStage('phone_entry');
     setTrustedPhone('');
     setDetectedClientName('');
+    setDetectedAccountType('individual');
+    setDetectedCompanyName('');
     setPinLoginInput('');
     onResetDraft();
     setOtpInput('');
@@ -1343,6 +1373,99 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setSaveFeedback(null);
     setPassportExtractFeedback(null);
     onGoHome?.();
+  };
+
+  const stopCameraStream = () => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, []);
+
+  const handleCloseCameraModal = () => {
+    stopCameraStream();
+    setIsCameraModalOpen(false);
+    setCapturedSnapshotDataUrl(null);
+    setCameraError(null);
+  };
+
+  const handleOpenLiveCamera = async () => {
+    setCameraError(null);
+    setCapturedSnapshotDataUrl(null);
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      cameraFallbackInputRef.current?.click();
+      return;
+    }
+
+    setIsCameraModalOpen(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      cameraStreamRef.current = stream;
+      setTimeout(() => {
+        if (cameraVideoRef.current) {
+          cameraVideoRef.current.srcObject = stream;
+          void cameraVideoRef.current.play().catch(() => {});
+        }
+      }, 60);
+    } catch {
+      stopCameraStream();
+      setIsCameraModalOpen(false);
+      cameraFallbackInputRef.current?.click();
+    }
+  };
+
+  const handleCaptureCameraSnapshot = () => {
+    const video = cameraVideoRef.current;
+    const canvas = cameraCanvasRef.current;
+    if (!video || !canvas) return;
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 640;
+    const size = Math.min(vw, vh);
+    const sx = Math.max(0, Math.floor((vw - size) / 2));
+    const sy = Math.max(0, Math.floor((vh - size) / 2));
+    canvas.width = 520;
+    canvas.height = 520;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, 520, 520);
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, 520, 520);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.84);
+    setCapturedSnapshotDataUrl(dataUrl);
+  };
+
+  const handleConfirmSaveCapturedAvatar = async () => {
+    if (!activeTraveler || !capturedSnapshotDataUrl) return;
+    setIsUploadingAvatarImmediate(true);
+    setSaveFeedback(null);
+    try {
+      await uploadAndSaveAvatarImmediateCloud(activeTraveler.phone, capturedSnapshotDataUrl);
+      onUpdateDraft((prev) => ({
+        ...prev,
+        pendingAvatarPreviewUrl: '',
+      }));
+      handleCloseCameraModal();
+      setSaveFeedback({
+        type: 'success',
+        text: t(
+          'تم التقاط وحفظ صورتك الشخصية بنجاح في السحابة وتحديث حسابك فوراً.',
+          'Selfie avatar captured and saved to cloud immediately!'
+        ),
+      });
+    } catch {
+      setCameraError(t('تعذر حفظ الصورة. يرجى المحاولة مجدداً.', 'Failed to save captured photo.'));
+    } finally {
+      setIsUploadingAvatarImmediate(false);
+    }
   };
 
   // AI OCR Extraction updating lifted draft immediately (and preserving across navigation)
@@ -1430,13 +1553,29 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const file = e.target.files?.[0];
     if (!file) return;
     setSaveFeedback(null);
+    setIsUploadingAvatarImmediate(true);
     try {
-      const compressed = await compressImageToDataUrl(file, 520, 0.8);
-      onUpdateDraft((prev) => ({
-        ...prev,
-        pendingAvatarPreviewUrl: compressed.dataUrl,
-        isDirty: true,
-      }));
+      const compressed = await compressImageToDataUrl(file, 520, 0.82);
+      if (activeTraveler) {
+        await uploadAndSaveAvatarImmediateCloud(activeTraveler.phone, compressed.dataUrl);
+        onUpdateDraft((prev) => ({
+          ...prev,
+          pendingAvatarPreviewUrl: '',
+        }));
+        setSaveFeedback({
+          type: 'success',
+          text: t(
+            'تم رفع وحفظ الصورة الشخصية فوراً في حسابك بنجاح.',
+            'Personal photo uploaded and saved immediately!'
+          ),
+        });
+      } else {
+        onUpdateDraft((prev) => ({
+          ...prev,
+          pendingAvatarPreviewUrl: compressed.dataUrl,
+          isDirty: true,
+        }));
+      }
     } catch {
       setSaveFeedback({
         type: 'error',
@@ -1445,8 +1584,11 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           'Could not process personal photo. Please select a valid JPG or PNG file.'
         ),
       });
+    } finally {
+      setIsUploadingAvatarImmediate(false);
     }
     if (avatarInputRef.current) avatarInputRef.current.value = '';
+    if (cameraFallbackInputRef.current) cameraFallbackInputRef.current.value = '';
   };
 
   const handleStagePassportPhotoFromAccount = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1484,9 +1626,48 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   };
 
   const handleStageWalletDoc = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0 || !activeTraveler) return;
     setSaveFeedback(null);
+
+    const hasPdfOrBatch =
+      files.length > 1 ||
+      files.some(
+        (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+      );
+
+    if (hasPdfOrBatch) {
+      setIsUploadingBatchDocs(true);
+      try {
+        const res = await uploadBatchFilesToTravelerCloud(
+          activeTraveler.phone,
+          files,
+          docType,
+          docLabel.trim()
+        );
+        if (res.uploadedCount > 0) {
+          setSaveFeedback({
+            type: 'success',
+            text: t(
+              `تم ضغط ورفع ${res.uploadedCount} ملف/مستند بنجاح إلى محفظتك السحابية.`,
+              `Successfully compressed & uploaded ${res.uploadedCount} file(s) to your cloud wallet.`
+            ),
+          });
+        }
+        if (res.errors.length > 0) {
+          setSaveFeedback({
+            type: 'error',
+            text: res.errors[0],
+          });
+        }
+      } finally {
+        setIsUploadingBatchDocs(false);
+        if (walletFileInputRef.current) walletFileInputRef.current.value = '';
+      }
+      return;
+    }
+
+    const file = files[0];
     try {
       const compressed = await compressImageToDataUrl(file, 1100, 0.76);
       const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1544,9 +1725,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const committedKeptDocs = (activeTraveler?.documents || []).filter(
     (d) => !draft.removedDocIds.includes(d.id)
   );
-  const combinedDocuments = [
-    ...draft.pendingDocuments.map((d) => ({ ...d, isStaged: true })),
-    ...committedKeptDocs.map((d) => ({ ...d, isStaged: false })),
+  const combinedDocuments: Array<
+    | (typeof draft.pendingDocuments[number] & { isStaged: true })
+    | (TravelerDocument & { isStaged: false })
+  > = [
+    ...draft.pendingDocuments.map((d) => ({ ...d, isStaged: true as const })),
+    ...committedKeptDocs.map((d) => ({ ...d, isStaged: false as const })),
   ];
 
   const effectiveAvatarUrl = draft.pendingAvatarPreviewUrl || activeTraveler?.avatarUrl || '';
@@ -1904,17 +2088,38 @@ Please advise on the next steps for my application.`
               </form>
             )}
 
-            {/* STAGE 2A: TRUSTED DEVICE QUICK 6-DIGIT PIN LOGIN */}
+            {/* STAGE 2A: TRUSTED DEVICE OR B2B PARTNER QUICK 6-DIGIT PIN LOGIN */}
             {authStage === 'pin_login' && (
               <div className="p-5 sm:p-6 space-y-5">
-                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 space-y-2 text-center">
-                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-600 text-white text-[11px] font-black">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>{t('جهاز موثوق · دخول سريع', 'Trusted Device · Quick Login')}</span>
-                  </div>
-                  {detectedClientName && (
-                    <span className="text-sm font-black text-[#0F2438] block pt-1">
-                      {t(`مرحباً بعودتك، ${detectedClientName}`, `Welcome back, ${detectedClientName}`)}
+                <div
+                  className={`border rounded-2xl p-4 space-y-2 text-center ${
+                    detectedAccountType === 'b2b_partner'
+                      ? 'bg-gradient-to-br from-[#FAF6EA] to-amber-50 border-[#C6A052]'
+                      : 'bg-emerald-50 border-emerald-200'
+                  }`}
+                >
+                  {detectedAccountType === 'b2b_partner' ? (
+                    <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-[11px] font-black shadow-xs">
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span>{t('حساب شركة شريكة (B2B Partner)', 'B2B Corporate Partner Account')}</span>
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-600 text-white text-[11px] font-black">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>{t('جهاز موثوق · دخول سريع', 'Trusted Device · Quick Login')}</span>
+                    </div>
+                  )}
+                  {(detectedCompanyName || detectedClientName) && (
+                    <span className="text-sm sm:text-base font-black text-[#0F2438] block pt-1">
+                      {detectedAccountType === 'b2b_partner'
+                        ? t(
+                            `مرحباً بشركائنا، ${detectedCompanyName || detectedClientName}`,
+                            `Welcome Partner, ${detectedCompanyName || detectedClientName}`
+                          )
+                        : t(
+                            `مرحباً بعودتك، ${detectedClientName}`,
+                            `Welcome back, ${detectedClientName}`
+                          )}
                     </span>
                   )}
                   <span className="text-xs font-bold text-slate-600 tabular-nums block" dir="ltr">
@@ -3128,8 +3333,16 @@ Please advise on the next steps for my application.`
             <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base sm:text-xl font-black text-white truncate">
-                  {headerDisplayName}
+                  {activeTraveler.accountType === 'b2b_partner' && activeTraveler.companyName
+                    ? activeTraveler.companyName
+                    : headerDisplayName}
                 </h1>
+                {activeTraveler.accountType === 'b2b_partner' && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-[11px] font-black shadow-xs">
+                    <Building2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t('حساب شركة شريكة (B2B)', 'B2B Partner')}</span>
+                  </span>
+                )}
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-[11px] font-bold text-emerald-300">
                   <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
                   <span>{t('حساب موثق', 'Verified')}</span>
@@ -3157,6 +3370,11 @@ Please advise on the next steps for my application.`
                 )}
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300 tabular-nums">
+                {activeTraveler.accountType === 'b2b_partner' && activeTraveler.contactPersonName && (
+                  <span className="text-[#E5C887] font-bold">
+                    {t('المسؤول:', 'Contact:')} {activeTraveler.contactPersonName} ·
+                  </span>
+                )}
                 <span dir="ltr">
                   {formatPhoneForDisplay(activeTraveler.phone)} · +
                   {activeTraveler.phoneNormalized || activeTraveler.phone}
@@ -3233,6 +3451,26 @@ Please advise on the next steps for my application.`
                 `Issued Docs & Wallet (${combinedDocuments.length + issuedDocuments.length})`
               )}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onChangeSubTab('chat')}
+            className={`px-4 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap ${
+              subTab === 'chat'
+                ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                : chatUnreadCount > 0
+                ? 'bg-red-50 text-red-900 border border-red-200 hover:bg-red-100'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4 shrink-0" />
+            <span>{t('المحادثة المباشرة', 'Live Chat')}</span>
+            {chatUnreadCount > 0 && (
+              <span className="min-w-[20px] h-[20px] px-1.5 rounded-full bg-red-600 text-white text-[10.5px] font-black flex items-center justify-center tabular-nums">
+                {chatUnreadCount}
+              </span>
+            )}
           </button>
         </div>
 
@@ -3337,19 +3575,44 @@ Please advise on the next steps for my application.`
                     onChange={handleStageAvatar}
                     className="hidden"
                   />
+                  <input
+                    ref={cameraFallbackInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="user"
+                    onChange={handleStageAvatar}
+                    className="hidden"
+                  />
 
-                  <button
-                    type="button"
-                    onClick={() => avatarInputRef.current?.click()}
-                    className="w-full min-h-[42px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
-                  >
-                    <Upload className="w-4 h-4" />
-                    <span>
-                      {effectiveAvatarUrl
-                        ? t('تغيير الصورة الشخصية', 'Change Personal Photo')
-                        : t('رفع الصورة الشخصية (إلزامي)', 'Upload Personal Photo (Required)')}
-                    </span>
-                  </button>
+                  <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={isUploadingAvatarImmediate}
+                      onClick={() => void handleOpenLiveCamera()}
+                      className="min-h-[42px] px-3 py-2 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-60"
+                    >
+                      <Camera className="w-4 h-4 shrink-0" />
+                      <span>{t('التقاط بالكاميرا', 'Take Camera Selfie')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isUploadingAvatarImmediate}
+                      onClick={() => avatarInputRef.current?.click()}
+                      className="min-h-[42px] px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-60"
+                    >
+                      {isUploadingAvatarImmediate ? (
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                      ) : (
+                        <Upload className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>
+                        {effectiveAvatarUrl
+                          ? t('تغيير من الجهاز', 'Upload Photo')
+                          : t('رفع من الجهاز', 'Upload Photo')}
+                      </span>
+                    </button>
+                  </div>
 
                   {effectiveAvatarUrl && (
                     <div className="w-full grid grid-cols-2 gap-2">
@@ -4596,18 +4859,28 @@ Please advise on the next steps for my application.`
               <input
                 ref={walletFileInputRef}
                 type="file"
-                accept="image/*"
+                multiple
+                accept="image/*,.pdf"
                 onChange={handleStageWalletDoc}
                 className="hidden"
               />
 
               <button
                 type="button"
+                disabled={isUploadingBatchDocs}
                 onClick={() => walletFileInputRef.current?.click()}
-                className="min-h-[42px] px-4 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+                className="min-h-[42px] px-4 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer whitespace-nowrap disabled:opacity-60"
               >
-                <Upload className="w-4 h-4" />
-                <span>{t('إرفاق صورة للمحفظة', 'Attach Document')}</span>
+                {isUploadingBatchDocs ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4" />
+                )}
+                <span>
+                  {isUploadingBatchDocs
+                    ? t('جاري الضغط والرفع...', 'Compressing & Uploading...')
+                    : t('رفع صور أو ملفات PDF (متعدد)', 'Upload Photos / PDFs (Batch)')}
+                </span>
               </button>
             </div>
 
@@ -4639,24 +4912,41 @@ Please advise on the next steps for my application.`
             {/* Document Cards Grid */}
             {combinedDocuments.length > 0 ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {combinedDocuments.map((doc) => (
+                {combinedDocuments.map((doc) => {
+                  const isPdfFile = (doc.fileName || '').toLowerCase().endsWith('.pdf');
+                  const savedDoc = doc.isStaged ? null : doc;
+                  const docStatus: DocumentReviewStatus | undefined = savedDoc?.status;
+                  const docStatusNote: string | undefined = savedDoc?.statusNote;
+
+                  return (
                   <div
                     key={doc.id}
                     className={`rounded-2xl p-3 border flex flex-col justify-between gap-3 ${
                       doc.isStaged
                         ? 'bg-amber-50/50 border-amber-300'
+                        : docStatus === 'pending_completion'
+                        ? 'bg-red-50/40 border-red-200'
+                        : docStatus === 'completed'
+                        ? 'bg-emerald-50/40 border-emerald-200'
                         : 'bg-slate-50 border-slate-200'
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <img
-                        src={getDisplayableDriveImageUrl(doc.dataUrl)}
-                        alt={doc.label}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 bg-white cursor-pointer"
-                        onClick={() => setPreviewLightbox({ label: doc.label, dataUrl: doc.dataUrl })}
-                      />
+                      {isPdfFile ? (
+                        <div className="w-16 h-16 rounded-xl border border-slate-200 bg-red-50 text-red-600 flex flex-col items-center justify-center shrink-0">
+                          <FileText className="w-6 h-6" />
+                          <span className="text-[9px] font-black mt-0.5">PDF</span>
+                        </div>
+                      ) : (
+                        <img
+                          src={getDisplayableDriveImageUrl(doc.dataUrl)}
+                          alt={doc.label}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 bg-white cursor-pointer"
+                          onClick={() => setPreviewLightbox({ label: doc.label, dataUrl: doc.dataUrl })}
+                        />
+                      )}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-black text-[#0F2438] truncate">
@@ -4666,16 +4956,52 @@ Please advise on the next steps for my application.`
                         <span className="text-[11px] text-slate-500 block truncate">
                           {doc.fileName}
                         </span>
-                        {doc.isStaged && (
+                        {doc.isStaged ? (
                           <span className="inline-block mt-1 px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-bold text-amber-900">
                             {t('بانتظار الحفظ', 'Pending Save')}
                           </span>
+                        ) : docStatus ? (
+                          <span
+                            className={`inline-block mt-1 px-2 py-0.5 rounded-full border text-[10px] font-black ${
+                              docStatus === 'completed'
+                                ? 'bg-emerald-100 border-emerald-300 text-emerald-900'
+                                : docStatus === 'pending_completion'
+                                ? 'bg-red-100 border-red-300 text-red-900'
+                                : 'bg-sky-100 border-sky-300 text-sky-900'
+                            }`}
+                          >
+                            {docStatus === 'completed'
+                              ? t('مكتمل ومعتمد ✓', 'Completed ✓')
+                              : docStatus === 'pending_completion'
+                              ? t('مطلوب استكماله', 'Needs Completion')
+                              : t('تم الاستلام', 'Received')}
+                          </span>
+                        ) : null}
+                        {docStatusNote && (
+                          <p className="text-[10.5px] font-bold text-amber-900 mt-1 leading-snug">
+                            {docStatusNote}
+                          </p>
                         )}
                       </div>
                     </div>
 
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
                         <div className="flex flex-wrap items-center gap-1.5">
+                          {isPdfFile ? (
+                            <a
+                              href={getDriveViewUrl(
+                                doc.dataUrl,
+                                savedDoc?.viewUrl,
+                                savedDoc?.storagePath
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-[#0F2438] flex items-center gap-1"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>{t('فتح PDF', 'Open PDF')}</span>
+                            </a>
+                          ) : (
                           <button
                             type="button"
                             onClick={() =>
@@ -4703,6 +5029,7 @@ Please advise on the next steps for my application.`
                             <Eye className="w-3.5 h-3.5" />
                             <span>{t('عرض', 'View')}</span>
                           </button>
+                          )}
 
                           {doc.dataUrl && (
                             <button
@@ -4769,8 +5096,9 @@ Please advise on the next steps for my application.`
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
+              </div>
               ) : (
                 <div className="bg-slate-50 border border-dashed border-slate-300 rounded-2xl p-8 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
                   <FileText className="w-6 h-6 text-slate-400" />
@@ -4820,7 +5148,127 @@ Please advise on the next steps for my application.`
 
         {/* SUB-TAB 3 EXTRA: FAMILY MEMBERS & COMPANIONS CLOUD VAULT */}
         {subTab === 'documents' && renderFamilyVaultSection()}
+
+        {/* SUB-TAB 4: DIRECT LIVE CHAT WITH MASARIK MANAGEMENT */}
+        {subTab === 'chat' && (
+          <DirectChatPanel
+            phone={activeTraveler.phone}
+            recipientTitle={t('إدارة مسارك للإنجاز السياحي', 'Masarik Tourism Support')}
+            recipientSubtitle={
+              activeTraveler.accountType === 'b2b_partner'
+                ? t('قناة دعم شركاء الشركات (B2B)', 'B2B Partner Priority Support')
+                : t('رد فوري وتبادل الصور وملفات PDF', 'Live support & document exchange')
+            }
+            senderRole="client"
+            senderName={
+              activeTraveler.accountType === 'b2b_partner' && activeTraveler.companyName
+                ? activeTraveler.companyName
+                : headerDisplayName
+            }
+            accountType={activeTraveler.accountType || 'individual'}
+            clientName={headerDisplayName}
+            companyName={activeTraveler.companyName}
+            onInspectImage={(url, title) =>
+              setPreviewLightbox({ label: title, dataUrl: url, downloadName: title })
+            }
+          />
+        )}
       </div>
+
+      {/* Live Camera Selfie Capture Modal */}
+      {isCameraModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={handleCloseCameraModal}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-md w-full overflow-hidden shadow-2xl border border-[#C6A052]"
+            onClick={(e) => e.stopPropagation()}
+            dir={dir}
+          >
+            <div className="bg-[#0F2438] text-white px-4 py-3 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Camera className="w-4.5 h-4.5 text-[#E5C887]" />
+                <span className="text-sm font-black">
+                  {t('التقاط صورة شخصية مباشرة', 'Live Camera Selfie Capture')}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseCameraModal}
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <div className="relative aspect-square w-full max-w-[320px] mx-auto rounded-2xl overflow-hidden bg-slate-900 border-2 border-[#C6A052]">
+                {capturedSnapshotDataUrl ? (
+                  <img
+                    src={capturedSnapshotDataUrl}
+                    alt="Captured Selfie"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <video
+                    ref={cameraVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover scale-x-[-1]"
+                  />
+                )}
+              </div>
+              <canvas ref={cameraCanvasRef} className="hidden" />
+
+              {cameraError && (
+                <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-red-700 text-center">
+                  {cameraError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-center gap-2.5">
+                {!capturedSnapshotDataUrl ? (
+                  <button
+                    type="button"
+                    onClick={handleCaptureCameraSnapshot}
+                    className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs sm:text-sm font-black flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>{t('التقاط الصورة الآن', 'Capture Photo')}</span>
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isUploadingAvatarImmediate}
+                      onClick={() => setCapturedSnapshotDataUrl(null)}
+                      className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      <span>{t('إعادة الالتقاط', 'Retake')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isUploadingAvatarImmediate}
+                      onClick={() => void handleConfirmSaveCapturedAvatar()}
+                      className="flex-1 min-h-[44px] px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                    >
+                      {isUploadingAvatarImmediate ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Check className="w-4 h-4" />
+                      )}
+                      <span>{t('اعتماد وحفظ فوراً', 'Confirm & Save')}</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Document Lightbox Preview Modal */}
       {previewLightbox && (

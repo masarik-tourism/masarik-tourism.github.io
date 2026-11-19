@@ -81,6 +81,10 @@ export interface ClientNotification {
   read: boolean;
 }
 
+export type AccountType = 'individual' | 'b2b_partner';
+
+export type DocumentReviewStatus = 'pending_completion' | 'received' | 'completed';
+
 export interface TravelerDocument {
   id: string;
   label: string;
@@ -91,6 +95,9 @@ export interface TravelerDocument {
   storagePath?: string;
   sizeBytes?: number;
   uploadedAt: string;
+  status?: DocumentReviewStatus;
+  statusNote?: string;
+  statusUpdatedAt?: string;
 }
 
 export interface AppointmentDetails {
@@ -159,6 +166,9 @@ export interface TravelerProfile {
   phone: string;
   phoneNormalized?: string;
   orderCode?: string;
+  accountType?: AccountType;
+  companyName?: string;
+  contactPersonName?: string;
   firstName?: string;
   lastName?: string;
   name: string;
@@ -177,6 +187,8 @@ export interface TravelerProfile {
   verified: boolean;
   accountStatus?: AccountVerificationStatus;
   verifiedAt?: string;
+  isOnline?: boolean;
+  lastSeenAt?: string;
   createdAt: string;
   updatedAt?: string;
   orderStatus: VisaOrderStatus;
@@ -191,6 +203,44 @@ export interface TravelerProfile {
   issuedDocuments?: IssuedDocument[];
   notifications?: ClientNotification[];
   appointmentDetails?: AppointmentDetails;
+}
+
+export type ChatSenderRole = 'admin' | 'client';
+
+export interface ChatAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  downloadUrl: string;
+  viewUrl?: string;
+  storagePath?: string;
+  sizeBytes?: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  phoneId: string;
+  senderRole: ChatSenderRole;
+  senderName: string;
+  text: string;
+  attachments: ChatAttachment[];
+  messageType: 'text' | 'files' | 'status_notice' | 'quick_reply';
+  readByAdmin: boolean;
+  readByClient: boolean;
+  createdAt: string;
+}
+
+export interface ChatThreadSummary {
+  phoneId: string;
+  accountType?: AccountType;
+  clientName?: string;
+  companyName?: string;
+  lastMessageText: string;
+  lastMessageAt: string;
+  lastSenderRole: ChatSenderRole;
+  unreadAdminCount: number;
+  unreadClientCount: number;
+  updatedAt: string;
 }
 
 export interface PublicOrderStatusSummary {
