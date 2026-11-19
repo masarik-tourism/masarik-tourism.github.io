@@ -312,6 +312,12 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             );
           })}
+          <a
+            href="/privacy.html"
+            className="px-3 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap text-slate-700 hover:text-[#0F2438] hover:bg-white"
+          >
+            {t('سياسة الخصوصية', 'Privacy Policy')}
+          </a>
         </nav>
 
         {/* End Side: Admin Role Badge (when active) OR Traveler Account Button (with Avatar) + Hamburger Menu */}
@@ -732,6 +738,14 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             );
           })}
+
+          <a
+            href="/privacy.html"
+            onClick={() => setMobileMenuOpen(false)}
+            className="w-full text-start px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-between text-slate-700 hover:bg-slate-50"
+          >
+            <span>{t('سياسة الخصوصية', 'Privacy Policy')}</span>
+          </a>
 
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button

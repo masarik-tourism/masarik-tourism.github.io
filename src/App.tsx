@@ -517,6 +517,14 @@ export const App: React.FC = () => {
                   <span>{t('بيانات الاتصال ومقر الفروع', 'Contact & Office Address')}</span>
                 </button>
               </li>
+              <li>
+                <a
+                  href="/privacy.html"
+                  className="hover:text-[#E5C887] text-slate-200 transition flex items-center gap-1 cursor-pointer text-start font-semibold"
+                >
+                  <span>{t('سياسة الخصوصية', 'Privacy Policy')}</span>
+                </a>
+              </li>
             </ul>
           </div>
 
@@ -547,11 +555,15 @@ export const App: React.FC = () => {
                 </span>
               </button>
 
-              <div className="flex items-center gap-2 text-slate-300">
+              <div className="flex items-center gap-2 text-slate-300 min-w-0">
                 <Mail className="w-4 h-4 text-[#C6A052] shrink-0" />
-                <span className="truncate">
-                  {t('البريد:', 'Email:')} {TravelRepository.OFFICIAL_EMAIL}
-                </span>
+                <a
+                  href={`mailto:${TravelRepository.OFFICIAL_EMAIL}`}
+                  dir="ltr"
+                  className="text-[11.5px] sm:text-xs md:text-[11px] lg:text-[12.5px] font-medium hover:text-[#E5C887] transition break-all"
+                >
+                  {TravelRepository.OFFICIAL_EMAIL}
+                </a>
               </div>
 
               <div className="flex items-center gap-2 text-slate-300">
