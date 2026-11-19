@@ -11,10 +11,11 @@ import {
   dialPhoneNumber,
   openCustomerServiceWhatsApp,
 } from './utils/communication';
-import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight, ShieldAlert, X } from 'lucide-react';
+import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight, ShieldAlert, X, Smartphone, RefreshCw } from 'lucide-react';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
 import { InAppVersionBanner } from './components/InAppVersionBanner';
+import { CURRENT_APP_VERSION, triggerApkUpdateModal } from './hooks/useLatestApkUrl';
 import {
   PendingPostAuthFlow,
   TravelerSubTab,
@@ -24,7 +25,6 @@ import { AdminLoginModal } from './components/AdminLoginModal';
 import { AdminDashboardWorkspace } from './components/AdminDashboardWorkspace';
 import { LiveInlineEditorEngine } from './components/LiveInlineEditorEngine';
 import {
-  OTP_ACTIVATION_WHATSAPP_NUMBER,
   TRAVELERS_UPDATED_EVENT,
   TravelerProfileDraft,
   activateViaMagicLinkCloud,
@@ -532,14 +532,6 @@ export const App: React.FC = () => {
                 </span>
               </button>
 
-              <div className="flex items-center gap-2 text-slate-400 text-[11px] tabular-nums">
-                <ShieldCheck className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
-                <span>
-                  {t('خط أكواد التفعيل (OTP):', 'OTP Activation Line:')}{' '}
-                  <span dir="ltr">{OTP_ACTIVATION_WHATSAPP_NUMBER}</span>
-                </span>
-              </div>
-
               <div className="flex items-center gap-2 text-slate-300">
                 <Mail className="w-4 h-4 text-[#C6A052] shrink-0" />
                 <span className="truncate">
@@ -570,6 +562,42 @@ export const App: React.FC = () => {
                 <ArrowUpRight className="w-3 h-3 text-slate-400" />
               </a>
             </div>
+          </div>
+        </div>
+
+        {/* Footer Interactive App Install & Update Check CTA */}
+        <div className="max-w-5xl mx-auto px-4 mb-6">
+          <div className="bg-white/[0.04] border border-[#C6A052]/40 rounded-2xl px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-center sm:text-start">
+              <div className="w-9 h-9 rounded-xl bg-[#C6A052]/15 border border-[#C6A052]/40 text-[#E5C887] flex items-center justify-center shrink-0">
+                <Smartphone className="w-4.5 h-4.5" />
+              </div>
+              <div>
+                <span className="text-xs sm:text-sm font-black text-white block">
+                  {t('تطبيق مسارك للإنجاز السياحي (Android)', 'Masarik Tourism Official App (Android)')}
+                </span>
+                <span className="text-[11px] text-slate-400 block">
+                  {t(
+                    'التحقق المباشر من التحديثات وتثبيت النسخة الرسمية',
+                    'Direct update check & official release installer'
+                  )}
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => triggerApkUpdateModal('check')}
+              className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer whitespace-nowrap tabular-nums"
+            >
+              <RefreshCw className="w-4 h-4 shrink-0" />
+              <span>
+                {t(
+                  `تثبيت التطبيق / التحقق من التحديثات (${CURRENT_APP_VERSION})`,
+                  `Install App / Check for Updates (${CURRENT_APP_VERSION})`
+                )}
+              </span>
+            </button>
           </div>
         </div>
 

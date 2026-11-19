@@ -187,11 +187,11 @@ function getAutoEditableKey(el: HTMLElement, root: HTMLElement): string {
 
 export const LiveInlineEditorEngine: React.FC<{ rootId: string }> = ({ rootId }) => {
   const { lang, dir, t } = useLanguage();
-  const { isLiveEditorMode, hasPermission, setAdminMode } = useAdmin();
+  const { isLiveEditorMode, isEditUnlocked, hasPermission, setAdminMode } = useAdmin();
   const cmsState = useCmsState();
 
-  const canEdit = isLiveEditorMode && hasPermission('edit_content');
-  const canDelete = isLiveEditorMode && hasPermission('delete_records');
+  const canEdit = isLiveEditorMode && isEditUnlocked && hasPermission('edit_content');
+  const canDelete = isLiveEditorMode && isEditUnlocked && hasPermission('delete_records');
 
   const [hoveredTarget, setHoveredTarget] = useState<ActiveTarget | null>(null);
   const [editingTarget, setEditingTarget] = useState<ActiveTarget | null>(null);

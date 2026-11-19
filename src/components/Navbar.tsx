@@ -69,6 +69,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     isSuperAdmin,
     isDashboardMode,
     isLiveEditorMode,
+    isEditUnlocked,
     setAdminMode,
     logoutAdmin,
     hasPermission,
@@ -619,9 +620,9 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Sparkles className="w-3.5 h-3.5 shrink-0" />
                 <span>
-                  {hasPermission('edit_content')
+                  {isEditUnlocked && hasPermission('edit_content')
                     ? t('معاينة الموقع والتعديل المباشر', 'Live Site Editor')
-                    : t('معاينة الموقع', 'Preview Website')}
+                    : t('معاينة الموقع (وضع آمن)', 'Preview Site (Safe)')}
                 </span>
               </button>
 

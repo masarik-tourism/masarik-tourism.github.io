@@ -19,12 +19,16 @@ interface AdminContextValue {
   isSuperAdmin: boolean;
   isDashboardMode: boolean;
   isLiveEditorMode: boolean;
+  isEditUnlocked: boolean;
   loginModalOpen: boolean;
   openAdminLoginModal: () => void;
   closeAdminLoginModal: () => void;
   loginWithPin: (pin: string, lang: 'ar' | 'en') => { ok: boolean; error?: string };
   logoutAdmin: () => void;
   setAdminMode: (mode: AdminSession['mode']) => void;
+  unlockEditMode: () => void;
+  lockEditMode: () => void;
+  toggleEditLock: () => void;
   hasPermission: (perm: AdminPermission) => boolean;
 }
 
@@ -33,6 +37,8 @@ const AdminContext = createContext<AdminContextValue | null>(null);
 export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [session, setSession] = useState<AdminSession | null>(() => getActiveAdminSession());
   const [loginModalOpen, setLoginModalOpen] = useState<boolean>(false);
+  // Always start in Safe Follow-Up & Reception Mode (Edit Lock Active)
+  const [isEditUnlocked, setIsEditUnlocked] = useState<boolean>(false);
 
   useEffect(() => {
     const sync = () => setSession(getActiveAdminSession());
@@ -45,12 +51,12 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   useEffect(() => {
-    if (session?.mode === 'live_editor') {
+    if (session?.mode === 'live_editor' && isEditUnlocked) {
       beginCmsDraftSession();
     } else {
       discardCmsDraftSession();
     }
-  }, [session?.mode]);
+  }, [session?.mode, isEditUnlocked]);
 
   const openAdminLoginModal = useCallback(() => {
     setLoginModalOpen(true);
@@ -63,6 +69,7 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const loginWithPin = useCallback((pin: string, lang: 'ar' | 'en') => {
     const res = authenticateAdminPin(pin, lang);
     if (res.ok && res.session) {
+      setIsEditUnlocked(false);
       setSession(res.session);
       setLoginModalOpen(false);
     }
@@ -71,19 +78,42 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const logoutAdmin = useCallback(() => {
     discardCmsDraftSession();
+    setIsEditUnlocked(false);
     logoutAdminSession();
     setSession(null);
   }, []);
 
-  const setAdminMode = useCallback((mode: AdminSession['mode']) => {
-    if (mode !== 'live_editor') {
-      discardCmsDraftSession();
-    } else {
-      beginCmsDraftSession();
-    }
-    updateAdminSessionMode(mode);
-    setSession((prev) => (prev ? { ...prev, mode } : null));
+  const unlockEditMode = useCallback(() => {
+    setIsEditUnlocked(true);
   }, []);
+
+  const lockEditMode = useCallback(() => {
+    discardCmsDraftSession();
+    setIsEditUnlocked(false);
+  }, []);
+
+  const toggleEditLock = useCallback(() => {
+    setIsEditUnlocked((prev) => {
+      if (prev) {
+        discardCmsDraftSession();
+        return false;
+      }
+      return true;
+    });
+  }, []);
+
+  const setAdminMode = useCallback(
+    (mode: AdminSession['mode']) => {
+      if (mode !== 'live_editor' || !isEditUnlocked) {
+        discardCmsDraftSession();
+      } else {
+        beginCmsDraftSession();
+      }
+      updateAdminSessionMode(mode);
+      setSession((prev) => (prev ? { ...prev, mode } : null));
+    },
+    [isEditUnlocked]
+  );
 
   const hasPermission = useCallback(
     (perm: AdminPermission) => {
@@ -107,12 +137,16 @@ export const AdminProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isSuperAdmin,
         isDashboardMode,
         isLiveEditorMode,
+        isEditUnlocked,
         loginModalOpen,
         openAdminLoginModal,
         closeAdminLoginModal,
         loginWithPin,
         logoutAdmin,
         setAdminMode,
+        unlockEditMode,
+        lockEditMode,
+        toggleEditLock,
         hasPermission,
       }}
     >

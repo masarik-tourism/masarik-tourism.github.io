@@ -88,10 +88,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-First for JS/CSS scripts to prevent stale module export mismatches
+  // Network-First for JS/CSS scripts with cache bypass to prevent stale module mismatches
   if (url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
     event.respondWith(
-      fetch(request)
+      fetch(new Request(request, { cache: 'no-cache' }))
         .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
             const copy = networkResponse.clone();
