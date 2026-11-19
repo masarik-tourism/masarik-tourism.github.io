@@ -39,9 +39,13 @@ import {
   subscribeAllClientsCloud,
   updateUserPresenceCloud,
 } from './utils/travelerStore';
-import { playChatNotificationChime, subscribeChatThread } from './utils/chatStore';
+import {
+  playChatNotificationChime,
+  subscribeAllChatThreads,
+  subscribeChatThread,
+} from './utils/chatStore';
 import { consumeSessionExpiredNotice } from './utils/deviceTrust';
-import { TravelerProfile, TravelerSessionMeta } from './types/travel';
+import { ChatThreadSummary, TravelerProfile, TravelerSessionMeta } from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
@@ -118,6 +122,12 @@ export const App: React.FC = () => {
   const [sessionExpiredAlert, setSessionExpiredAlert] = useState<string | null>(null);
   const [chatUnreadCount, setChatUnreadCount] = useState<number>(0);
   const prevChatUnreadRef = useRef<number | null>(null);
+  const [adminChatThreads, setAdminChatThreads] = useState<Record<string, ChatThreadSummary>>({});
+  const prevAdminUnreadRef = useRef<number | null>(null);
+  const [adminRequestedChat, setAdminRequestedChat] = useState<{
+    phone: string;
+    nonce: number;
+  } | null>(null);
 
   // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
   useEffect(() => {
@@ -286,11 +296,34 @@ export const App: React.FC = () => {
     });
   }, [activeTravelerPhone, travelerSection]);
 
-  // Real-time cloud subscription for all clients when Admin/Sub-Admin session is active
+  // Real-time cloud subscription for all clients & live chat threads when Admin/Sub-Admin session is active
   useEffect(() => {
-    if (!isAdminActive) return;
-    return subscribeAllClientsCloud();
-  }, [isAdminActive]);
+    prevAdminUnreadRef.current = null;
+    if (!isAdminActive) {
+      setAdminChatThreads({});
+      return;
+    }
+    const unsubClients = subscribeAllClientsCloud();
+    const unsubThreads = subscribeAllChatThreads((threadsMap) => {
+      setAdminChatThreads(threadsMap);
+      const nextUnread = Object.values(threadsMap).reduce(
+        (sum, th) => sum + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
+        0
+      );
+      if (
+        prevAdminUnreadRef.current !== null &&
+        nextUnread > prevAdminUnreadRef.current &&
+        !isDashboardMode
+      ) {
+        playChatNotificationChime();
+      }
+      prevAdminUnreadRef.current = nextUnread;
+    });
+    return () => {
+      unsubClients();
+      unsubThreads();
+    };
+  }, [isAdminActive, isDashboardMode]);
 
   useEffect(() => {
     const handleUrlActions = async () => {
@@ -421,6 +454,15 @@ export const App: React.FC = () => {
     setTravelerDraft(buildDraftFromTraveler(getActiveTraveler(), lang));
   }, [lang]);
 
+  const handleOpenAdminChatFromFloating = useCallback(
+    (phone?: string) => {
+      setAdminMode('dashboard');
+      setAdminRequestedChat({ phone: phone || '', nonce: Date.now() });
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [setAdminMode]
+  );
+
   return (
     <div
       id="masarik-site-viewport"
@@ -439,6 +481,8 @@ export const App: React.FC = () => {
         onSecretAdminTap={handleSecretAdminTap}
         hasUnsavedTravelerDraft={travelerDraft.isDirty}
         chatUnreadCount={chatUnreadCount}
+        adminChatThreads={adminChatThreads}
+        onOpenAdminChat={handleOpenAdminChatFromFloating}
       />
 
       {/* Global Notice Banner if 1-hour Temporary Session Expired while on another page */}
@@ -464,7 +508,7 @@ export const App: React.FC = () => {
       {/* Full-Page Admin Workspace OR Full-Page Traveler Workspace OR Live Site Viewport */}
       {isDashboardMode ? (
         <main className="flex-1" data-no-admin-edit="true">
-          <AdminDashboardWorkspace />
+          <AdminDashboardWorkspace requestedChat={adminRequestedChat} />
         </main>
       ) : travelerSection ? (
         <main className="flex-1" data-no-admin-edit="true">

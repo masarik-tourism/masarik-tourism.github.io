@@ -135,7 +135,13 @@ type DashboardTab =
   | 'settings';
 type OrderFilter = 'all' | 'online' | 'active' | 'with_files' | 'completed';
 
-export const AdminDashboardWorkspace: React.FC = () => {
+interface AdminDashboardWorkspaceProps {
+  requestedChat?: { phone: string; nonce: number } | null;
+}
+
+export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = ({
+  requestedChat,
+}) => {
   const { lang, isAr, dir, t } = useLanguage();
   const {
     session,
@@ -371,6 +377,24 @@ export const AdminDashboardWorkspace: React.FC = () => {
       window.clearInterval(tickId);
     };
   }, [alertSoundEnabled]);
+
+  useEffect(() => {
+    if (!requestedChat || !canManageClients) return;
+    setSelectedClientPhone(null);
+    setChatInboxFilter('all');
+    setChatSearchQuery('');
+    setActiveTab('live_chat');
+    if (requestedChat.phone) {
+      const targetDigits = requestedChat.phone.replace(/\D/g, '');
+      const matched = travelers.find(
+        (tr) =>
+          tr.phone === requestedChat.phone ||
+          tr.phoneNormalized === targetDigits ||
+          tr.phone.replace(/\D/g, '') === targetDigits
+      );
+      setActiveChatPhone(matched ? matched.phone : targetDigits || requestedChat.phone);
+    }
+  }, [requestedChat?.nonce]);
 
   // Arm instant audio + visual alert whenever a new pending OTP request arrives live
   useEffect(() => {

@@ -21,6 +21,7 @@ import {
   CheckCheck,
   FileCheck2,
   MessageSquare,
+  MessageCircle,
   Building2,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
@@ -30,13 +31,16 @@ import {
 import masarikLogoImg from '../assets/images/masarik_logo.jpg';
 import {
   formatFirstLastName,
+  formatLastSeenRelative,
+  formatPhoneForDisplay,
   getActiveTraveler,
+  getAllTravelers,
   getTravelerDisplayNames,
   markClientNotificationsReadCloud,
   TRAVELERS_UPDATED_EVENT,
 } from '../utils/travelerStore';
 import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
-import { TravelerProfile } from '../types/travel';
+import { ChatThreadSummary, TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 import { AnnouncementBanner } from './AnnouncementBanner';
@@ -53,6 +57,8 @@ interface NavbarProps {
   onSecretAdminTap?: () => void;
   hasUnsavedTravelerDraft?: boolean;
   chatUnreadCount?: number;
+  adminChatThreads?: Record<string, ChatThreadSummary>;
+  onOpenAdminChat?: (phone?: string) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -65,6 +71,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSecretAdminTap,
   hasUnsavedTravelerDraft = false,
   chatUnreadCount = 0,
+  adminChatThreads,
+  onOpenAdminChat,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
   const {
@@ -84,10 +92,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [servicesDropdownOpen, setServicesDropdownOpen] = useState(false);
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
+  const [adminQuickChatOpen, setAdminQuickChatOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshToast, setShowRefreshToast] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const notifDropdownRef = useRef<HTMLDivElement>(null);
+  const floatingChatRef = useRef<HTMLDivElement>(null);
+  const prevAdminFloatingUnreadRef = useRef<number | null>(null);
+  const prevAdminLatestUnreadAtRef = useRef<string>('');
   const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
     getActiveTraveler()
   );
@@ -97,6 +109,57 @@ export const Navbar: React.FC<NavbarProps> = ({
     window.addEventListener(TRAVELERS_UPDATED_EVENT, syncTraveler);
     return () => window.removeEventListener(TRAVELERS_UPDATED_EVENT, syncTraveler);
   }, []);
+
+  const canAdminQuickChat = isAdminActive && hasPermission('manage_clients');
+  const adminThreadList = canAdminQuickChat
+    ? Object.values(adminChatThreads || {}).sort((a, b) => {
+        const uA = a.unreadAdminCount || 0;
+        const uB = b.unreadAdminCount || 0;
+        if (uA > 0 && uB === 0) return -1;
+        if (uB > 0 && uA === 0) return 1;
+        return (b.lastMessageAt || '').localeCompare(a.lastMessageAt || '');
+      })
+    : [];
+  const unreadAdminThreads = adminThreadList.filter((th) => (th.unreadAdminCount || 0) > 0);
+  const totalAdminUnreadCount = unreadAdminThreads.reduce(
+    (sum, th) => sum + (th.unreadAdminCount || 0),
+    0
+  );
+  const latestUnreadAt = unreadAdminThreads.reduce(
+    (latest, th) => (th.lastMessageAt && th.lastMessageAt > latest ? th.lastMessageAt : latest),
+    ''
+  );
+
+  // Auto-open quick unread cards dropdown when a brand new client/B2B message arrives live for Admin
+  useEffect(() => {
+    if (!canAdminQuickChat) {
+      prevAdminFloatingUnreadRef.current = null;
+      prevAdminLatestUnreadAtRef.current = '';
+      setAdminQuickChatOpen(false);
+      return;
+    }
+
+    if (prevAdminFloatingUnreadRef.current === null) {
+      prevAdminFloatingUnreadRef.current = totalAdminUnreadCount;
+      prevAdminLatestUnreadAtRef.current = latestUnreadAt;
+      return;
+    }
+
+    const increased = totalAdminUnreadCount > prevAdminFloatingUnreadRef.current;
+    const newerUnread =
+      totalAdminUnreadCount > 0 &&
+      Boolean(latestUnreadAt) &&
+      latestUnreadAt > prevAdminLatestUnreadAtRef.current;
+
+    if (increased || newerUnread) {
+      setAdminQuickChatOpen(true);
+    }
+
+    prevAdminFloatingUnreadRef.current = totalAdminUnreadCount;
+    if (latestUnreadAt) {
+      prevAdminLatestUnreadAtRef.current = latestUnreadAt;
+    }
+  }, [canAdminQuickChat, totalAdminUnreadCount, latestUnreadAt]);
 
   const handleHardRefresh = () => {
     if (isRefreshing) return;
@@ -139,6 +202,9 @@ export const Navbar: React.FC<NavbarProps> = ({
       }
       if (notifDropdownRef.current && !notifDropdownRef.current.contains(event.target as Node)) {
         setNotifDropdownOpen(false);
+      }
+      if (floatingChatRef.current && !floatingChatRef.current.contains(event.target as Node)) {
+        setAdminQuickChatOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -698,6 +764,209 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <Phone className="w-4 h-4" />
           </button>
+
+          {/* Floating Quick Chat Widget — strictly visible ONLY to signed-in Clients, B2B Partners & Admin */}
+          {(canAdminQuickChat || activeTraveler) && (() => {
+            const floatingBadgeCount = canAdminQuickChat
+              ? totalAdminUnreadCount
+              : chatUnreadCount;
+            const allProfilesMap = canAdminQuickChat ? getAllTravelers() : {};
+            const previewThreads =
+              unreadAdminThreads.length > 0
+                ? unreadAdminThreads
+                : adminThreadList.slice(0, 5);
+
+            return (
+              <div
+                ref={floatingChatRef}
+                className="relative flex flex-col items-center pointer-events-auto"
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (canAdminQuickChat) {
+                      setAdminQuickChatOpen((prev) => !prev);
+                      return;
+                    }
+                    if (isDashboardMode) {
+                      setAdminMode('live_editor');
+                    }
+                    onSelectTravelerSection('chat');
+                  }}
+                  className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-full border border-[#C6A052]/80 shadow-md backdrop-blur-md flex items-center justify-center transition-all active:scale-95 cursor-pointer ${
+                    adminQuickChatOpen || (!canAdminQuickChat && travelerSection === 'chat')
+                      ? 'bg-[#0F2438] text-[#E5C887] ring-2 ring-[#C6A052]/40'
+                      : 'bg-[#0284C7]/95 hover:bg-[#0F2438] text-white hover:text-[#E5C887]'
+                  }`}
+                  title={
+                    canAdminQuickChat
+                      ? t('محادثات العملاء والشركات الفورية', 'Quick Live Client & B2B Chats')
+                      : t('محادثة مباشرة مع إدارة مسارك', 'Direct Live Chat with Masarik')
+                  }
+                  aria-label={t('المحادثة الفورية', 'Quick Live Chat')}
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  {floatingBadgeCount > 0 && (
+                    <span
+                      className="absolute -top-1 -end-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black leading-none flex items-center justify-center border-2 border-white shadow-sm animate-pulse tabular-nums"
+                      aria-label={t(
+                        `${floatingBadgeCount} رسائل غير مقروءة`,
+                        `${floatingBadgeCount} unread messages`
+                      )}
+                    >
+                      {floatingBadgeCount > 99 ? '99+' : floatingBadgeCount}
+                    </span>
+                  )}
+                </button>
+
+                {/* Admin Quick-Cards Popover for Unread & Recent Incoming Messages */}
+                {canAdminQuickChat && adminQuickChatOpen && (
+                  <div className="absolute top-full mt-2 end-0 w-[min(320px,calc(100vw-24px))] bg-white rounded-2xl shadow-2xl border border-[#C6A052]/70 overflow-hidden z-50 animate-in fade-in slide-in-from-top duration-150">
+                    <div className="bg-[#0F2438] text-white px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-[#C6A052]/40">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <MessageCircle className="w-4 h-4 text-[#E5C887] shrink-0" />
+                        <span className="text-xs font-black truncate">
+                          {unreadAdminThreads.length > 0
+                            ? t('رسائل جديدة بانتظار الرد', 'New Incoming Chats')
+                            : t('المحادثات الفورية السريعة', 'Quick Live Chats')}
+                        </span>
+                        {totalAdminUnreadCount > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums shrink-0">
+                            {totalAdminUnreadCount}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAdminQuickChatOpen(false)}
+                        className="p-1 rounded-lg hover:bg-white/15 text-slate-300 hover:text-white transition cursor-pointer shrink-0"
+                        aria-label={t('إغلاق', 'Close')}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="max-h-[320px] overflow-y-auto divide-y divide-slate-100">
+                      {previewThreads.length === 0 ? (
+                        <div className="px-4 py-6 text-center text-xs text-slate-500">
+                          {t(
+                            'لا توجد رسائل واردة حالياً.',
+                            'No incoming chat messages yet.'
+                          )}
+                        </div>
+                      ) : (
+                        previewThreads.map((th) => {
+                          const profile =
+                            allProfilesMap[th.phoneId] ||
+                            Object.values(allProfilesMap).find(
+                              (p) =>
+                                p.phone === th.phoneId ||
+                                p.phoneNormalized === th.phoneId
+                            );
+                          const isB2B =
+                            (th.accountType || profile?.accountType) === 'b2b_partner';
+                          const senderTitle = isB2B
+                            ? th.companyName ||
+                              profile?.companyName ||
+                              th.clientName ||
+                              profile?.name ||
+                              formatPhoneForDisplay(th.phoneId)
+                            : th.clientName ||
+                              (profile ? getTravelerDisplayNames(profile).fullDisplayName : '') ||
+                              formatPhoneForDisplay(th.phoneId);
+                          const unreadCount = th.unreadAdminCount || 0;
+
+                          return (
+                            <button
+                              key={th.phoneId}
+                              type="button"
+                              onClick={() => {
+                                setAdminQuickChatOpen(false);
+                                onOpenAdminChat?.(th.phoneId);
+                              }}
+                              className={`w-full text-start px-3.5 py-2.5 flex items-start gap-2.5 transition cursor-pointer ${
+                                unreadCount > 0
+                                  ? 'bg-red-50/50 hover:bg-amber-50/70'
+                                  : 'bg-white hover:bg-slate-50'
+                              }`}
+                            >
+                              <div
+                                className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 border ${
+                                  isB2B
+                                    ? 'bg-[#0F2438] text-[#E5C887] border-[#C6A052]'
+                                    : 'bg-sky-50 text-[#0284C7] border-sky-200'
+                                }`}
+                              >
+                                {isB2B ? (
+                                  <Building2 className="w-4 h-4" />
+                                ) : (
+                                  <span className="text-[11px] font-black">
+                                    {senderTitle.slice(0, 1) || 'ع'}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <span className="text-xs font-black text-[#0F2438] truncate">
+                                    {senderTitle}
+                                  </span>
+                                  {unreadCount > 0 && (
+                                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black flex items-center justify-center tabular-nums shrink-0">
+                                      {unreadCount}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-black ${
+                                      isB2B
+                                        ? 'bg-[#C6A052]/25 text-[#0F2438] border border-[#C6A052]/50'
+                                        : 'bg-sky-50 text-[#0369A1] border border-sky-200'
+                                    }`}
+                                  >
+                                    {isB2B
+                                      ? t('شركة شريكة B2B', 'B2B Partner')
+                                      : t('عميل فردي', 'Individual Client')}
+                                  </span>
+                                  {th.lastMessageAt && (
+                                    <span className="text-[10px] text-slate-400 font-semibold">
+                                      {formatLastSeenRelative(th.lastMessageAt, false, lang)}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {th.lastMessageText && (
+                                  <p className="text-[11px] text-slate-600 line-clamp-2 leading-snug">
+                                    {th.lastMessageText}
+                                  </p>
+                                )}
+                              </div>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    <div className="p-2 bg-slate-50 border-t border-slate-200">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminQuickChatOpen(false);
+                          onOpenAdminChat?.();
+                        }}
+                        className="w-full py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black transition cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>{t('فتح صندوق المحادثات المباشرة', 'Open Full Chat Inbox')}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
