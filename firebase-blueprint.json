@@ -104,6 +104,11 @@
           "type": "boolean",
           "description": "Whether the client account has been verified."
         },
+        "accountStatus": {
+          "type": "string",
+          "description": "Explicit account verification lifecycle state.",
+          "enum": ["pending_verification", "verified"]
+        },
         "verifiedAt": {
           "type": "string",
           "description": "ISO timestamp when verification succeeded.",
@@ -235,6 +240,16 @@
         "heroHighlightEn": {
           "type": "string",
           "maxLength": 500
+        },
+        "primaryDriveWebAppUrl": {
+          "type": "string",
+          "description": "Primary HTTPS Google Drive Web App script endpoint URL for cloud uploads.",
+          "maxLength": 500,
+          "pattern": "^https://.*$"
+        },
+        "additionalDriveWebApps": {
+          "type": "array",
+          "description": "Bounded list (max 10) of secondary/scoped Google Drive Web App endpoints for multi-account failover or workload separation."
         },
         "updatedAt": {
           "type": "string",

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ShieldCheck,
   X,
@@ -36,10 +36,15 @@ import {
   QrCode,
   Inbox,
   MessageSquare,
+  Bell,
+  Plus,
+  Volume2,
 } from 'lucide-react';
 import {
   AdminPermission,
   AppointmentDetails,
+  DriveEndpointScope,
+  DriveStorageEndpoint,
   SubAdminAccount,
   TravelerProfile,
   VisaOrderStatus,
@@ -57,6 +62,7 @@ import {
   cleanupCompletedOrderAttachmentsCloud,
   computeStorageUsageStats,
   deleteTravelerProfile,
+  digitsOnly,
   exportAllDataBackupJson,
   formatPhoneForDisplay,
   getAllTravelers,
@@ -89,6 +95,7 @@ import {
 } from '../utils/adminAuthStore';
 import {
   AnnouncementStyle,
+  DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
   DEFAULT_SITE_CONFIG,
   SiteConfig,
   getSiteConfig,
@@ -200,7 +207,27 @@ export const AdminDashboardWorkspace: React.FC = () => {
   const [siteDraft, setSiteDraft] = useState<SiteConfig>(() => getSiteConfig());
   const [contentSavedMsg, setContentSavedMsg] = useState('');
   const [settingsSavedMsg, setSettingsSavedMsg] = useState('');
+  const [driveSavedMsg, setDriveSavedMsg] = useState('');
+  const [driveErrorMsg, setDriveErrorMsg] = useState('');
+  const [newDriveLabel, setNewDriveLabel] = useState('');
+  const [newDriveUrl, setNewDriveUrl] = useState('');
+  const [newDriveScope, setNewDriveScope] = useState<DriveEndpointScope>('all');
   const [confirmResetCms, setConfirmResetCms] = useState(false);
+
+  // Real-time Instant Admin Alert (Audio Chime + Top Banner for Incoming OTP Requests)
+  const [alertSoundEnabled, setAlertSoundEnabled] = useState(true);
+  const [realtimeAlert, setRealtimeAlert] = useState<{
+    phone: string;
+    name: string;
+    otp: string;
+    isPendingVerification: boolean;
+    timestamp: string;
+  } | null>(null);
+  const baselineHydratedRef = useRef(false);
+  const mountTimestampRef = useRef(Date.now());
+  const seenClientStateRef = useRef<Map<string, { verified: boolean; otpGeneratedAt: string }>>(
+    new Map()
+  );
 
   // Tab 4: Sub-Admins & Security Settings
   const [subAdmins, setSubAdmins] = useState<SubAdminAccount[]>(() => getSubAdmins());
@@ -218,6 +245,39 @@ export const AdminDashboardWorkspace: React.FC = () => {
     text: string;
   } | null>(null);
   const [backupMsg, setBackupMsg] = useState('');
+
+  const playAdminAlertChime = () => {
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+
+      const playTone = (freq: number, startOffset: number, duration: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + startOffset);
+        gain.gain.setValueAtTime(0.0001, now + startOffset);
+        gain.gain.exponentialRampToValueAtTime(0.14, now + startOffset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + startOffset);
+        osc.stop(now + startOffset + duration);
+      };
+
+      playTone(880, 0, 0.22);
+      playTone(1174.66, 0.16, 0.28);
+      window.setTimeout(() => {
+        void ctx.close().catch(() => {});
+      }, 650);
+    } catch {
+      // Autoplay blocked or Web Audio unsupported — visual banner still alerts immediately
+    }
+  };
 
   const loadTravelers = () => {
     const map = getAllTravelers();
@@ -240,6 +300,61 @@ export const AdminDashboardWorkspace: React.FC = () => {
       window.removeEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
     };
   }, []);
+
+  // Arm instant audio + visual alert whenever a new pending OTP request arrives live
+  useEffect(() => {
+    const nextMap = new Map<string, { verified: boolean; otpGeneratedAt: string }>();
+    for (const tr of travelers) {
+      nextMap.set(tr.phone, {
+        verified: Boolean(tr.verified),
+        otpGeneratedAt: tr.otpGeneratedAt || '',
+      });
+    }
+
+    if (!baselineHydratedRef.current) {
+      if (travelers.length > 0 || Date.now() - mountTimestampRef.current > 2500) {
+        seenClientStateRef.current = nextMap;
+        baselineHydratedRef.current = true;
+      }
+      return;
+    }
+
+    let triggeredClient: TravelerProfile | null = null;
+    for (const tr of travelers) {
+      const prev = seenClientStateRef.current.get(tr.phone);
+      const isNewClient = !prev;
+      const isFreshOtpRequest =
+        Boolean(prev) &&
+        !tr.verified &&
+        Boolean(tr.otpGeneratedAt) &&
+        prev?.otpGeneratedAt !== tr.otpGeneratedAt;
+
+      if (isNewClient || isFreshOtpRequest) {
+        triggeredClient = tr;
+        break;
+      }
+    }
+
+    seenClientStateRef.current = nextMap;
+
+    if (triggeredClient) {
+      const displayName = getTravelerDisplayNames(triggeredClient).fullDisplayName;
+      setRealtimeAlert({
+        phone: triggeredClient.phone,
+        name: displayName || triggeredClient.phone,
+        otp: triggeredClient.otp || '',
+        isPendingVerification:
+          !triggeredClient.verified || triggeredClient.accountStatus === 'pending_verification',
+        timestamp: new Date().toLocaleTimeString(isAr ? 'ar-EG' : 'en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      });
+      if (alertSoundEnabled) {
+        playAdminAlertChime();
+      }
+    }
+  }, [travelers, alertSoundEnabled, isAr]);
 
   const selectedClient = selectedClientPhone
     ? travelers.find((tr) => tr.phone === selectedClientPhone) || null
@@ -644,6 +759,109 @@ export const AdminDashboardWorkspace: React.FC = () => {
     setTimeout(() => setSettingsSavedMsg(''), 3500);
   };
 
+  const handleSaveDriveStorageConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
+    setDriveErrorMsg('');
+    const primaryUrl = (siteDraft.primaryDriveWebAppUrl || '').trim();
+    if (!primaryUrl.startsWith('https://')) {
+      setDriveErrorMsg(
+        t(
+          'يجب أن يبدأ رابط Google Drive Web App الأساسي بـ https://',
+          'Primary Google Drive Web App URL must start with https://'
+        )
+      );
+      return;
+    }
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      primaryDriveWebAppUrl: primaryUrl,
+    });
+    setSiteDraft(updated);
+    setDriveSavedMsg(
+      t(
+        'تم حفظ روابط التخزين السحابي (Google Drive Web App) ومزامنتها في السحابة بنجاح.',
+        'Google Drive Web App endpoints saved & synced to cloud.'
+      )
+    );
+    setTimeout(() => setDriveSavedMsg(''), 4000);
+  };
+
+  const handleAddSecondaryDriveEndpoint = () => {
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
+    setDriveErrorMsg('');
+    const cleanUrl = newDriveUrl.trim();
+    const cleanLabel =
+      newDriveLabel.trim() ||
+      t(
+        `حساب Drive إضافي ${(siteDraft.additionalDriveWebApps?.length || 0) + 2}`,
+        `Backup Drive ${(siteDraft.additionalDriveWebApps?.length || 0) + 2}`
+      );
+    if (!cleanUrl.startsWith('https://')) {
+      setDriveErrorMsg(
+        t(
+          'يرجى إدخال رابط Web App صحيح يبدأ بـ https://script.google.com/...',
+          'Please enter a valid Web App URL starting with https://'
+        )
+      );
+      return;
+    }
+    const nextItem: DriveStorageEndpoint = {
+      id: `drv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      label: cleanLabel,
+      url: cleanUrl,
+      scope: newDriveScope,
+      enabled: true,
+    };
+    const nextEndpoints = [...(siteDraft.additionalDriveWebApps || []), nextItem];
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      additionalDriveWebApps: nextEndpoints,
+    });
+    setSiteDraft(updated);
+    setNewDriveLabel('');
+    setNewDriveUrl('');
+    setNewDriveScope('all');
+    setDriveSavedMsg(
+      t('تمت إضافة رابط حساب Drive الإضافي وحفظه فوراً.', 'Secondary Drive account added & saved.')
+    );
+    setTimeout(() => setDriveSavedMsg(''), 3500);
+  };
+
+  const handleToggleDriveEndpoint = (id: string) => {
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
+    const nextEndpoints = (siteDraft.additionalDriveWebApps || []).map((ep) =>
+      ep.id === id ? { ...ep, enabled: !ep.enabled } : ep
+    );
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      additionalDriveWebApps: nextEndpoints,
+    });
+    setSiteDraft(updated);
+  };
+
+  const handleChangeDriveEndpointScope = (id: string, scope: DriveEndpointScope) => {
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
+    const nextEndpoints = (siteDraft.additionalDriveWebApps || []).map((ep) =>
+      ep.id === id ? { ...ep, scope } : ep
+    );
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      additionalDriveWebApps: nextEndpoints,
+    });
+    setSiteDraft(updated);
+  };
+
+  const handleDeleteDriveEndpoint = (id: string) => {
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
+    const nextEndpoints = (siteDraft.additionalDriveWebApps || []).filter((ep) => ep.id !== id);
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      additionalDriveWebApps: nextEndpoints,
+    });
+    setSiteDraft(updated);
+  };
+
   const handleToggleNewSubPerm = (perm: AdminPermission) => {
     setSubPerms((prev) =>
       prev.includes(perm) ? prev.filter((p) => p !== perm) : [...prev, perm]
@@ -915,6 +1133,75 @@ export const AdminDashboardWorkspace: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Real-Time Instant Alert Toast for New Pending OTP Requests */}
+        {realtimeAlert && (
+          <div className="bg-gradient-to-l from-amber-50 via-white to-amber-50 border-2 border-amber-400 rounded-2xl p-3.5 sm:p-4 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Bell className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-black text-[#0F2438] text-sm">
+                    {realtimeAlert.isPendingVerification
+                      ? t('طلب تفعيل عميل جديد الآن!', 'New Client Verification Request!')
+                      : t('تحديث حساب عميل وارد الآن!', 'Incoming Client Update!')}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-900 text-[10.5px] font-black tabular-nums">
+                    {realtimeAlert.timestamp}
+                  </span>
+                </div>
+                <p className="text-slate-700 font-bold mt-0.5 truncate">
+                  {realtimeAlert.name} ·{' '}
+                  <span dir="ltr" className="tabular-nums text-[#0F2438]">
+                    {formatPhoneForDisplay(realtimeAlert.phone)}
+                  </span>
+                  {realtimeAlert.otp && (
+                    <span className="ms-2 text-[#0284C7] font-black tabular-nums">
+                      OTP: {realtimeAlert.otp}
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('messages_otp');
+                  setSelectedClientPhone(null);
+                  setRealtimeAlert(null);
+                }}
+                className="min-h-[38px] px-3.5 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{t('معالجة وتفعيل الآن', 'Handle & Activate Now')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAlertSoundEnabled((v) => !v)}
+                title={t('تشغيل/كتم تنبيه الصوت', 'Toggle Alert Chime')}
+                className={`min-h-[38px] px-2.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1 cursor-pointer transition ${
+                  alertSoundEnabled
+                    ? 'bg-white border-amber-300 text-[#0F2438]'
+                    : 'bg-slate-100 border-slate-300 text-slate-500'
+                }`}
+              >
+                <Volume2 className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setRealtimeAlert(null)}
+                aria-label={t('إغلاق التنبيه', 'Dismiss Alert')}
+                className="min-h-[38px] px-2.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 4-Tab Organized CRM Navigation */}
         <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs flex items-center gap-2 overflow-x-auto">
@@ -2331,7 +2618,7 @@ export const AdminDashboardWorkspace: React.FC = () => {
                               ) : (
                                 <>
                                   <Copy className="w-3.5 h-3.5 text-[#E5C887]" />
-                                  <span>{t('نسخ رسالة التفعيل', 'Copy OTP + Link')}</span>
+                                  <span>{t('نسخ رسالة الكود للواتساب', 'Copy WhatsApp Code Message')}</span>
                                 </>
                               )}
                             </button>
@@ -2481,10 +2768,11 @@ export const AdminDashboardWorkspace: React.FC = () => {
                 <input
                   type="tel"
                   inputMode="numeric"
+                  pattern="[0-9]*"
                   required
                   dir="ltr"
                   value={newPhone}
-                  onChange={(e) => setNewPhone(e.target.value)}
+                  onChange={(e) => setNewPhone(digitsOnly(e.target.value, 20))}
                   placeholder="01012345678"
                   className="px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438] tabular-nums"
                 />
@@ -2771,10 +3059,15 @@ export const AdminDashboardWorkspace: React.FC = () => {
                       </label>
                       <input
                         type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
                         dir="ltr"
                         value={siteDraft.phoneNumber}
                         onChange={(e) =>
-                          setSiteDraft((prev) => ({ ...prev, phoneNumber: e.target.value }))
+                          setSiteDraft((prev) => ({
+                            ...prev,
+                            phoneNumber: digitsOnly(e.target.value, 20),
+                          }))
                         }
                         className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums"
                       />
@@ -2822,6 +3115,212 @@ export const AdminDashboardWorkspace: React.FC = () => {
                   >
                     <Save className="w-4 h-4" />
                     <span>{t('حفظ بيانات التواصل', 'Save Contact Info')}</span>
+                  </button>
+                </form>
+
+                {/* Flexible Multi-Account Google Drive Web App Cloud Storage Settings */}
+                <form
+                  onSubmit={handleSaveDriveStorageConfig}
+                  className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <HardDrive className="w-4.5 h-4.5 text-[#0284C7] shrink-0" />
+                      <div>
+                        <h4 className="text-sm font-black text-[#0F2438]">
+                          {t(
+                            'إعدادات التخزين السحابي المرن (Google Drive Web App)',
+                            'Flexible Cloud Storage Endpoints (Google Drive Web App)'
+                          )}
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          {t(
+                            'أدر رابط Google Drive الأساسي أو أضف حسابات Drive إضافية للتوزيع والنسخ الاحتياطي وتفادي امتلاء المساحة.',
+                            'Configure your primary Google Drive Web App endpoint and add secondary Drive accounts for capacity scaling & automatic failover.'
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSiteDraft((prev) => ({
+                          ...prev,
+                          primaryDriveWebAppUrl: DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
+                        }))
+                      }
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>{t('استعادة الرابط الأساسي الافتراضي', 'Restore Default URL')}</span>
+                    </button>
+                  </div>
+
+                  <div className="text-xs space-y-1.5">
+                    <label className="block font-bold text-slate-700">
+                      {t(
+                        'رابط Google Drive Web App الأساسي (Primary Endpoint)',
+                        'Primary Google Drive Web App URL'
+                      )}
+                    </label>
+                    <input
+                      type="url"
+                      required
+                      dir="ltr"
+                      value={siteDraft.primaryDriveWebAppUrl}
+                      onChange={(e) =>
+                        setSiteDraft((prev) => ({
+                          ...prev,
+                          primaryDriveWebAppUrl: e.target.value,
+                        }))
+                      }
+                      placeholder="https://script.google.com/macros/s/.../exec"
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-[#0F2438] text-xs font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  {/* Secondary / Multi-Account Google Drive Endpoints */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-black text-[#0F2438]">
+                        {t(
+                          `حسابات Drive الإضافية / الاحتياطية (${siteDraft.additionalDriveWebApps?.length || 0})`,
+                          `Secondary / Backup Drive Endpoints (${siteDraft.additionalDriveWebApps?.length || 0})`
+                        )}
+                      </span>
+                    </div>
+
+                    {(siteDraft.additionalDriveWebApps?.length || 0) > 0 && (
+                      <div className="space-y-2">
+                        {(siteDraft.additionalDriveWebApps || []).map((ep) => (
+                          <div
+                            key={ep.id}
+                            className="bg-white border border-slate-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                          >
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="font-black text-[#0F2438]">{ep.label}</span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                    ep.enabled
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                      : 'bg-slate-100 border-slate-200 text-slate-500'
+                                  }`}
+                                >
+                                  {ep.enabled ? t('نشط', 'Active') : t('معطل', 'Disabled')}
+                                </span>
+                              </div>
+                              <p className="text-[11px] font-mono text-slate-500 truncate" dir="ltr">
+                                {ep.url}
+                              </p>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              <select
+                                value={ep.scope}
+                                onChange={(e) =>
+                                  handleChangeDriveEndpointScope(
+                                    ep.id,
+                                    e.target.value as DriveEndpointScope
+                                  )
+                                }
+                                className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-[11px] font-bold text-[#0F2438]"
+                              >
+                                <option value="all">
+                                  {t('الكل (تخزين احتياطي وتوزيع)', 'All Files (Failover)')}
+                                </option>
+                                <option value="client_docs">
+                                  {t('مستندات العملاء فقط', 'Client Docs Only')}
+                                </option>
+                                <option value="admin_deliverables">
+                                  {t('مستندات التنفيذ فقط (PDF)', 'Admin Deliverables Only')}
+                                </option>
+                              </select>
+
+                              <button
+                                type="button"
+                                onClick={() => handleToggleDriveEndpoint(ep.id)}
+                                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer ${
+                                  ep.enabled
+                                    ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+                                    : 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+                                }`}
+                              >
+                                {ep.enabled ? t('تعطيل', 'Disable') : t('تفعيل', 'Enable')}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteDriveEndpoint(ep.id)}
+                                aria-label={t('حذف الحساب', 'Remove Endpoint')}
+                                className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Inline Form to Add New Google Drive Account */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
+                      <input
+                        type="text"
+                        value={newDriveLabel}
+                        onChange={(e) => setNewDriveLabel(e.target.value)}
+                        placeholder={t('اسم الحساب (مثل: Drive 2)', 'Label (e.g. Drive 2)')}
+                        className="sm:col-span-3 px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs text-[#0F2438]"
+                      />
+                      <input
+                        type="url"
+                        dir="ltr"
+                        value={newDriveUrl}
+                        onChange={(e) => setNewDriveUrl(e.target.value)}
+                        placeholder="https://script.google.com/macros/s/.../exec"
+                        className="sm:col-span-4 px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-mono text-[#0F2438]"
+                      />
+                      <select
+                        value={newDriveScope}
+                        onChange={(e) => setNewDriveScope(e.target.value as DriveEndpointScope)}
+                        className="sm:col-span-3 px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-bold text-[#0F2438]"
+                      >
+                        <option value="all">{t('الكل (احتياطي وتوزيع)', 'All Files')}</option>
+                        <option value="client_docs">{t('مستندات العملاء فقط', 'Client Docs')}</option>
+                        <option value="admin_deliverables">
+                          {t('مستندات التنفيذ (PDF)', 'Admin Deliverables')}
+                        </option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={handleAddSecondaryDriveEndpoint}
+                        className="sm:col-span-2 min-h-[38px] px-3 py-2 rounded-xl bg-[#0284C7] hover:bg-[#0369A1] text-white text-xs font-black flex items-center justify-center gap-1 cursor-pointer transition"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{t('إضافة', 'Add')}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {driveErrorMsg && (
+                    <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-red-800">
+                      {driveErrorMsg}
+                    </div>
+                  )}
+
+                  {driveSavedMsg && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                      {driveSavedMsg}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="min-h-[40px] px-4 py-2 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{t('حفظ روابط التخزين السحابي', 'Save Cloud Storage Settings')}</span>
                   </button>
                 </form>
 
@@ -3149,12 +3648,13 @@ export const AdminDashboardWorkspace: React.FC = () => {
                           {t('الرمز السري الخاص (PIN) *', 'Custom PIN / Password *')}
                         </label>
                         <input
-                          type="text"
+                          type="tel"
                           inputMode="numeric"
+                          pattern="[0-9]*"
                           required
                           dir="ltr"
                           value={subPin}
-                          onChange={(e) => setSubPin(e.target.value)}
+                          onChange={(e) => setSubPin(digitsOnly(e.target.value, 20))}
                           placeholder="e.g. 4455"
                           className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
                         />
@@ -3331,11 +3831,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         {t('الرمز الحالي', 'Current PIN')}
                       </label>
                       <input
-                        type="password"
+                        type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        dir="ltr"
                         required
                         value={currentPinDraft}
-                        onChange={(e) => setCurrentPinDraft(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums"
+                        onChange={(e) => setCurrentPinDraft(digitsOnly(e.target.value, 20))}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums [-webkit-text-security:disc]"
                       />
                     </div>
                     <div>
@@ -3343,11 +3846,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         {t('الرمز الجديد', 'New PIN')}
                       </label>
                       <input
-                        type="password"
+                        type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        dir="ltr"
                         required
                         value={newPinDraft}
-                        onChange={(e) => setNewPinDraft(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums"
+                        onChange={(e) => setNewPinDraft(digitsOnly(e.target.value, 20))}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums [-webkit-text-security:disc]"
                       />
                     </div>
                     <div>
@@ -3355,11 +3861,14 @@ export const AdminDashboardWorkspace: React.FC = () => {
                         {t('تأكيد الرمز الجديد', 'Confirm New PIN')}
                       </label>
                       <input
-                        type="password"
+                        type="tel"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        dir="ltr"
                         required
                         value={confirmPinDraft}
-                        onChange={(e) => setConfirmPinDraft(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums"
+                        onChange={(e) => setConfirmPinDraft(digitsOnly(e.target.value, 20))}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums [-webkit-text-security:disc]"
                       />
                     </div>
                   </div>

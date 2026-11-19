@@ -57,6 +57,7 @@ import {
   commitTravelerProfileDraftCloud,
   compressImageToDataUrl,
   deleteFamilyMemberCloud,
+  digitsOnly,
   formatPhoneForDisplay,
   getOrderStatusStageIndex,
   getRelationshipLabel,
@@ -256,10 +257,14 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const memberPersonalPhotoInputRef = useRef<HTMLInputElement>(null);
   const otpBoxRefs = useRef<Array<HTMLInputElement | null>>([]);
   const pinBoxRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const hydratedPendingPhoneRef = useRef<string | null>(null);
 
   // Sync Magic Link / external pending post-auth stage cleanly
   useEffect(() => {
-    if (activeTraveler) return;
+    if (activeTraveler) {
+      hydratedPendingPhoneRef.current = null;
+      return;
+    }
     if (pendingPostAuthFlow) {
       setTrustedPhone(pendingPostAuthFlow.phone);
       setAuthStage(pendingPostAuthFlow.stage);
@@ -281,6 +286,65 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setAuthStage('otp_verify');
     }
   }, [pendingPostAuthFlow, pendingOtpPhone, activeTraveler, authStage]);
+
+  // Re-hydrate pending_verification state from Firestore when page reloads mid-verification
+  useEffect(() => {
+    if (activeTraveler || pendingPostAuthFlow || !pendingOtpPhone) return;
+    if (hydratedPendingPhoneRef.current === pendingOtpPhone) return;
+    hydratedPendingPhoneRef.current = pendingOtpPhone;
+
+    let cancelled = false;
+    void checkClientAccountAndDeviceCloud(pendingOtpPhone).then((check) => {
+      if (cancelled) return;
+      if (!check.exists || !check.profile) {
+        onSetPendingOtpPhone(null);
+        setAuthStage('phone_entry');
+        return;
+      }
+
+      const profile = check.profile;
+      setTrustedPhone(profile.phone);
+      if (profile.name) setDetectedClientName(profile.name);
+      if (profile.otpExpiresAt && !profile.otpConsumed) {
+        setOtpExpiresAt(profile.otpExpiresAt);
+      }
+
+      const stillPending = !profile.verified || profile.accountStatus === 'pending_verification';
+      if (stillPending) {
+        setOtpPurpose('first_login');
+        setAuthStage('otp_verify');
+        return;
+      }
+
+      if (!check.hasPin) {
+        onSetPendingPostAuthFlow?.({
+          phone: profile.phone,
+          stage: 'pin_setup',
+          isPinReset: false,
+        });
+        setAuthStage('pin_setup');
+        return;
+      }
+
+      if (check.isTrustedDevice) {
+        onSetPendingOtpPhone(null);
+        setAuthStage('pin_login');
+      } else {
+        setOtpPurpose('untrusted_device');
+        setAuthStage('otp_verify');
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTraveler,
+    pendingPostAuthFlow,
+    pendingOtpPhone,
+    onSetPendingOtpPhone,
+    onSetPendingPostAuthFlow,
+  ]);
 
   // Live 1-second countdown ticker for 24-hour OTP validity window
   useEffect(() => {
@@ -625,6 +689,30 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       if (check.exists && check.profile) {
         setDetectedClientName(check.profile.name || '');
 
+        const isPendingVerification =
+          !check.profile.verified || check.profile.accountStatus === 'pending_verification';
+
+        // Strict hold: unverified accounts MUST verify OTP (or receive Admin instant activation) first
+        if (isPendingVerification) {
+          setOtpPurpose('first_login');
+          const res = await initiateTravelerOtpLoginCloud('', '', check.phone);
+          if (!res.ok) {
+            setAuthError(res.error || t('تعذر بدء تسجيل الدخول.', 'Could not start login.'));
+            return;
+          }
+          setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
+          setOtpInfoBanner(
+            t(
+              'حسابك معلّق حالياً بانتظار التفعيل بالكود. يرجى إدخال كود التفعيل المكون من 6 أرقام للمتابعة.',
+              'Your account is currently pending OTP activation. Enter your 6-digit OTP to continue.'
+            )
+          );
+          onSetPendingOtpPhone(check.phone);
+          setOtpInput('');
+          setAuthStage('otp_verify');
+          return;
+        }
+
         if (check.isTrustedDevice && check.hasPin) {
           setPinLoginInput('');
           setPinLoginError('');
@@ -655,7 +743,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           return;
         }
 
-        // Existing account waiting for OTP or untrusted device -> resume active 24h OTP or issue fresh 6-digit OTP
+        // Untrusted device or missing PIN -> issue fresh 6-digit OTP
         setOtpPurpose(check.hasPin ? 'untrusted_device' : 'first_login');
         const res = await initiateTravelerOtpLoginCloud('', '', check.phone);
         if (!res.ok) {
@@ -1707,10 +1795,11 @@ Please advise on the next steps for my application.`
                   <input
                     type="tel"
                     inputMode="numeric"
+                    pattern="[0-9]*"
                     required
                     dir="ltr"
                     value={loginPhone}
-                    onChange={(e) => setLoginPhone(e.target.value)}
+                    onChange={(e) => setLoginPhone(digitsOnly(e.target.value, 20))}
                     placeholder="01012345678"
                     autoFocus
                     className="w-full px-3.5 py-3 rounded-xl border border-slate-300 text-sm font-bold text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
@@ -2011,8 +2100,8 @@ Please advise on the next steps for my application.`
                       <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
                       <span>
                         {t(
-                          'طلب الكود عبر واتساب (201119227270)',
-                          'Request Code via WhatsApp (201119227270)'
+                          'طلب الكود عبر واتساب (201128440008)',
+                          'Request Code via WhatsApp (201128440008)'
                         )}
                       </span>
                     </a>
@@ -3897,7 +3986,10 @@ Please advise on the next steps for my application.`
                       >
                         <WhatsAppIcon className="w-4 h-4 shrink-0" variant="white" />
                         <span>
-                          {t('اطلب كود التفعيل عبر واتساب', 'Request Activation Code via WhatsApp')}
+                          {t(
+                            'اطلب كود التفعيل عبر واتساب (201128440008)',
+                            'Request Activation Code via WhatsApp (201128440008)'
+                          )}
                         </span>
                       </a>
                       <p className="text-[10.5px] font-bold text-emerald-800 text-center">

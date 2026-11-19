@@ -1,7 +1,7 @@
 import { TravelRepository } from '../data/travelData';
 import { formatPhoneToDialHref, getSiteConfig } from './siteConfigStore';
 
-// Official Customer Service & General Inquiries WhatsApp Number ONLY (OTP uses 201119227270 in travelerStore)
+// Unified Official Masarik Tourism WhatsApp Number (Customer Service, Orders & OTP Activation)
 export const CUSTOMER_SERVICE_WHATSAPP_NUMBER = '201128440008';
 export const CUSTOMER_SERVICE_PHONE_DISPLAY = '01128440008';
 

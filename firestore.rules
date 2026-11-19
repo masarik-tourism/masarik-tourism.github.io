@@ -59,6 +59,7 @@ service cloud.firestore {
         'pinUpdatedAt',
         'trustedDevices',
         'verified',
+        'accountStatus',
         'verifiedAt',
         'createdAt',
         'updatedAt',
@@ -97,6 +98,7 @@ service cloud.firestore {
       && (!('activatedByAdmin' in data) || data.activatedByAdmin is bool)
       && isOptionalString(data, 'adminBypassOtpAt', 64)
       && data.verified is bool
+      && (!('accountStatus' in data) || (data.accountStatus is string && data.accountStatus in ['pending_verification', 'verified']))
       && data.createdAt is string
       && data.createdAt.size() >= 10
       && data.createdAt.size() <= 64
@@ -289,6 +291,8 @@ service cloud.firestore {
         'workingHoursEn',
         'heroHighlightAr',
         'heroHighlightEn',
+        'primaryDriveWebAppUrl',
+        'additionalDriveWebApps',
         'updatedAt'
       ])
       && data.announcementEnabled is bool
@@ -300,6 +304,33 @@ service cloud.firestore {
       && data.workingHoursEn is string && data.workingHoursEn.size() <= 200
       && data.heroHighlightAr is string && data.heroHighlightAr.size() <= 500
       && data.heroHighlightEn is string && data.heroHighlightEn.size() <= 500
+      && (!('primaryDriveWebAppUrl' in data) || (data.primaryDriveWebAppUrl is string && data.primaryDriveWebAppUrl.size() <= 500 && data.primaryDriveWebAppUrl.matches('^https://.*')))
+      && (
+        !('additionalDriveWebApps' in data)
+        || (
+          data.additionalDriveWebApps is list
+          && data.additionalDriveWebApps.size() <= 10
+          && (
+            data.additionalDriveWebApps.size() == 0
+            || (
+              data.additionalDriveWebApps[0] is map
+              && data.additionalDriveWebApps[0].keys().hasAll(['id', 'label', 'url', 'scope', 'enabled'])
+              && data.additionalDriveWebApps[0].keys().hasOnly(['id', 'label', 'url', 'scope', 'enabled'])
+              && data.additionalDriveWebApps[0].id is string
+              && data.additionalDriveWebApps[0].id.size() >= 1
+              && data.additionalDriveWebApps[0].id.size() <= 64
+              && data.additionalDriveWebApps[0].label is string
+              && data.additionalDriveWebApps[0].label.size() <= 120
+              && data.additionalDriveWebApps[0].url is string
+              && data.additionalDriveWebApps[0].url.size() <= 500
+              && data.additionalDriveWebApps[0].url.matches('^https://.*')
+              && data.additionalDriveWebApps[0].scope is string
+              && data.additionalDriveWebApps[0].scope in ['all', 'client_docs', 'admin_deliverables']
+              && data.additionalDriveWebApps[0].enabled is bool
+            )
+          )
+        )
+      )
       && isOptionalString(data, 'updatedAt', 64);
     }
 
@@ -373,6 +404,7 @@ service cloud.firestore {
           'pinUpdatedAt',
           'trustedDevices',
           'verified',
+          'accountStatus',
           'verifiedAt',
           'updatedAt',
           'orderStatus',

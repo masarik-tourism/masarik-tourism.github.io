@@ -2,8 +2,12 @@ import { useEffect, useState } from 'react';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { TravelRepository } from '../data/travelData';
 import { OperationType, db, handleFirestoreError } from '../firebase';
+import { DriveEndpointScope, DriveStorageEndpoint } from '../types/travel';
 
 export type AnnouncementStyle = 'gold' | 'red' | 'green';
+
+export const DEFAULT_PRIMARY_DRIVE_WEBAPP_URL =
+  'https://script.google.com/macros/s/AKfycbxk3bwCMH7e6NzZKKZhbMCLBbVZT8BKrR_y5IoE_LyTqL0Gqw4-kc80mzH0J_EbqnSENw/exec';
 
 export interface SiteConfig {
   announcementEnabled: boolean;
@@ -15,6 +19,8 @@ export interface SiteConfig {
   workingHoursEn: string;
   heroHighlightAr: string;
   heroHighlightEn: string;
+  primaryDriveWebAppUrl: string;
+  additionalDriveWebApps: DriveStorageEndpoint[];
 }
 
 const SITE_CONFIG_STORAGE_KEY = 'masarik_site_config_v1';
@@ -31,7 +37,40 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   workingHoursEn: '24/7 Customer Support All Week Long',
   heroHighlightAr: 'منصتك لجميع إجراءات التأشيرات والسفر للسعودية',
   heroHighlightEn: 'Your Trusted Portal for Saudi Visas, Tasheer & Global Travel',
+  primaryDriveWebAppUrl: DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
+  additionalDriveWebApps: [],
 };
+
+function sanitizeHttpsUrl(rawUrl: unknown, fallback = ''): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return fallback;
+  if (!trimmed.startsWith('https://')) return fallback;
+  return trimmed.slice(0, 500);
+}
+
+function sanitizeAdditionalDriveEndpoints(rawList: unknown): DriveStorageEndpoint[] {
+  if (!Array.isArray(rawList)) return [];
+  return rawList
+    .filter((item) => item && typeof item === 'object')
+    .slice(0, 10)
+    .map((item, idx) => {
+      const obj = item as Partial<DriveStorageEndpoint>;
+      const cleanUrl = sanitizeHttpsUrl(obj.url, '');
+      const scope: DriveEndpointScope =
+        obj.scope === 'client_docs' || obj.scope === 'admin_deliverables' ? obj.scope : 'all';
+      return {
+        id:
+          String(obj.id || `drv-${Date.now()}-${idx}`)
+            .replace(/[^a-zA-Z0-9_-]/g, '')
+            .slice(0, 64) || `drv-${idx}`,
+        label: String(obj.label || `حساب تخزين ${idx + 2}`).trim().slice(0, 120) || `Drive ${idx + 2}`,
+        url: cleanUrl,
+        scope,
+        enabled: obj.enabled !== false,
+      };
+    })
+    .filter((entry) => Boolean(entry.url));
+}
 
 function emitSiteConfigUpdate(): void {
   if (typeof window !== 'undefined') {
@@ -55,6 +94,11 @@ function sanitizeSiteConfigPayload(cfg: SiteConfig) {
     workingHoursEn: String(cfg.workingHoursEn || '').slice(0, 200),
     heroHighlightAr: String(cfg.heroHighlightAr || '').slice(0, 500),
     heroHighlightEn: String(cfg.heroHighlightEn || '').slice(0, 500),
+    primaryDriveWebAppUrl: sanitizeHttpsUrl(
+      cfg.primaryDriveWebAppUrl,
+      DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
+    ),
+    additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(cfg.additionalDriveWebApps),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -105,6 +149,11 @@ export function subscribeSiteConfigCloud(): () => void {
         workingHoursEn: data.workingHoursEn ?? DEFAULT_SITE_CONFIG.workingHoursEn,
         heroHighlightAr: data.heroHighlightAr ?? DEFAULT_SITE_CONFIG.heroHighlightAr,
         heroHighlightEn: data.heroHighlightEn ?? DEFAULT_SITE_CONFIG.heroHighlightEn,
+        primaryDriveWebAppUrl: sanitizeHttpsUrl(
+          data.primaryDriveWebAppUrl,
+          DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
+        ),
+        additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(data.additionalDriveWebApps),
       };
       writeSiteConfigLocalOnly(merged);
     },
@@ -127,6 +176,11 @@ export function getSiteConfig(): SiteConfig {
     return {
       ...DEFAULT_SITE_CONFIG,
       ...parsed,
+      primaryDriveWebAppUrl: sanitizeHttpsUrl(
+        parsed.primaryDriveWebAppUrl,
+        DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
+      ),
+      additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(parsed.additionalDriveWebApps),
     };
   } catch {
     return DEFAULT_SITE_CONFIG;

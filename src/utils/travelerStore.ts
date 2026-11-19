@@ -54,14 +54,45 @@ import { getCmsState } from './cmsStore';
 
 const TRAVELERS_STORAGE_KEY = 'masarik_travelers_v1';
 const ACTIVE_PHONE_STORAGE_KEY = 'masarik_active_phone_v1';
+const PENDING_VERIFICATION_PHONE_KEY = 'masarik_pending_verification_phone_v1';
 const ADMIN_PIN_STORAGE_KEY = 'masarik_admin_pin_v1';
 const ADMIN_PIN_HASH_STORAGE_KEY = 'masarik_admin_pin_hash_v1';
 const DEFAULT_ADMIN_PIN = '202200';
 
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
 export const COMPANY_WHATSAPP_NUMBER = '201128440008';
-export const OTP_ACTIVATION_WHATSAPP_NUMBER = '201119227270';
+export const OTP_ACTIVATION_WHATSAPP_NUMBER = COMPANY_WHATSAPP_NUMBER;
 export const OTP_VALIDITY_MS = 24 * 60 * 60 * 1000;
+
+export function getPendingVerificationPhone(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(PENDING_VERIFICATION_PHONE_KEY);
+    if (!raw) return null;
+    const norm = normalizePhone(raw);
+    return /^[0-9]{8,20}$/.test(norm) ? norm : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setPendingVerificationPhone(rawPhone: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!rawPhone) {
+      window.localStorage.removeItem(PENDING_VERIFICATION_PHONE_KEY);
+      return;
+    }
+    const norm = normalizePhone(rawPhone);
+    if (/^[0-9]{8,20}$/.test(norm)) {
+      window.localStorage.setItem(PENDING_VERIFICATION_PHONE_KEY, norm);
+    } else {
+      window.localStorage.removeItem(PENDING_VERIFICATION_PHONE_KEY);
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 export const VISA_ORDER_STATUSES: CanonicalVisaOrderStatus[] = [
   'تم استلام الطلب',
@@ -216,8 +247,13 @@ export function normalizeArabicDigits(input: string): string {
   return input.replace(/[٠-٩]/g, (d) => String(arabicDigits.indexOf(d)));
 }
 
+export function digitsOnly(raw: string, maxLength?: number): string {
+  const clean = normalizeArabicDigits(raw || '').replace(/\D/g, '');
+  return typeof maxLength === 'number' ? clean.slice(0, maxLength) : clean;
+}
+
 export function normalizePhone(rawPhone: string): string {
-  const digits = normalizeArabicDigits(rawPhone).replace(/\D/g, '');
+  const digits = digitsOnly(rawPhone);
   if (!digits) return '';
   if (digits.startsWith('00')) {
     return digits.slice(2);
@@ -514,6 +550,7 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       ? { adminBypassOtpAt: String(profile.adminBypassOtpAt).slice(0, 64) }
       : {}),
     verified: Boolean(profile.verified),
+    accountStatus: profile.verified ? 'verified' : 'pending_verification',
     createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
     updatedAt: new Date().toISOString(),
     orderStatus: safeStatus,
@@ -637,6 +674,9 @@ function mergeCloudClientWithLocal(
     ...cloudData,
     phoneNormalized: cloudData.phoneNormalized || normalizePhone(cloudData.phone),
     orderCode: cloudData.orderCode || buildOrderCodeFromPhone(cloudData.phone),
+    accountStatus:
+      cloudData.accountStatus ||
+      (cloudData.verified ? 'verified' : 'pending_verification'),
     firstName: cloudData.firstName || split.firstName,
     lastName: cloudData.lastName || split.lastName,
     otpGeneratedAt: cloudData.otpGeneratedAt || localExisting?.otpGeneratedAt,
@@ -954,7 +994,11 @@ export function getActiveTraveler(): TravelerProfile | null {
   const activePhone = getActivePhone();
   if (!activePhone) return null;
   const all = getAllTravelers();
-  return all[activePhone] || null;
+  const profile = all[activePhone];
+  if (!profile || !profile.verified || profile.accountStatus === 'pending_verification') {
+    return null;
+  }
+  return profile;
 }
 
 export function setActiveTravelerPhone(phone: string | null): void {
@@ -1225,6 +1269,7 @@ export async function initiateTravelerOtpLoginCloud(
       otpGeneratedAt: activeGeneratedAt,
       otpExpiresAt: activeExpiresAt,
       otpConsumed: false,
+      accountStatus: existing.verified ? 'verified' : 'pending_verification',
       ...(!existing.verified ? { activatedByAdmin: false } : {}),
     };
 
@@ -1248,6 +1293,7 @@ export async function initiateTravelerOtpLoginCloud(
     activatedByAdmin: false,
     trustedDevices: [],
     verified: false,
+    accountStatus: 'pending_verification',
     createdAt: nowIso,
     orderStatus: 'تم استلام الطلب',
     documents: [],
@@ -1491,6 +1537,7 @@ export async function verifyLoginOtpCloud(
     otpConsumed: true,
     otpExpiresAt: new Date(0).toISOString(),
     verified: true,
+    accountStatus: 'verified',
     verifiedAt: target.verifiedAt || new Date().toISOString(),
   };
 
@@ -1693,6 +1740,7 @@ export async function adminCreateClientCloud(
         otpConsumed: false,
         activatedByAdmin: false,
         verified: false,
+        accountStatus: 'pending_verification',
         createdAt: nowIso,
         orderStatus: 'تم استلام الطلب',
         documents: [],
@@ -1738,6 +1786,7 @@ export async function adminInstantActivateClientCloud(
     phone,
     phoneNormalized: phone,
     verified: true,
+    accountStatus: 'verified',
     verifiedAt: existing.verifiedAt || nowIso,
     activatedByAdmin: true,
     adminBypassOtpAt: nowIso,
@@ -1784,6 +1833,7 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     name: cleanName,
     otp: generateSixDigitOtp(),
     verified: false,
+    accountStatus: 'pending_verification',
     createdAt: new Date().toISOString(),
     orderStatus: 'تم استلام الطلب',
     documents: [],
@@ -1847,6 +1897,7 @@ export function verifyManualOtp(
     phone,
     phoneNormalized: phone,
     verified: true,
+    accountStatus: 'verified',
     verifiedAt: new Date().toISOString(),
   };
   all[phone] = verifiedProfile;
@@ -1884,6 +1935,7 @@ export function activateViaMagicLink(
       lastName: existing.lastName || split.lastName,
       name: nameFromUrl?.trim() || existing.name,
       verified: true,
+      accountStatus: 'verified',
       verifiedAt: existing.verifiedAt || new Date().toISOString(),
     };
     all[phone] = updated;
@@ -1903,6 +1955,7 @@ export function activateViaMagicLink(
     name: fallbackName,
     otp: cleanOtp,
     verified: true,
+    accountStatus: 'verified',
     verifiedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     orderStatus: 'تم استلام الطلب',
@@ -1967,6 +2020,7 @@ export async function activateViaMagicLinkCloud(
           otpConsumed: true,
           otpExpiresAt: new Date(0).toISOString(),
           verified: true,
+          accountStatus: 'verified',
           verifiedAt: cloud.verifiedAt || new Date().toISOString(),
         };
 
@@ -2127,6 +2181,12 @@ export function updateTravelerProfileDetails(
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
+    accountStatus:
+      cleanUpdates.verified !== undefined
+        ? cleanUpdates.verified
+          ? 'verified'
+          : 'pending_verification'
+        : existing.accountStatus || (existing.verified ? 'verified' : 'pending_verification'),
     appointmentDetails: nextAppointment,
     notifications: nextNotifications,
     phone,

@@ -1,5 +1,8 @@
-export const GOOGLE_DRIVE_WEBAPP_URL =
-  'https://script.google.com/macros/s/AKfycbxk3bwCMH7e6NzZKKZhbMCLBbVZT8BKrR_y5IoE_LyTqL0Gqw4-kc80mzH0J_EbqnSENw/exec';
+import { DEFAULT_PRIMARY_DRIVE_WEBAPP_URL, getSiteConfig } from './siteConfigStore';
+
+export const GOOGLE_DRIVE_WEBAPP_URL = DEFAULT_PRIMARY_DRIVE_WEBAPP_URL;
+
+export type DriveUploadPurpose = 'client_docs' | 'admin_deliverables';
 
 export const MAX_PDF_BYTES = 5 * 1024 * 1024; // 5 MB max for PDF deliverables
 export const MAX_IMAGE_BYTES = 500 * 1024; // 500 KB target max for uploaded images
@@ -113,23 +116,47 @@ async function fileToRawBase64(file: File): Promise<string> {
   });
 }
 
-export async function uploadToGoogleDriveWebApp(params: {
-  fileName: string;
-  mimeType: string;
-  base64: string;
-}): Promise<{
-  fileId: string;
-  downloadUrl: string;
-  viewUrl: string;
-  thumbnailUrl: string;
-  storagePath: string;
-}> {
-  const cleanBase64 = stripBase64DataPrefix(params.base64).trim();
-  if (!cleanBase64) {
-    throw new Error('محتوى الملف فارغ ولا يمكن رفعه إلى Google Drive.');
+export function resolveDriveUploadEndpoints(
+  purpose: DriveUploadPurpose = 'client_docs'
+): string[] {
+  const cfg = getSiteConfig();
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  const pushUnique = (rawUrl?: string) => {
+    const clean = String(rawUrl || '').trim();
+    if (!clean || !clean.startsWith('https://') || seen.has(clean)) return;
+    seen.add(clean);
+    candidates.push(clean);
+  };
+
+  // 1. Dedicated enabled secondary endpoints explicitly scoped to this upload purpose
+  for (const ep of cfg.additionalDriveWebApps || []) {
+    if (ep.enabled !== false && ep.scope === purpose) {
+      pushUnique(ep.url);
+    }
   }
 
-  const response = await fetch(GOOGLE_DRIVE_WEBAPP_URL, {
+  // 2. Admin-configured Primary Google Drive Web App endpoint
+  pushUnique(cfg.primaryDriveWebAppUrl);
+
+  // 3. Enabled multi-account failover endpoints with scope === 'all'
+  for (const ep of cfg.additionalDriveWebApps || []) {
+    if (ep.enabled !== false && ep.scope === 'all') {
+      pushUnique(ep.url);
+    }
+  }
+
+  // 4. Ultimate default safety fallback
+  pushUnique(GOOGLE_DRIVE_WEBAPP_URL);
+  return candidates;
+}
+
+async function postFileToDriveEndpoint(
+  endpointUrl: string,
+  params: { fileName: string; mimeType: string; base64: string }
+) {
+  const response = await fetch(endpointUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'text/plain;charset=utf-8',
@@ -138,7 +165,7 @@ export async function uploadToGoogleDriveWebApp(params: {
     body: JSON.stringify({
       fileName: params.fileName,
       mimeType: params.mimeType,
-      base64: cleanBase64,
+      base64: params.base64,
     }),
   });
 
@@ -180,6 +207,44 @@ export async function uploadToGoogleDriveWebApp(params: {
   }
 
   return buildGoogleDriveUrls(fileId);
+}
+
+export async function uploadToGoogleDriveWebApp(params: {
+  fileName: string;
+  mimeType: string;
+  base64: string;
+  purpose?: DriveUploadPurpose;
+}): Promise<{
+  fileId: string;
+  downloadUrl: string;
+  viewUrl: string;
+  thumbnailUrl: string;
+  storagePath: string;
+}> {
+  const cleanBase64 = stripBase64DataPrefix(params.base64).trim();
+  if (!cleanBase64) {
+    throw new Error('محتوى الملف فارغ ولا يمكن رفعه إلى Google Drive.');
+  }
+
+  const endpoints = resolveDriveUploadEndpoints(params.purpose || 'client_docs');
+  let lastError: unknown = null;
+
+  for (const endpointUrl of endpoints) {
+    try {
+      return await postFileToDriveEndpoint(endpointUrl, {
+        fileName: params.fileName,
+        mimeType: params.mimeType,
+        base64: cleanBase64,
+      });
+    } catch (err) {
+      lastError = err;
+      console.warn('Google Drive endpoint failed, trying next configured endpoint:', endpointUrl, err);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('تعذر رفع الملف إلى روابط Google Drive المفعلة.');
 }
 
 /**
@@ -281,6 +346,7 @@ export async function uploadTravelerDocumentToStorage(
       fileName,
       mimeType,
       base64: stripBase64DataPrefix(dataUrl),
+      purpose: 'client_docs',
     });
     return {
       downloadUrl: uploaded.downloadUrl,
@@ -317,6 +383,7 @@ export async function uploadTravelerAvatarToStorage(
       fileName,
       mimeType,
       base64: stripBase64DataPrefix(dataUrl),
+      purpose: 'client_docs',
     });
     return {
       downloadUrl: uploaded.downloadUrl,
@@ -356,6 +423,7 @@ export async function uploadFamilyMemberFileToStorage(
       fileName,
       mimeType,
       base64: stripBase64DataPrefix(dataUrl),
+      purpose: 'client_docs',
     });
     return {
       downloadUrl: uploaded.downloadUrl,
@@ -431,6 +499,7 @@ export async function uploadIssuedDeliverableToStorage(
     fileName: finalFileName,
     mimeType: mime,
     base64,
+    purpose: 'admin_deliverables',
   });
 
   return {

@@ -822,10 +822,18 @@ Please share requirements and next steps. Thank you.`
                   <input
                     type="tel"
                     inputMode="numeric"
+                    pattern="[0-9]*"
                     required
                     dir="ltr"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    onChange={(e) => {
+                      const arabic = '٠١٢٣٤٥٦٧٨٩';
+                      const normalized = e.target.value
+                        .replace(/[٠-٩]/g, (d) => String(arabic.indexOf(d)))
+                        .replace(/\D/g, '')
+                        .slice(0, 20);
+                      setPhone(normalized);
+                    }}
                     placeholder="01000000000"
                     className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs md:text-sm text-[#0F2438] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0284C7] focus:border-transparent transition tabular-nums"
                   />

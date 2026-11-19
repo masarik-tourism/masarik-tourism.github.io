@@ -143,6 +143,18 @@ export interface TravelerSessionMeta {
   expiresAt: number | null;
 }
 
+export type AccountVerificationStatus = 'pending_verification' | 'verified';
+
+export type DriveEndpointScope = 'all' | 'client_docs' | 'admin_deliverables';
+
+export interface DriveStorageEndpoint {
+  id: string;
+  label: string;
+  url: string;
+  scope: DriveEndpointScope;
+  enabled: boolean;
+}
+
 export interface TravelerProfile {
   phone: string;
   phoneNormalized?: string;
@@ -163,6 +175,7 @@ export interface TravelerProfile {
   pinUpdatedAt?: string;
   trustedDevices?: TrustedDevice[];
   verified: boolean;
+  accountStatus?: AccountVerificationStatus;
   verifiedAt?: string;
   createdAt: string;
   updatedAt?: string;

@@ -76,9 +76,16 @@ export const AdminLoginModal: React.FC = () => {
             inputMode="numeric"
             pattern="[0-9]*"
             autoComplete="one-time-code"
+            dir="ltr"
             value={pinInput}
-            onChange={(e) => setPinInput(e.target.value.replace(/[^0-9\u0660-\u0669\u06F0-\u06F9]/g, ''))}
-            placeholder={t('الرمز السري (PIN)', 'Admin PIN')}
+            onChange={(e) => {
+              const arabic = '٠١٢٣٤٥٦٧٨٩';
+              const normalized = e.target.value
+                .replace(/[٠-٩]/g, (d) => String(arabic.indexOf(d)))
+                .replace(/\D/g, '');
+              setPinInput(normalized);
+            }}
+            placeholder={t('الرمز السري (PIN - أرقام فقط)', 'Admin PIN (0-9)')}
             autoFocus
             className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-base font-bold tracking-widest text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A052] [-webkit-text-security:disc]"
           />

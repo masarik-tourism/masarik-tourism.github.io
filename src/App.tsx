@@ -30,9 +30,11 @@ import {
   activateViaMagicLinkCloud,
   getActivePhone,
   getActiveTraveler,
+  getPendingVerificationPhone,
   getTravelerDisplayNames,
   getTravelerSessionMeta,
   logoutTravelerSession,
+  setPendingVerificationPhone,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
 } from './utils/travelerStore';
@@ -100,12 +102,25 @@ export const App: React.FC = () => {
   const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
     getActiveTraveler()
   );
-  const [pendingOtpPhone, setPendingOtpPhone] = useState<string | null>(null);
+  const [pendingOtpPhone, setPendingOtpPhoneState] = useState<string | null>(() =>
+    getActivePhone() ? null : getPendingVerificationPhone()
+  );
+  const updatePendingOtpPhone = useCallback((phone: string | null) => {
+    setPendingOtpPhoneState(phone);
+    setPendingVerificationPhone(phone);
+  }, []);
   const [pendingPostAuthFlow, setPendingPostAuthFlow] = useState<PendingPostAuthFlow | null>(null);
   const [sessionMeta, setSessionMeta] = useState<TravelerSessionMeta | null>(() =>
     getTravelerSessionMeta()
   );
   const [sessionExpiredAlert, setSessionExpiredAlert] = useState<string | null>(null);
+
+  // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
+  useEffect(() => {
+    if (!getActivePhone() && getPendingVerificationPhone()) {
+      setTravelerSection((curr) => curr || 'account');
+    }
+  }, []);
 
   // Lifted Draft State: preserved across full-page navigation until explicit Save or Cancel
   const [travelerDraft, setTravelerDraft] = useState<TravelerProfileDraft>(() =>
@@ -175,7 +190,7 @@ export const App: React.FC = () => {
       logoutTravelerSession('expired');
       consumeSessionExpiredNotice();
       setTravelerDraft(buildDraftFromTraveler(null, lang));
-      setPendingOtpPhone(null);
+      updatePendingOtpPhone(null);
       setPendingPostAuthFlow(null);
       setSessionExpiredAlert(
         lang === 'en'
@@ -244,7 +259,7 @@ export const App: React.FC = () => {
           const res = await activateViaMagicLinkCloud(activatePhone, otp, nameParam);
           if (res.ok && res.profile) {
             if (res.needsPinSetup || !res.isDeviceTrusted) {
-              setPendingOtpPhone(res.profile.phone);
+              updatePendingOtpPhone(res.profile.phone);
               setPendingPostAuthFlow({
                 phone: res.profile.phone,
                 stage: res.needsPinSetup ? 'pin_setup' : 'device_trust_prompt',
@@ -261,7 +276,7 @@ export const App: React.FC = () => {
                     )
               );
             } else {
-              setPendingOtpPhone(null);
+              updatePendingOtpPhone(null);
               setPendingPostAuthFlow(null);
               setMagicLinkFeedback(
                 t(
@@ -400,7 +415,7 @@ export const App: React.FC = () => {
             onUpdateDraft={(updater) => setTravelerDraft((prev) => updater(prev))}
             onResetDraft={handleResetDraft}
             pendingOtpPhone={pendingOtpPhone}
-            onSetPendingOtpPhone={setPendingOtpPhone}
+            onSetPendingOtpPhone={updatePendingOtpPhone}
             pendingPostAuthFlow={pendingPostAuthFlow}
             onSetPendingPostAuthFlow={setPendingPostAuthFlow}
             magicLinkFeedback={magicLinkFeedback}
