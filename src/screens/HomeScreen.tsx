@@ -8,8 +8,6 @@ import {
   Plane,
   Award,
   FileText,
-  Smartphone,
-  Download,
   Lock,
   Building2,
   Clock,
@@ -28,11 +26,9 @@ import { FAQAccordion } from '../components/FAQAccordion';
 import { ServiceRequestModal } from '../components/ServiceRequestModal';
 import masarikLogoImg from '../assets/images/masarik_logo.jpg';
 import masarikHeroBgImg from '../assets/images/masarik_hero_bg.jpg';
-import { useLatestApkInfo, handleApkDownload, FAST_CDN_APK_URL } from '../hooks/useLatestApkUrl';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useSiteConfig } from '../utils/siteConfigStore';
 import { CmsDynamicGridItems } from '../components/CmsDynamicGrid';
-import { isRunningInApp } from '../utils/appEnvironment';
 import { OfficialTrustFooter } from '../components/OfficialTrustFooter';
 import { QuickOrderLookupCard } from '../components/QuickOrderLookupCard';
 
@@ -54,7 +50,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [logoError, setLogoError] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalServiceTitle, setModalServiceTitle] = useState<string | undefined>(undefined);
-  const apkInfo = useLatestApkInfo();
 
   const ForwardArrow = isAr ? ArrowLeft : ArrowRight;
 
@@ -456,58 +451,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
         </section>
 
-        {/* 7. APK App Download & Update Banner (automatically hidden inside Android WebView app) */}
-        {!isRunningInApp() && (
-          <div className="bg-gradient-to-r from-[#0F2438] to-[#163B65] text-white rounded-2xl p-5 shadow-md flex flex-col md:flex-row items-center justify-between gap-4 text-start border border-[#C6A052]/40">
-            <div className="flex items-center gap-3.5 w-full md:w-auto">
-              <div className="w-12 h-12 rounded-xl bg-white/10 text-[#E5C887] flex items-center justify-center shrink-0">
-                <Smartphone className="w-6 h-6" />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-xs sm:text-sm font-bold text-white">
-                    {t('تطبيق مسارك للسياحة للأندرويد', 'Masarik Tourism Android App')}
-                  </h3>
-                  <span className="text-[11px] font-black text-[#0A1926] bg-[#E5C887] px-2 py-0.5 rounded-md tabular-nums">
-                    {apkInfo.version}
-                    {apkInfo.sizeLabel ? ` • ${apkInfo.sizeLabel}` : ''}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                  {t(
-                    'احصل على أحدث إصدار رسمي وموقّع من التطبيق للوصول السريع إلى خدماتك في أي وقت وتلقي التحديثات تلقائياً.',
-                    'Get the official signed Android APK for fast access to your travel services anytime.'
-                  )}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-col items-center md:items-end gap-1.5 w-full md:w-auto shrink-0">
-              <a
-                id="apk-download-btn"
-                href={apkInfo.downloadUrl || FAST_CDN_APK_URL}
-                onClick={(e) => handleApkDownload(apkInfo.downloadUrl, e)}
-                className="w-full md:w-auto min-h-[44px] bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] px-5 py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-95 text-center cursor-pointer whitespace-nowrap"
-              >
-                <Download className="w-4 h-4 text-[#0A1926]" />
-                <span>
-                  {t(`تحميل التحديث (APK) • ${apkInfo.version}`, `Download APK • ${apkInfo.version}`)}
-                </span>
-              </a>
-              <p className="text-[11px] text-[#E5C887] font-semibold flex items-center gap-1 text-center md:text-end">
-                <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
-                <span>
-                  {t(
-                    'ملف رسمي آمن ومفحوص 100% وخالٍ من أي برمجيات ضارة.',
-                    '100% official signed release & verified safe.'
-                  )}
-                </span>
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* 8. Official Trust Footer */}
+        {/* Official Trust Footer */}
         <OfficialTrustFooter />
       </div>
 
