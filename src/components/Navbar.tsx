@@ -37,8 +37,16 @@ import {
   getAllTravelers,
   getTravelerDisplayNames,
   markClientNotificationsReadCloud,
+  saveClientFcmTokenCloud,
   TRAVELERS_UPDATED_EVENT,
 } from '../utils/travelerStore';
+import { playChatNotificationChime } from '../utils/chatStore';
+import {
+  getBrowserNotificationPermission,
+  requestAndGetFcmToken,
+  showBrowserPushNotification,
+} from '../utils/fcmPushService';
+import { saveAdminFcmTokenCloud } from '../utils/adminAuthStore';
 import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
 import { ChatThreadSummary, TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -97,6 +105,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [adminQuickChatOpen, setAdminQuickChatOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showRefreshToast, setShowRefreshToast] = useState(false);
+  const [bellPermission, setBellPermission] = useState<NotificationPermission | 'unsupported'>(() =>
+    getBrowserNotificationPermission()
+  );
+  const [bellStatusMessage, setBellStatusMessage] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+  const [isRequestingBellPush, setIsRequestingBellPush] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const notifDropdownRef = useRef<HTMLDivElement>(null);
   const floatingChatRef = useRef<HTMLDivElement>(null);
@@ -105,6 +121,75 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [activeTraveler, setActiveTraveler] = useState<TravelerProfile | null>(() =>
     getActiveTraveler()
   );
+
+  const handleBellActivateAndTest = async (
+    targetRole: 'client' | 'admin',
+    triggerTestAlert = false
+  ) => {
+    if (isRequestingBellPush) return;
+    setIsRequestingBellPush(true);
+    playChatNotificationChime(true);
+    try {
+      navigator.vibrate?.([200, 90, 200]);
+    } catch {}
+
+    try {
+      const res = await requestAndGetFcmToken(siteConfig.fcmVapidKey);
+      setBellPermission(res.permission);
+
+      if (!res.ok) {
+        setBellStatusMessage({
+          type: 'error',
+          text:
+            res.permission === 'denied'
+              ? t(
+                  'مرفوضة من إعدادات المتصفح أو الهاتف ❌ — اسمح بالإشعارات من إعدادات الجهاز.',
+                  'Blocked in browser/phone settings ❌ — allow Notifications in device settings.'
+                )
+              : res.error ||
+                t(
+                  'مرفوضة أو غير متاحة في المتصفح الحالي.',
+                  'Denied or unavailable in current browser.'
+                ),
+        });
+        return;
+      }
+
+      if (targetRole === 'client' && activeTraveler?.phone) {
+        await saveClientFcmTokenCloud(activeTraveler.phone, res.token, true);
+      } else if (targetRole === 'admin') {
+        await saveAdminFcmTokenCloud(session?.adminId, res.token, true);
+      }
+
+      if (triggerTestAlert) {
+        await showBrowserPushNotification({
+          title: t('مسارك للإنجاز السياحي — اختبار الإشعار 🔔', 'Masarik Tourism — Test Alert 🔔'),
+          body: t(
+            'تم تفعيل إشعارات الشريط العلوي والصوت بنجاح ✅',
+            'Top-bar system notifications & sound alerts are active ✅'
+          ),
+          tag: `masarik-bell-test-${targetRole}-${Date.now()}`,
+          data: {
+            role: targetRole,
+            action: targetRole === 'admin' ? 'live_chat' : 'chat',
+            phone: targetRole === 'client' ? activeTraveler?.phone : undefined,
+          },
+        });
+      }
+
+      setBellStatusMessage({
+        type: 'success',
+        text: res.token
+          ? t(
+              'مفعّلة ✅ — تم حفظ رمز الإشعارات (fcmToken) بنجاح',
+              'Active ✅ — FCM token registered in Firestore'
+            )
+          : t('مفعّلة ✅ — إشعارات المتصفح والصوت تعمل بنجاح', 'Active ✅ — System & sound alerts active'),
+      });
+    } finally {
+      setIsRequestingBellPush(false);
+    }
+  };
 
   useEffect(() => {
     const syncTraveler = () => setActiveTraveler(getActiveTraveler());
@@ -578,20 +663,28 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               </div>
 
-              {/* Live Client Notification Bell */}
+              {/* Live Client Notification Bell — directly invokes Notification.requestPermission() & saves FCM token */}
               <div className="relative shrink-0" ref={notifDropdownRef}>
                 <button
                   type="button"
-                  onClick={() => setNotifDropdownOpen((prev) => !prev)}
+                  onClick={() => {
+                    const willOpen = !notifDropdownOpen;
+                    setNotifDropdownOpen(willOpen);
+                    if (willOpen) {
+                      void handleBellActivateAndTest('client', false);
+                    }
+                  }}
                   className={`relative px-2.5 sm:px-3 py-1.5 rounded-full text-[11px] sm:text-xs font-black flex items-center gap-1.5 transition cursor-pointer border ${
                     unreadCount > 0
                       ? 'bg-amber-50 border-amber-300 text-[#0F2438] hover:bg-amber-100'
+                      : bellPermission === 'denied'
+                      ? 'bg-red-50 border-red-200 text-red-900 hover:bg-red-100'
                       : 'bg-white border-slate-200 text-[#0F2438] hover:bg-slate-100'
                   }`}
-                  aria-label={t('إشعارات الطلبات والمستندات', 'Order & Document Notifications')}
-                  title={t('إشعارات الطلبات والمستندات', 'Order & Document Notifications')}
+                  aria-label={t('إشعارات الطلبات والمستندات وتفعيل التنبيهات', 'Notifications & Push Permission')}
+                  title={t('إشعارات الطلبات وتفعيل التنبيهات الفورية', 'Order Notifications & Instant Alerts')}
                 >
-                  <Bell className={`w-3.5 h-3.5 ${unreadCount > 0 ? 'text-amber-600' : 'text-[#0F2438]'}`} />
+                  <Bell className={`w-3.5 h-3.5 ${unreadCount > 0 ? 'text-amber-600' : bellPermission === 'denied' ? 'text-red-600' : 'text-[#0F2438]'}`} />
                   <span className="hidden sm:inline">{t('الإشعارات', 'Alerts')}</span>
                   {unreadCount > 0 && (
                     <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black flex items-center justify-center tabular-nums">
@@ -620,6 +713,46 @@ export const Navbar: React.FC<NavbarProps> = ({
                           <CheckCheck className="w-3 h-3" />
                           <span>{t('تحديد كمقروء', 'Mark all read')}</span>
                         </button>
+                      )}
+                    </div>
+
+                    {/* Live Browser/Phone Permission Status & Instant Test Strip */}
+                    <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <span
+                          className={`font-black ${
+                            bellPermission === 'granted'
+                              ? 'text-emerald-700'
+                              : bellPermission === 'denied'
+                              ? 'text-red-700'
+                              : 'text-amber-800'
+                          }`}
+                        >
+                          {bellPermission === 'granted'
+                            ? t('حالة الإذن: مفعّلة ✅', 'Permission: Active ✅')
+                            : bellPermission === 'denied'
+                            ? t('مرفوضة من إعدادات المتصفح أو الهاتف ❌', 'Blocked in Browser/Phone Settings ❌')
+                            : t('بانتظار السماح بالإشعارات 🔔', 'Waiting for permission 🔔')}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void handleBellActivateAndTest('client', true)}
+                          disabled={isRequestingBellPush}
+                          className="px-2 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[10px] font-black transition cursor-pointer shrink-0 disabled:opacity-60"
+                        >
+                          {t('اختبار الصوت والإشعار 🔊', 'Test Alert 🔊')}
+                        </button>
+                      </div>
+                      {bellStatusMessage && (
+                        <p
+                          className={`text-[10.5px] font-bold leading-snug ${
+                            bellStatusMessage.type === 'error'
+                              ? 'text-red-700'
+                              : 'text-emerald-700'
+                          }`}
+                        >
+                          {bellStatusMessage.text}
+                        </p>
                       )}
                     </div>
 
@@ -707,6 +840,32 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void handleBellActivateAndTest('admin', true)}
+                disabled={isRequestingBellPush}
+                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
+                  bellPermission === 'granted'
+                    ? 'bg-emerald-500/20 border border-emerald-400/50 text-emerald-200 hover:bg-emerald-500/30'
+                    : bellPermission === 'denied'
+                    ? 'bg-red-500/25 border border-red-400/50 text-red-200 hover:bg-red-500/35'
+                    : 'bg-[#C6A052]/25 border border-[#C6A052] text-[#E5C887] hover:bg-[#C6A052]/40'
+                }`}
+                title={
+                  bellStatusMessage?.text ||
+                  t('تفعيل إشعارات الإدارة واختبار الصوت', 'Enable Admin Alerts & Test Sound')
+                }
+              >
+                <Bell className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {bellPermission === 'granted'
+                    ? t('الإشعارات مفعّلة ✅', 'Alerts Active ✅')
+                    : bellPermission === 'denied'
+                    ? t('الإشعارات محظورة ❌', 'Alerts Blocked ❌')
+                    : t('تفعيل الإشعارات 🔔', 'Enable Alerts 🔔')}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setAdminMode('dashboard')}

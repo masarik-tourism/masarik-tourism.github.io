@@ -95,7 +95,7 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
       } else if (latest && latest.id !== lastSeenMsgIdRef.current) {
         lastSeenMsgIdRef.current = latest.id;
         if (latest.senderRole !== senderRole) {
-          playChatNotificationChime();
+          playChatNotificationChime(true);
         }
       }
 

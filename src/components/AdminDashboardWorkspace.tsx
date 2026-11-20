@@ -110,6 +110,7 @@ import {
   createSubAdmin,
   deleteSubAdmin,
   getSubAdmins,
+  saveAdminFcmTokenCloud,
   updateSubAdminPermissions,
 } from '../utils/adminAuthStore';
 import {
@@ -1006,29 +1007,37 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     if (isTestingPush) return;
     setIsTestingPush(true);
     setFcmSavedMsg('');
+    playChatNotificationChime(true);
     try {
       const tokenRes = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+      if (tokenRes.ok) {
+        await saveAdminFcmTokenCloud(session?.adminId, tokenRes.token, true);
+      }
       const shown = await showBrowserPushNotification({
-        title: t('تجربة إشعار المدير العام — مسارك', 'Masarik Admin Test Push'),
+        title: t('مسارك للإنجاز السياحي — اختبار الإشعار 🔔', 'Masarik Tourism — Admin Test Alert 🔔'),
         body: t(
-          'نظام الإشعارات الفورية يعمل بنجاح على هذا الجهاز ✅',
-          'Push notifications are active and working on this device ✅'
+          'نظام الإشعارات الفورية والصوت يعمل بنجاح على هذا الجهاز ✅',
+          'Push notifications & ringtone are active and working on this device ✅'
         ),
-        tag: 'masarik-admin-test-push',
+        tag: `masarik-admin-test-push-${Date.now()}`,
         data: { role: 'admin', action: 'live_chat' },
       });
-      playChatNotificationChime();
       setFcmSavedMsg(
         shown
           ? t(
               tokenRes.token
-                ? 'تم إرسال إشعار التجربة وربط رمز الجهاز (FCM Token) بنجاح ✅'
-                : 'تم عرض إشعار التجربة بنجاح (الإشعار المحلي عبر Service Worker مفعل) ✅',
-              'Test push notification sent successfully ✅'
+                ? 'حالة الإذن: مفعّلة ✅ — تم حفظ رمز الإشعارات (fcmToken) في Firestore وإرسال الإشعار والصوت.'
+                : 'حالة الإذن: مفعّلة ✅ — تم عرض إشعار التجربة وإطلاق نغمة التنبيه بنجاح.',
+              'Permission Status: Active ✅ — Test push notification & ringtone sent.'
+            )
+          : tokenRes.permission === 'denied'
+          ? t(
+              'حالة الإذن: مرفوضة من إعدادات المتصفح أو الهاتف ❌ — اسمح بالإشعارات من إعدادات الجهاز.',
+              'Permission Status: Blocked in browser/phone settings ❌.'
             )
           : tokenRes.error ||
             t(
-              'تعذر عرض الإشعار — تأكد من منح إذن الإشعارات من المتصفح.',
+              'تعذر عرض الإشعار العلوي — تأكد من منح إذن الإشعارات من المتصفح.',
               'Could not display push notification — check browser permissions.'
             )
       );
@@ -4587,7 +4596,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       ) : (
                         <BellRing className="w-4 h-4" />
                       )}
-                      <span>{t('إرسال إشعار تجريبي الآن', 'Send Test Notification')}</span>
+                      <span>{t('اختبار الإشعار والصوت 🔊', 'Test Alert & Sound 🔊')}</span>
                     </button>
                   </div>
                 </form>

@@ -26,6 +26,71 @@ function cleanDigits(rawPhone: string): string {
 
 let audioCtxRef: AudioContext | null = null;
 let lastChimeMs = 0;
+let audioUnlockListenersAttached = false;
+
+function getOrCreateAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  const AudioContextCtor =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor) return null;
+  if (!audioCtxRef) {
+    audioCtxRef = new AudioContextCtor();
+  }
+  return audioCtxRef;
+}
+
+export function unlockNotificationAudio(): void {
+  const ctx = getOrCreateAudioContext();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') {
+    ctx.resume().catch(() => {});
+  }
+}
+
+if (typeof window !== 'undefined' && !audioUnlockListenersAttached) {
+  audioUnlockListenersAttached = true;
+  const handleFirstGesture = () => {
+    unlockNotificationAudio();
+  };
+  window.addEventListener('pointerdown', handleFirstGesture, { passive: true });
+  window.addEventListener('keydown', handleFirstGesture, { passive: true });
+  window.addEventListener('click', handleFirstGesture, { passive: true });
+}
+
+function scheduleChimeTones(ctx: AudioContext): void {
+  const startTime = ctx.currentTime + 0.01;
+  const playTone = (freq: number, offset: number, dur: number, peakGain: number) => {
+    const osc = ctx.createOscillator();
+    const harmOsc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(freq, startTime + offset);
+    harmOsc.type = 'sine';
+    harmOsc.frequency.setValueAtTime(freq * 1.5, startTime + offset);
+
+    const harmGain = ctx.createGain();
+    harmGain.gain.setValueAtTime(0.25, startTime + offset);
+
+    gain.gain.setValueAtTime(0.0001, startTime + offset);
+    gain.gain.exponentialRampToValueAtTime(peakGain, startTime + offset + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + dur);
+
+    osc.connect(gain);
+    harmOsc.connect(harmGain);
+    harmGain.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(startTime + offset);
+    harmOsc.start(startTime + offset);
+    osc.stop(startTime + offset + dur + 0.03);
+    harmOsc.stop(startTime + offset + dur + 0.03);
+  };
+
+  playTone(880, 0, 0.18, 0.22);
+  playTone(1174.66, 0.13, 0.2, 0.22);
+  playTone(1567.98, 0.26, 0.3, 0.24);
+}
 
 /**
  * Plays a clear multi-tone Web Audio notification ring for incoming alerts or manual sound testing.
@@ -34,40 +99,22 @@ let lastChimeMs = 0;
 export function playChatNotificationChime(force = false): void {
   if (typeof window === 'undefined') return;
   const now = Date.now();
-  if (!force && now - lastChimeMs < 1200) return;
+  if (!force && now - lastChimeMs < 900) return;
   lastChimeMs = now;
 
   try {
-    const AudioContextCtor =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) return;
-    if (!audioCtxRef) {
-      audioCtxRef = new AudioContextCtor();
+    const ctx = getOrCreateAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      void ctx
+        .resume()
+        .then(() => {
+          scheduleChimeTones(ctx);
+        })
+        .catch(() => {});
+      return;
     }
-    if (audioCtxRef.state === 'suspended') {
-      void audioCtxRef.resume();
-    }
-
-    const startTime = audioCtxRef.currentTime;
-    const playTone = (freq: number, offset: number, dur: number, peakGain: number) => {
-      if (!audioCtxRef) return;
-      const osc = audioCtxRef.createOscillator();
-      const gain = audioCtxRef.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq, startTime + offset);
-      gain.gain.setValueAtTime(0.0001, startTime + offset);
-      gain.gain.exponentialRampToValueAtTime(peakGain, startTime + offset + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + offset + dur);
-      osc.connect(gain);
-      gain.connect(audioCtxRef.destination);
-      osc.start(startTime + offset);
-      osc.stop(startTime + offset + dur + 0.02);
-    };
-
-    playTone(880, 0, 0.16, 0.18);
-    playTone(1174.66, 0.12, 0.18, 0.17);
-    playTone(1567.98, 0.24, 0.26, 0.16);
+    scheduleChimeTones(ctx);
   } catch {
     // Ignore audio context block if user hasn't interacted yet
   }

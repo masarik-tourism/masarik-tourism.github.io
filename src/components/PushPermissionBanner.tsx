@@ -114,27 +114,29 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
     setStatusFeedback(null);
     setIsRegistering(true);
 
+    // Unlock audio & play clear test ring synchronously in user click gesture
+    playChatNotificationChime(true);
     try {
+      navigator.vibrate?.([220, 100, 220]);
+    } catch {}
+
+    try {
+      // Request Notification.requestPermission() directly inside user gesture
       const res = await requestAndGetFcmToken(siteConfig.fcmVapidKey);
       setPermission(res.permission);
 
       if (!res.ok) {
         if (res.permission === 'unsupported' && inAndroidApp) {
-          // Inside Android WebView without Web Notification API, still save active state and guide user cleanly
           if (role === 'client' && phone) {
             await saveClientFcmTokenCloud(phone, res.token || '', true);
           } else if (role === 'admin') {
             await saveAdminFcmTokenCloud(adminId, res.token || '', true);
           }
-          playChatNotificationChime(true);
-          try {
-            navigator.vibrate?.([220, 100, 220]);
-          } catch {}
           setStatusFeedback({
             type: 'info',
             text: t(
-              'تم تفعيل تنبيهات الصوت والاهتزاز داخل التطبيق. للحصول على إشعارات الخلفية، تأكد من السماح لإشعارات تطبيق مسارك من إعدادات الهاتف.',
-              'In-app sound & vibration alerts are active. Allow app notifications in Android Settings for background alerts.'
+              'تم تشغيل نغمة التنبيه داخل التطبيق ✅ — لمنح إشعارات الشريط العلوي، اسمح بإشعارات تطبيق مسارك من إعدادات الهاتف.',
+              'Sound alerts active ✅ — allow notifications in Android Settings for top-bar system alerts.'
             ),
           });
           return;
@@ -143,11 +145,16 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         setStatusFeedback({
           type: 'error',
           text:
-            res.error ||
-            t(
-              'تعذر تفعيل الإشعارات — يرجى السماح بالإشعارات من إعدادات الهاتف أو المتصفح.',
-              'Could not enable notifications — allow Notifications in phone/browser settings.'
-            ),
+            res.permission === 'denied'
+              ? t(
+                  'حالة الإذن: مرفوضة من إعدادات المتصفح أو الهاتف ❌ — يرجى فتح إعدادات الموقع/التطبيق والسماح بالإشعارات ثم المحاولة مجدداً.',
+                  'Permission Status: Blocked in browser/phone settings ❌ — please enable Notifications in settings and retry.'
+                )
+              : res.error ||
+                t(
+                  'حالة الإذن: مرفوضة من إعدادات المتصفح أو الهاتف — يرجى السماح بالإشعارات من إعدادات الجهاز.',
+                  'Permission Status: Denied/blocked in browser or phone settings.'
+                ),
         });
         return;
       }
@@ -162,23 +169,19 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         setLocalLinkedToken(res.token);
       }
 
-      playChatNotificationChime(true);
-      await showBrowserPushNotification({
-        title:
-          role === 'admin'
-            ? t('تم تفعيل إشعارات الإدارة بنجاح', 'Admin Push Notifications Active')
-            : t('تم تفعيل إشعارات مسارك بنجاح', 'Masarik Notifications Active'),
+      const shown = await showBrowserPushNotification({
+        title: 'مسارك للإنجاز السياحي',
         body:
           role === 'admin'
             ? t(
-                'ستصلك تنبيهات فورية في شريط الهاتف عند وصول رسالة عميل أو مستند أو طلب جديد.',
-                'You will receive instant top-bar phone alerts for new messages, documents, and orders.'
+                'تم تفعيل إشعارات الإدارة ✅ ستصلك تنبيهات فورية في شريط الهاتف عند وصول رسالة أو طلب أو مستند.',
+                'Admin push notifications enabled ✅ Instant top-bar phone alerts are now active.'
               )
             : t(
-                'ستصلك تنبيهات فورية في شريط الهاتف عند وصول رسالة أو تحديث لطلبك.',
-                'You will receive instant top-bar phone alerts for messages and order updates.'
+                'تم تفعيل الإشعارات بنجاح ✅ ستصلك تنبيهات فورية عند وصول رسالة أو تحديث لطلبك.',
+                'Notifications enabled ✅ Instant top-bar alerts are now active for your account.'
               ),
-        tag: `masarik-welcome-${role}`,
+        tag: `masarik-welcome-${role}-${Date.now()}`,
         data: {
           role,
           action: role === 'admin' ? 'live_chat' : 'chat',
@@ -190,12 +193,12 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         type: 'success',
         text: res.token
           ? t(
-              'تم ربط الجهاز وحفظ رمز الإشعارات (fcmToken) في Firestore بنجاح ✅',
-              'Device linked & FCM token saved in Firestore ✅'
+              `حالة الإذن: مفعّلة ✅ — تم حفظ رمز الإشعارات (fcmToken) في Firestore${shown ? ' وإطلاق إشعار وصوت الاختبار بنجاح' : ''}.`,
+              'Permission Status: Active ✅ — FCM token registered in Firestore & alert tested.'
             )
           : t(
-              'تم تفعيل إشعارات المتصفح والصوت الفورية على جهازك بنجاح ✅',
-              'Instant system & sound notifications enabled on your device ✅'
+              `حالة الإذن: مفعّلة ✅ — الإشعارات الفورية ونغمة التنبيه تعمل بنجاح على جهازك.`,
+              'Permission Status: Active ✅ — System notifications & sound ring enabled on your device.'
             ),
       });
     } catch {
@@ -217,7 +220,7 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
     setIsTestingSoundPush(true);
 
     try {
-      // 1. Always trigger unmistakable audible notification ring + phone vibration
+      // 1. Trigger unmistakable audible notification chime + vibration immediately on user tap
       playChatNotificationChime(true);
       try {
         if ('vibrate' in navigator && typeof navigator.vibrate === 'function') {
@@ -225,7 +228,7 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         }
       } catch {}
 
-      // 2. Ensure permission & token if browser hasn't been asked yet
+      // 2. Ask browser permission & save fcmToken if permission is still 'default'
       let currentPerm = getBrowserNotificationPermission();
       if (currentPerm === 'default') {
         const res = await requestAndGetFcmToken(siteConfig.fcmVapidKey);
@@ -242,15 +245,12 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         }
       }
 
-      // 3. Fire real OS top-bar notification (ServiceWorkerRegistration.showNotification -> Notification API fallback)
+      // 3. Fire real OS top-bar notification (ServiceWorkerRegistration.showNotification -> Notification fallback)
       const shown = await showBrowserPushNotification({
-        title:
-          role === 'admin'
-            ? t('اختبار إشعارات المدير العام — مسارك 🔔', 'Masarik Admin Test Alert 🔔')
-            : t('اختبار إشعارات مسارك للسياحة 🔔', 'Masarik Test Notification 🔔'),
+        title: t('مسارك للإنجاز السياحي — اختبار الإشعار 🔔', 'Masarik Tourism — Test Alert 🔔'),
         body: t(
           'تم اختبار الإشعار في شريط الهاتف العلوي مع الصوت والاهتزاز بنجاح ✅ — اضغط للانتقال للمحادثة.',
-          'System bar notification, sound chime & vibration tested successfully ✅ — tap to open chat.'
+          'Top-bar notification, ringtone & vibration tested successfully ✅ — tap to open chat.'
         ),
         tag: `masarik-test-alert-${role}-${Date.now()}`,
         data: {
@@ -264,24 +264,24 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
         setStatusFeedback({
           type: 'success',
           text: t(
-            'تم تشغيل رنة التنبيه وإرسال الإشعار التجريبي لشريط الهاتف العلوي بنجاح ✅',
-            'Notification chime played & top-bar system alert sent ✅'
+            'حالة الإذن: مفعّلة ✅ — تم تشغيل نغمة الرنة وإطلاق إشعار الشريط العلوي بنجاح.',
+            'Permission Status: Active ✅ — Ringtone played & top-bar system alert sent.'
           ),
         });
       } else if (currentPerm === 'denied') {
         setStatusFeedback({
           type: 'error',
           text: t(
-            'تم تشغيل الصوت ✅ لكن إشعارات شريط الهاتف مرفوضة من إعدادات الهاتف/المتصفح — اسمح بالإشعارات لإظهارها في الأعلى.',
-            'Sound played ✅ but system notifications are blocked in phone/browser settings.'
+            'تم تشغيل الصوت ✅ — لكن حالة الإذن مرفوضة من إعدادات المتصفح أو الهاتف، فعّل الإشعارات لإظهار التنبيه العلوي.',
+            'Sound played ✅ — Permission Status: Blocked in browser/phone settings.'
           ),
         });
       } else {
         setStatusFeedback({
           type: 'info',
           text: t(
-            'تم تشغيل صوت الرنة والاهتزاز ✅ (قد يقيّد هذا المتصفح/الـ WebView إشعارات النظام العلوية، اسمح بالإشعارات من إعدادات الجهاز).',
-            'Ringtone & vibration played ✅ (enable OS notification permission in device settings for top-bar popups).'
+            'تم تشغيل نغمة الرنة والاهتزاز ✅ (اسمح بالإشعارات من إعدادات الجهاز لإظهار تنبيه الشريط العلوي).',
+            'Ringtone & vibration played ✅ (enable device notification permission for top-bar alerts).'
           ),
         });
       }
@@ -333,7 +333,7 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
               ) : isDenied ? (
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-red-500/25 border border-red-400/60 text-red-200 text-[10.5px] font-black">
                   <ShieldAlert className="w-3 h-3 shrink-0" />
-                  <span>{t('مرفوضة من إعدادات الهاتف', 'Blocked in Device Settings')}</span>
+                  <span>{t('مرفوضة من إعدادات المتصفح أو الهاتف', 'Blocked in Browser/Phone Settings')}</span>
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/25 border border-amber-400/60 text-amber-200 text-[10.5px] font-black">
@@ -390,8 +390,8 @@ export const PushPermissionBanner: React.FC<PushPermissionBannerProps> = ({
               {isRegistering
                 ? t('جاري الربط...', 'Linking...')
                 : t(
-                    'تفعيل إشعارات الرسائل والتنبيهات 🔔',
-                    'Enable Message & Alert Notifications 🔔'
+                    'تفعيل إشعارات الهاتف + اختبار الصوت 🔔',
+                    'Enable Phone Alerts + Test Sound 🔔'
                   )}
             </span>
           </button>

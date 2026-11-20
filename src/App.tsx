@@ -314,9 +314,9 @@ export const App: React.FC = () => {
         nextCount > prevChatUnreadRef.current &&
         (travelerSection !== 'chat' || document.visibilityState !== 'visible')
       ) {
-        playChatNotificationChime();
+        playChatNotificationChime(true);
         void showBrowserPushNotification({
-          title: t('رسالة جديدة من إدارة مسارك', 'New Message from Masarik Team'),
+          title: t('مسارك للإنجاز السياحي — رسالة جديدة', 'Masarik Tourism — New Message'),
           body: thread?.lastMessageText || t('لديك رسالة جديدة في المحادثة المباشرة.', 'You have a new message in live chat.'),
           tag: `masarik-client-chat-${activeTravelerPhone}`,
           data: {
@@ -367,20 +367,20 @@ export const App: React.FC = () => {
     };
 
     if (deliverableAdded) {
-      playChatNotificationChime();
+      playChatNotificationChime(true);
       void showBrowserPushNotification({
-        title: t('تم إصدار مستند جديد في حسابك', 'New Deliverable Ready in Your Account'),
+        title: t('مسارك للإنجاز السياحي — مستند جديد جاهز', 'Masarik Tourism — New Deliverable Ready'),
         body: t(
-          'أصدرت إدارة مسارك مستنداً نهائياً جديداً — اضغط للعرض والتحميل.',
+          'أصدرت إدارة مسارك مستنداً نهائياً جديداً في حسابك — اضغط للعرض والتحميل.',
           'Masarik issued a final document — tap to view and download.'
         ),
         tag: `masarik-client-deliverable-${activeTraveler.phone}`,
         data: { role: 'client', action: 'documents', phone: activeTraveler.phone },
       });
     } else if (docsChanged) {
-      playChatNotificationChime();
+      playChatNotificationChime(true);
       void showBrowserPushNotification({
-        title: t('تحديث حالة مراجعة مستنداتك', 'Document Review Status Updated'),
+        title: t('مسارك للإنجاز السياحي — تحديث مستنداتك', 'Masarik Tourism — Document Status Updated'),
         body: t(
           'قامت الإدارة بتحديث حالة مراجعة أحد مستنداتك. اضغط للاطلاع.',
           'Admin updated the review status of one of your documents.'
@@ -389,9 +389,9 @@ export const App: React.FC = () => {
         data: { role: 'client', action: 'documents', phone: activeTraveler.phone },
       });
     } else if (orderChanged) {
-      playChatNotificationChime();
+      playChatNotificationChime(true);
       void showBrowserPushNotification({
-        title: t('تحديث حالة طلبك في مسارك', 'Your Masarik Order Status Updated'),
+        title: t('مسارك للإنجاز السياحي — تحديث حالة الطلب', 'Masarik Tourism — Order Status Updated'),
         body: orderStatus,
         tag: `masarik-client-order-${activeTraveler.phone}`,
         data: { role: 'client', action: 'orders', phone: activeTraveler.phone },
@@ -419,11 +419,11 @@ export const App: React.FC = () => {
         for (const [phone, th] of Object.entries(threadsMap)) {
           const prevUnreadForPhone = prevAdminThreadsRef.current[phone]?.unreadAdminCount || 0;
           if ((th.unreadAdminCount || 0) > prevUnreadForPhone) {
-            playChatNotificationChime();
+            playChatNotificationChime(true);
             void showBrowserPushNotification({
               title: t(
-                `رسالة جديدة من ${th.clientName || phone}`,
-                `New Chat Message from ${th.clientName || phone}`
+                `مسارك للإنجاز السياحي — رسالة من ${th.clientName || phone}`,
+                `Masarik Tourism — Message from ${th.clientName || phone}`
               ),
               body: th.lastMessageText || t('رسالة واردة جديدة في صندوق المحادثات.', 'New live chat message arrived.'),
               tag: `masarik-admin-chat-${phone}`,
@@ -437,7 +437,7 @@ export const App: React.FC = () => {
         nextUnread > prevAdminUnreadRef.current &&
         !isDashboardMode
       ) {
-        playChatNotificationChime();
+        playChatNotificationChime(true);
       }
       prevAdminThreadsRef.current = threadsMap;
       prevAdminUnreadRef.current = nextUnread;
@@ -466,9 +466,9 @@ export const App: React.FC = () => {
         const prof = allMap[ph];
         const clientLabel = prof ? getTravelerDisplayNames(prof).fullDisplayName || ph : ph;
         if (!old) {
-          playChatNotificationChime();
+          playChatNotificationChime(true);
           void showBrowserPushNotification({
-            title: t(`طلب / عميل جديد: ${clientLabel}`, `New Client / Order: ${clientLabel}`),
+            title: t(`مسارك للإنجاز السياحي — عميل جديد: ${clientLabel}`, `Masarik Tourism — New Client: ${clientLabel}`),
             body: t(
               'تم تسجيل حساب أو طلب جديد — اضغط لفتح ملف العميل.',
               'New client or order registered — tap to open client folder.'
@@ -483,14 +483,14 @@ export const App: React.FC = () => {
           counts.docs > old.docs ||
           (counts.preferredVisa && counts.preferredVisa !== old.preferredVisa)
         ) {
-          playChatNotificationChime();
+          playChatNotificationChime(true);
           void showBrowserPushNotification({
             title:
               counts.receipts > old.receipts
-                ? t(`إيصال دفع جديد من ${clientLabel}`, `New Payment Receipt from ${clientLabel}`)
+                ? t(`مسارك للإنجاز السياحي — إيصال دفع من ${clientLabel}`, `Masarik Tourism — Receipt from ${clientLabel}`)
                 : counts.docs > old.docs
-                ? t(`مستند جديد مرفوع من ${clientLabel}`, `New Document Uploaded by ${clientLabel}`)
-                : t(`طلب خدمة جديد من ${clientLabel}`, `New Service Order from ${clientLabel}`),
+                ? t(`مسارك للإنجاز السياحي — مستند مرفوع من ${clientLabel}`, `Masarik Tourism — Document from ${clientLabel}`)
+                : t(`مسارك للإنجاز السياحي — طلب جديد من ${clientLabel}`, `Masarik Tourism — New Order from ${clientLabel}`),
             body: t(
               'اضغط لفتح مجلد العميل ومراجعة المرفقات فوراً.',
               'Tap to open client folder and review immediately.'

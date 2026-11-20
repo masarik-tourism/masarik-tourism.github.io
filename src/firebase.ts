@@ -1,11 +1,37 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  type Firestore,
+} from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 export const app = initializeApp(firebaseConfig);
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+function createResilientFirestore(): Firestore {
+  const isEmbeddedOrMobileWebView =
+    typeof window !== 'undefined' &&
+    (window.self !== window.top ||
+      /Android|wv|WebView/i.test(window.navigator?.userAgent || '') ||
+      window.location.hostname.includes('run.app'));
+
+  try {
+    return initializeFirestore(
+      app,
+      isEmbeddedOrMobileWebView
+        ? { experimentalForceLongPolling: true }
+        : { experimentalAutoDetectLongPolling: true },
+      firebaseConfig.firestoreDatabaseId
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createResilientFirestore();
 export const auth = getAuth(app);
 
 export enum OperationType {
@@ -60,12 +86,24 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-export async function testConnection(): Promise<boolean> {
+export async function testConnection(retryCount = 1): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
+    const msg = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    const isTransientOffline =
+      msg.includes('the client is offline') || msg.includes('unavailable');
+
+    if (isTransientOffline && retryCount > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      return testConnection(retryCount - 1);
+    }
+
+    if (msg.includes('the client is offline')) {
       console.error('Please check your Firebase configuration (client is offline).');
     }
     return false;
