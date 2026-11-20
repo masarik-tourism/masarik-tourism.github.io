@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'masarik-cache-93-mwo6yeo3';
+const CACHE_VERSION = 'masarik-cache-95-mwopwbt1';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
@@ -121,3 +121,44 @@ self.addEventListener('fetch', (event) => {
     })
   );
 });
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const data = (event.notification && event.notification.data) || {};
+  const params = new URLSearchParams();
+  if (data.role) params.set('push_role', String(data.role));
+  if (data.action) params.set('push_action', String(data.action));
+  if (data.phone) params.set('push_phone', String(data.phone));
+  const query = params.toString();
+  const targetUrl =
+    data.url && typeof data.url === 'string' && data.url.startsWith('/')
+      ? data.url
+      : query
+      ? `/?${query}`
+      : '/';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if (client.url && client.url.startsWith(self.location.origin)) {
+          client.postMessage({
+            type: 'MASARIK_PUSH_NAVIGATE',
+            payload: {
+              role: data.role || '',
+              action: data.action || '',
+              phone: data.phone || '',
+            },
+          });
+          if ('focus' in client) {
+            return client.focus();
+          }
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+      return undefined;
+    })
+  );
+});
+
