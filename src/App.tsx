@@ -15,6 +15,7 @@ import { Phone, Mail, MapPin, Clock, ShieldCheck, ArrowUpRight, ShieldAlert, X, 
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SiteUpdateBanner } from './components/SiteUpdateBanner';
 import { InAppVersionBanner } from './components/InAppVersionBanner';
+import { PrivacyPolicyModal } from './components/PrivacyPolicyModal';
 import { CURRENT_APP_VERSION, triggerApkUpdateModal } from './hooks/useLatestApkUrl';
 import {
   PendingPostAuthFlow,
@@ -110,6 +111,7 @@ export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<number>(0);
   const [travelerSection, setTravelerSection] = useState<TravelerSubTab | null>(null);
   const [selectedServiceForContact, setSelectedServiceForContact] = useState<string | null>(null);
+  const [privacyModalOpen, setPrivacyModalOpen] = useState<boolean>(false);
   const [magicLinkFeedback, setMagicLinkFeedback] = useState<string | null>(null);
   const [activeTravelerPhone, setActiveTravelerPhoneState] = useState<string | null>(() =>
     getActivePhone()
@@ -758,6 +760,7 @@ export const App: React.FC = () => {
         chatUnreadCount={chatUnreadCount}
         adminChatThreads={adminChatThreads}
         onOpenAdminChat={handleOpenAdminChatFromFloating}
+        onOpenPrivacyPolicy={() => setPrivacyModalOpen(true)}
       />
 
       {/* Global Notice Banner if 1-hour Temporary Session Expired while on another page */}
@@ -905,6 +908,10 @@ export const App: React.FC = () => {
               <li>
                 <a
                   href="/privacy.html"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setPrivacyModalOpen(true);
+                  }}
                   className="hover:text-[#E5C887] text-slate-200 transition flex items-center gap-1 cursor-pointer text-start font-semibold"
                 >
                   <span>{t('سياسة الخصوصية', 'Privacy Policy')}</span>
@@ -1043,6 +1050,12 @@ export const App: React.FC = () => {
 
       {/* Android WebView In-App Release Update Notification */}
       <InAppVersionBanner />
+
+      {/* Centered Floating Privacy Policy Modal */}
+      <PrivacyPolicyModal
+        isOpen={privacyModalOpen}
+        onClose={() => setPrivacyModalOpen(false)}
+      />
 
       {/* Offline Mode Alert */}
       <OfflineIndicator />

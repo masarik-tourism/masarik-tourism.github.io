@@ -143,20 +143,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </div>
 
           {/* Main Title */}
-          <h1 className="flex flex-col items-center justify-center gap-1.5 sm:gap-2.5 max-w-4xl mx-auto mb-3 text-center text-balance">
+          <h1 className="max-w-4xl mx-auto mb-1.5 sm:mb-2.5 text-center text-balance">
             <span
               data-admin-editable="home-hero-title"
               className="block text-[1.75rem] sm:text-4xl md:text-5xl lg:text-6xl font-black text-white tracking-tight leading-tight"
             >
               {t('مسارك للإنجاز السياحي', 'Masarik Tourism LLC')}
             </span>
-            <span
-              data-admin-editable="home-hero-subtitle"
-              className="block text-sm sm:text-lg md:text-2xl font-medium text-[#E5C887] leading-snug max-w-2xl"
-            >
-              {isAr ? siteConfig.heroHighlightAr : siteConfig.heroHighlightEn}
-            </span>
           </h1>
+
+          {/* Hero Highlight Subtitle (kept semantically distinct from h1 to avoid snippet concatenation) */}
+          <p
+            data-admin-editable="home-hero-subtitle"
+            className="text-sm sm:text-lg md:text-2xl font-medium text-[#E5C887] leading-snug max-w-2xl mx-auto mb-3 text-center text-balance"
+          >
+            {isAr ? siteConfig.heroHighlightAr : siteConfig.heroHighlightEn}
+          </p>
 
           {/* Concise two-line description */}
           <p

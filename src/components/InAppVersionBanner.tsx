@@ -1,14 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  CheckCircle2,
-  Download,
-  Loader2,
-  RefreshCw,
-  ShieldCheck,
-  Smartphone,
-  Sparkles,
-  X,
-} from 'lucide-react';
+import { CheckCircle2, Loader2, ShieldCheck, Smartphone, X } from 'lucide-react';
 import {
   CURRENT_APP_VERSION,
   FALLBACK_PAGES_APK_URL,
@@ -22,13 +13,12 @@ import {
 import { isRunningInApp } from '../utils/appEnvironment';
 import { useLanguage } from '../contexts/LanguageContext';
 
-type UpdaterStage = 'idle' | 'checking' | 'up_to_date' | 'downloading' | 'ready';
+type UpdaterStage = 'idle' | 'checking' | 'up_to_date' | 'started';
 
 export const InAppVersionBanner: React.FC = () => {
   const { dir, t } = useLanguage();
   const [modalOpen, setModalOpen] = useState(false);
   const [stage, setStage] = useState<UpdaterStage>('idle');
-  const [progress, setProgress] = useState(0);
   const [releaseInfo, setReleaseInfo] = useState<Omit<LatestApkInfo, 'isLoading'>>({
     downloadUrl: FALLBACK_PAGES_APK_URL,
     version: CURRENT_APP_VERSION,
@@ -36,147 +26,61 @@ export const InAppVersionBanner: React.FC = () => {
     sizeLabel: null,
   });
   const [installedVersion] = useState<string>(() => getInstalledAndroidAppVersion());
-  const abortRef = useRef<AbortController | null>(null);
   const autoCheckedRef = useRef(false);
-  const downloadInFlightRef = useRef(false);
+  const checkInFlightRef = useRef(false);
+  const launchedThisSessionRef = useRef<string | null>(null);
 
-  const cancelOngoingDownload = useCallback(() => {
-    downloadInFlightRef.current = false;
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
+  const startSingleApkDownload = useCallback((info: Omit<LatestApkInfo, 'isLoading'>) => {
+    const targetUrl = info.downloadUrl || FALLBACK_PAGES_APK_URL;
+    setStage('started');
+    setModalOpen(true);
+
+    // Strictly launch the native DownloadManager transfer ONCE per update attempt
+    if (launchedThisSessionRef.current !== targetUrl) {
+      launchedThisSessionRef.current = targetUrl;
+      launchDirectApkInstall(targetUrl);
     }
   }, []);
 
-  const triggerBlobOrDirectDownload = useCallback(
-    async (info: Omit<LatestApkInfo, 'isLoading'>) => {
-      if (downloadInFlightRef.current) return;
-      cancelOngoingDownload();
-      downloadInFlightRef.current = true;
-      const targetUrl = info.downloadUrl || FALLBACK_PAGES_APK_URL;
-      setStage('downloading');
-      setProgress(2);
-
-      // Inside Android WebView, native DownloadManager / AndroidBridge handles .apk installation cleanly
-      // Show sleek 0% -> 100% preparation progress then hand off directly to AndroidBridge/download
-      const isNativeAndroidBridge =
-        typeof window !== 'undefined' && Boolean(window.AndroidBridge?.openExternalUrl);
-
-      if (!isNativeAndroidBridge && typeof fetch !== 'undefined') {
-        const controller = new AbortController();
-        abortRef.current = controller;
-
-        try {
-          const response = await fetch(targetUrl, {
-            method: 'GET',
-            mode: 'cors',
-            signal: controller.signal,
-          });
-
-          if (response.ok && response.body) {
-            const headerLen = Number(response.headers.get('content-length') || 0);
-            const totalBytes = headerLen > 0 ? headerLen : info.sizeBytes || 14 * 1024 * 1024;
-            const reader = response.body.getReader();
-            const chunks: Uint8Array[] = [];
-            let received = 0;
-
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                chunks.push(value);
-                received += value.length;
-                const pct = Math.min(99, Math.max(3, Math.round((received / totalBytes) * 100)));
-                setProgress(pct);
-              }
-            }
-
-            if (controller.signal.aborted) return;
-
-            setProgress(100);
-            setStage('ready');
-            downloadInFlightRef.current = false;
-
-            const blobParts = chunks.map((chunk) => new Uint8Array(chunk).buffer);
-            const blob = new Blob(blobParts, {
-              type: 'application/vnd.android.package-archive',
-            });
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = `Masarik-Tourism-${info.version || CURRENT_APP_VERSION}.apk`;
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-            return;
-          }
-        } catch (err) {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            downloadInFlightRef.current = false;
-            return;
-          }
-          // Fall through cleanly to direct binary transfer fallback when GitHub release CDN blocks CORS streaming
-        }
-      }
-
-      // Smooth verified progress (0% -> 100%) + single direct binary APK launch (never double-downloaded)
-      let currentPct = 8;
-      await new Promise<void>((resolve) => {
-        const timer = window.setInterval(() => {
-          currentPct = Math.min(100, currentPct + 14);
-          setProgress(currentPct);
-          if (currentPct >= 100) {
-            window.clearInterval(timer);
-            resolve();
-          }
-        }, 140);
-      });
-
-      setStage('ready');
-      downloadInFlightRef.current = false;
-      launchDirectApkInstall(targetUrl);
-    },
-    [cancelOngoingDownload]
-  );
-
   const runUpdateFlow = useCallback(
     async (mode: 'check' | 'download', isAutomatic = false) => {
+      if (checkInFlightRef.current) {
+        if (!isAutomatic) setModalOpen(true);
+        return;
+      }
+      checkInFlightRef.current = true;
+      launchedThisSessionRef.current = null;
+
       if (!isAutomatic) {
         setModalOpen(true);
         setStage('checking');
-        setProgress(0);
       }
 
-      const fresh = await fetchLatestGitHubRelease();
-      setReleaseInfo(fresh);
+      try {
+        const fresh = await fetchLatestGitHubRelease();
+        setReleaseInfo(fresh);
 
-      const inApp = isRunningInApp();
-      const hasNewerApk = isVersionNewer(fresh.version, installedVersion);
+        const inApp = isRunningInApp();
+        const hasNewerApk = isVersionNewer(fresh.version, installedVersion);
 
-      if (isAutomatic) {
-        if (inApp && hasNewerApk) {
-          setModalOpen(true);
-          void triggerBlobOrDirectDownload(fresh);
-        }
-        return;
-      }
-
-      if (inApp && mode === 'check') {
-        if (!hasNewerApk) {
-          setStage('up_to_date');
-          setProgress(100);
+        if (isAutomatic) {
+          if (inApp && hasNewerApk) {
+            startSingleApkDownload(fresh);
+          }
           return;
         }
-        void triggerBlobOrDirectDownload(fresh);
-        return;
-      }
 
-      // Regular browser OR explicit download request: immediately download latest APK with 0-100% progress bar
-      void triggerBlobOrDirectDownload(fresh);
+        if (inApp && mode === 'check' && !hasNewerApk) {
+          setStage('up_to_date');
+          return;
+        }
+
+        startSingleApkDownload(fresh);
+      } finally {
+        checkInFlightRef.current = false;
+      }
     },
-    [installedVersion, triggerBlobOrDirectDownload]
+    [installedVersion, startSingleApkDownload]
   );
 
   // Automatic silent check upon opening inside the installed Android app
@@ -191,10 +95,6 @@ export const InAppVersionBanner: React.FC = () => {
   // Listen for manual Footer / Home button triggers
   useEffect(() => {
     const handleOpen = (ev: Event) => {
-      if (downloadInFlightRef.current) {
-        setModalOpen(true);
-        return;
-      }
       const detail = (ev as CustomEvent<{ mode?: 'check' | 'download' }>).detail;
       const mode = detail?.mode === 'download' ? 'download' : 'check';
       void runUpdateFlow(mode, false);
@@ -203,15 +103,10 @@ export const InAppVersionBanner: React.FC = () => {
     return () => window.removeEventListener(OPEN_APK_UPDATER_EVENT, handleOpen);
   }, [runUpdateFlow]);
 
-  useEffect(() => {
-    return () => cancelOngoingDownload();
-  }, [cancelOngoingDownload]);
-
   const handleClose = () => {
-    cancelOngoingDownload();
     setModalOpen(false);
     setStage('idle');
-    setProgress(0);
+    launchedThisSessionRef.current = null;
   };
 
   if (!modalOpen) {
@@ -222,7 +117,7 @@ export const InAppVersionBanner: React.FC = () => {
     <div
       data-no-admin-edit="true"
       className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4"
-      onClick={stage === 'downloading' ? undefined : handleClose}
+      onClick={handleClose}
       dir={dir}
       role="dialog"
       aria-modal="true"
@@ -236,10 +131,8 @@ export const InAppVersionBanner: React.FC = () => {
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-[#C6A052]/20 border border-[#C6A052] text-[#E5C887] flex items-center justify-center shrink-0">
-              {stage === 'up_to_date' || stage === 'ready' ? (
+              {stage === 'up_to_date' || stage === 'started' ? (
                 <CheckCircle2 className="w-6 h-6 text-emerald-400" />
-              ) : stage === 'downloading' ? (
-                <Download className="w-6 h-6 text-[#E5C887]" />
               ) : (
                 <Smartphone className="w-6 h-6 text-[#E5C887]" />
               )}
@@ -253,12 +146,7 @@ export const InAppVersionBanner: React.FC = () => {
                   ? t('جاري التحقق من التحديثات...', 'Checking for Updates...')
                   : stage === 'up_to_date'
                   ? t('أنت على أحدث إصدار', 'You Are Up to Date')
-                  : stage === 'ready'
-                  ? t('بدأ تنزيل وتثبيت التطبيق', 'APK Download & Install Ready')
-                  : t(
-                      `جاري تنزيل الإصدار (${releaseInfo.version})`,
-                      `Downloading Release (${releaseInfo.version})`
-                    )}
+                  : t('تحديث وتثبيت التطبيق', 'App Download & Install')}
               </h3>
             </div>
           </div>
@@ -279,7 +167,7 @@ export const InAppVersionBanner: React.FC = () => {
             <Loader2 className="w-5 h-5 text-[#E5C887] animate-spin shrink-0" />
             <span>
               {t(
-                'جاري الاتصال بخادم الإصدارات الرسمية للتحقق من وجود نسخة أحدث...',
+                'جاري الاتصال بخادم الإصدارات الرسمية للتحقق من توفر نسخة أحدث...',
                 'Connecting to official release server to check latest build...'
               )}
             </span>
@@ -293,65 +181,38 @@ export const InAppVersionBanner: React.FC = () => {
               <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
               <span className="tabular-nums">
                 {t(
-                  `أنت تستخدم أحدث إصدار من تطبيق مسارك (${CURRENT_APP_VERSION}) ولا توجد تحديثات جديدة حالياً`,
+                  `أنت تستخدم أحدث إصدار من تطبيق مسارك (${CURRENT_APP_VERSION}) ولا توجد تحديثات جديدة حالياً.`,
                   `You are running the latest version of Masarik App (${CURRENT_APP_VERSION}) — no new updates available right now.`
                 )}
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => void triggerBlobOrDirectDownload(releaseInfo)}
-                className="px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>{t('إعادة تنزيل APK', 'Re-download APK')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleClose}
-                className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black cursor-pointer transition"
-              >
-                {t('حسناً', 'Done')}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleClose}
+              className="w-full min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black cursor-pointer transition"
+            >
+              {t('إغلاق', 'Close')}
+            </button>
           </div>
         )}
 
-        {/* Live 0% - 100% Download Progress Bar */}
-        {(stage === 'downloading' || stage === 'ready') && (
-          <div className="space-y-3">
-            <div className="bg-white/5 border border-white/15 rounded-xl p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between text-xs font-bold tabular-nums">
-                <span className="text-slate-300 flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-[#E5C887]" />
-                  <span>
-                    {releaseInfo.version}
-                    {releaseInfo.sizeLabel ? ` · ${releaseInfo.sizeLabel}` : ''}
-                  </span>
+        {/* Direct Download Started Instruction Modal (No Progress Bar) */}
+        {stage === 'started' && (
+          <div className="space-y-3.5">
+            <div className="bg-white/5 border border-white/15 rounded-xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between text-[11px] font-bold text-[#E5C887] tabular-nums">
+                <span>
+                  {t(`الإصدار: ${releaseInfo.version}`, `Release: ${releaseInfo.version}`)}
                 </span>
-                <span className="text-[#E5C887] font-black text-sm">{progress}%</span>
+                {releaseInfo.sizeLabel && <span>{releaseInfo.sizeLabel}</span>}
               </div>
 
-              <div className="h-3 w-full bg-black/40 rounded-full overflow-hidden border border-white/15">
-                <div
-                  className="h-full bg-gradient-to-r from-[#C6A052] via-[#E5C887] to-emerald-400 rounded-full transition-all duration-150"
-                  style={{ width: `${Math.max(4, progress)}%` }}
-                />
-              </div>
-
-              <p className="text-xs text-emerald-100 leading-relaxed font-bold">
-                {stage === 'ready'
-                  ? t(
-                      'بدأ تنزيل التحديث في مدير التنزيلات بهاتفك ✅ — اسحب شريط إشعارات الهاتف من الأعلى واضغط على ملف (Masarik-Tourism.apk) فور اكتماله لإتمام التثبيت',
-                      'The update download has started in your phone download manager ✅ — swipe down your notification bar and tap (Masarik-Tourism.apk) once finished to complete installation'
-                    )
-                  : t(
-                      'جاري سحب وتنزيل حزمة التطبيق الرسمية مباشرة داخل المنصة...',
-                      'Downloading official signed APK package directly inside the app...'
-                    )}
+              <p className="text-xs sm:text-sm text-emerald-100 leading-relaxed font-bold">
+                {t(
+                  'بدأ تنزيل التحديث الجديد عبر مدير التنزيلات في هاتفك ✅. يرجى سحب شريط الإشعارات من أعلى الشاشة والضغط على ملف (Masarik-Tourism.apk) فور اكتماله لإتمام التثبيت.',
+                  'The new update has started downloading in your phone download manager ✅. Please swipe down your notification bar and tap (Masarik-Tourism.apk) once finished to complete installation.'
+                )}
               </p>
             </div>
 
@@ -359,35 +220,29 @@ export const InAppVersionBanner: React.FC = () => {
               <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
               <span>
                 {t(
-                  'ملف رسمي موقّع وآمن 100% بدون مغادرة الموقع.',
-                  '100% official signed package — stays inside the platform.'
+                  'ملف رسمي موقّع وآمن 100% من مسارك للإنجاز السياحي.',
+                  '100% official signed Masarik Tourism APK package.'
                 )}
               </span>
             </div>
 
-            {stage === 'ready' && (
-              <div className="space-y-2.5 pt-1">
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  className="w-full min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black cursor-pointer transition"
-                >
-                  {t('تم — متابعة الاستخدام', 'Done — Continue')}
-                </button>
-                <div className="text-center">
-                  <button
-                    type="button"
-                    onClick={() => launchDirectApkInstall(releaseInfo.downloadUrl)}
-                    className="text-[11px] font-semibold text-slate-400 hover:text-[#E5C887] underline underline-offset-4 cursor-pointer transition"
-                  >
-                    {t(
-                      'إعادة المحاولة في حال فشل التنزيل',
-                      'Retry if the download failed to start'
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
+            <button
+              type="button"
+              onClick={handleClose}
+              className="w-full min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black cursor-pointer transition"
+            >
+              {t('إغلاق', 'Close')}
+            </button>
+
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={() => launchDirectApkInstall(releaseInfo.downloadUrl)}
+                className="text-[11px] font-semibold text-slate-400 hover:text-[#E5C887] underline underline-offset-4 cursor-pointer transition"
+              >
+                {t('إعادة محاولة التنزيل', 'Retry download')}
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -59,6 +59,7 @@ interface NavbarProps {
   chatUnreadCount?: number;
   adminChatThreads?: Record<string, ChatThreadSummary>;
   onOpenAdminChat?: (phone?: string) => void;
+  onOpenPrivacyPolicy?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -73,6 +74,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   chatUnreadCount = 0,
   adminChatThreads,
   onOpenAdminChat,
+  onOpenPrivacyPolicy,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
   const {
@@ -384,6 +386,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           })}
           <a
             href="/privacy.html"
+            onClick={(e) => {
+              if (onOpenPrivacyPolicy) {
+                e.preventDefault();
+                onOpenPrivacyPolicy();
+              }
+            }}
             className="px-3 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap text-slate-700 hover:text-[#0F2438] hover:bg-white"
           >
             {t('سياسة الخصوصية', 'Privacy Policy')}
@@ -1041,7 +1049,13 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <a
             href="/privacy.html"
-            onClick={() => setMobileMenuOpen(false)}
+            onClick={(e) => {
+              if (onOpenPrivacyPolicy) {
+                e.preventDefault();
+                onOpenPrivacyPolicy();
+              }
+              setMobileMenuOpen(false);
+            }}
             className="w-full text-start px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-between text-slate-700 hover:bg-slate-50"
           >
             <span>{t('سياسة الخصوصية', 'Privacy Policy')}</span>
