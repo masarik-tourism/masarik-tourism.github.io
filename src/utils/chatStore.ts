@@ -18,6 +18,7 @@ import {
   ChatThreadSummary,
 } from '../types/travel';
 import { uploadChatAttachmentToDrive } from './firebaseStorageHelper';
+import { dispatchRemotePushNotification } from './fcmPushService';
 
 function cleanDigits(rawPhone: string): string {
   return String(rawPhone || '').replace(/\D/g, '');
@@ -276,6 +277,25 @@ export async function sendChatMessageCloud(params: {
   try {
     await setDoc(doc(db, 'chats', phone), threadPayload);
     await setDoc(doc(db, 'chats', phone, 'messages', msgId), messagePayload);
+
+    if (params.senderRole === 'client') {
+      const senderLabel = prevCompanyName || prevClientName || params.senderName || phone;
+      void dispatchRemotePushNotification({
+        targetRole: 'admin',
+        title: `رسالة جديدة من ${senderLabel}`,
+        body: summaryText,
+        data: { role: 'admin', action: 'live_chat', phone },
+      });
+    } else {
+      void dispatchRemotePushNotification({
+        targetRole: 'client',
+        targetPhone: phone,
+        title: 'رسالة جديدة من إدارة مسارك',
+        body: summaryText,
+        data: { role: 'client', action: 'chat', phone },
+      });
+    }
+
     return { ok: true, message: messagePayload };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

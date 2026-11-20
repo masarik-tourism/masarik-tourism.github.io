@@ -1,4 +1,15 @@
-import { collection, deleteDoc, doc, onSnapshot, query, setDoc, where } from 'firebase/firestore';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 import { AdminPermission, AdminSession, SubAdminAccount } from '../types/travel';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
@@ -94,13 +105,127 @@ async function syncSubAdminToCloud(sub: SubAdminAccount): Promise<void> {
   };
 
   try {
-    await setDoc(doc(db, 'admins', sub.id), payload);
+    await setDoc(doc(db, 'admins', sub.id), payload, { merge: true });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.toLowerCase().includes('permission')) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
     console.warn('Sub-admin cloud sync deferred:', msg);
+  }
+}
+
+export function getAdminFirestoreDocId(adminId?: string | null): string {
+  if (!adminId || adminId === 'super_admin') return 'master';
+  return adminId.slice(0, 64);
+}
+
+export async function saveAdminFcmTokenCloud(
+  adminId: string | undefined,
+  token: string,
+  enabled = true
+): Promise<boolean> {
+  const docId = getAdminFirestoreDocId(adminId);
+  const path = `admins/${docId}`;
+  const cleanToken = String(token || '').trim().slice(0, 512);
+  const nowIso = new Date().toISOString();
+
+  try {
+    const ref = doc(db, 'admins', docId);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      const existingData = snap.data() as { fcmTokens?: unknown };
+      const prevTokens = Array.isArray(existingData.fcmTokens)
+        ? existingData.fcmTokens.map((t) => String(t || '').trim()).filter(Boolean)
+        : [];
+      const nextTokens = cleanToken
+        ? [cleanToken, ...prevTokens.filter((t) => t !== cleanToken)].slice(0, 10)
+        : prevTokens.slice(0, 10);
+
+      await updateDoc(ref, {
+        ...(cleanToken ? { fcmToken: cleanToken } : {}),
+        fcmTokens: nextTokens,
+        fcmUpdatedAt: nowIso,
+        pushNotificationsEnabled: Boolean(enabled),
+        updatedAt: nowIso,
+      });
+      return true;
+    }
+
+    if (docId === 'master') {
+      const defaultPin = getAdminPin();
+      await setDoc(ref, {
+        id: 'master',
+        role: 'super_admin',
+        name: 'المدير العام',
+        pinHash: sha256Hex(defaultPin),
+        permissions: [...ALL_ADMIN_PERMISSIONS],
+        ...(cleanToken ? { fcmToken: cleanToken, fcmTokens: [cleanToken] } : { fcmTokens: [] }),
+        fcmUpdatedAt: nowIso,
+        pushNotificationsEnabled: Boolean(enabled),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+      return true;
+    }
+    return false;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+    console.warn('Admin FCM token save skipped:', msg);
+    return false;
+  }
+}
+
+export async function getAdminFcmStatusCloud(
+  adminId?: string
+): Promise<{ enabled: boolean; fcmToken?: string }> {
+  const docId = getAdminFirestoreDocId(adminId);
+  try {
+    const snap = await getDoc(doc(db, 'admins', docId));
+    if (!snap.exists()) return { enabled: false };
+    const data = snap.data() as {
+      fcmToken?: string;
+      pushNotificationsEnabled?: boolean;
+    };
+    return {
+      enabled: Boolean(data.pushNotificationsEnabled),
+      fcmToken: data.fcmToken,
+    };
+  } catch {
+    return { enabled: false };
+  }
+}
+
+export async function getAllAdminFcmTokensCloud(): Promise<string[]> {
+  try {
+    const q = query(
+      collection(db, 'admins'),
+      where('role', 'in', ['super_admin', 'sub_admin'])
+    );
+    const snap = await getDocs(q);
+    const tokens = new Set<string>();
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() as {
+        fcmToken?: string;
+        fcmTokens?: string[];
+        pushNotificationsEnabled?: boolean;
+      };
+      if (data.pushNotificationsEnabled === false) return;
+      if (data.fcmToken && typeof data.fcmToken === 'string') {
+        tokens.add(data.fcmToken.trim());
+      }
+      if (Array.isArray(data.fcmTokens)) {
+        data.fcmTokens.forEach((tk) => {
+          if (typeof tk === 'string' && tk.trim()) tokens.add(tk.trim());
+        });
+      }
+    });
+    return Array.from(tokens).slice(0, 15);
+  } catch {
+    return [];
   }
 }
 

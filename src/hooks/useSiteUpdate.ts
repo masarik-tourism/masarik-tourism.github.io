@@ -100,14 +100,16 @@ export function useSiteUpdate() {
     };
 
     if (import.meta.env.DEV) {
-      // In dev mode, ensure no stale Service Worker intercepts /src/*.ts Vite modules
+      // In dev mode, ensure no stale Service Worker intercepts /src/*.ts Vite modules (keep FCM SW intact)
       void clearAllBrowserCaches();
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker
           .getRegistrations()
           .then((regs) => {
             regs.forEach((reg) => {
-              void reg.unregister();
+              if (!reg.scope.includes('firebase-cloud-messaging-push-scope')) {
+                void reg.unregister();
+              }
             });
           })
           .catch(() => {});

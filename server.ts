@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -162,6 +163,168 @@ Inspect the attached image carefully and extract:
     const message =
       errorObj?.message || 'حدث خطأ أثناء فحص المستند عبر خدمة الذكاء الاصطناعي.';
     res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
+  }
+});
+
+let cachedGoogleAccessToken: { token: string; expiresAtMs: number; projectId: string } | null = null;
+
+async function getFcmOAuthToken(serviceAccountJson: string): Promise<{
+  token: string;
+  projectId: string;
+} | null> {
+  try {
+    const sa = JSON.parse(serviceAccountJson) as {
+      project_id?: string;
+      client_email?: string;
+      private_key?: string;
+      token_uri?: string;
+    };
+    if (!sa.project_id || !sa.client_email || !sa.private_key) return null;
+
+    if (
+      cachedGoogleAccessToken &&
+      cachedGoogleAccessToken.projectId === sa.project_id &&
+      Date.now() < cachedGoogleAccessToken.expiresAtMs - 60_000
+    ) {
+      return {
+        token: cachedGoogleAccessToken.token,
+        projectId: cachedGoogleAccessToken.projectId,
+      };
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const claim = Buffer.from(
+      JSON.stringify({
+        iss: sa.client_email,
+        scope: 'https://www.googleapis.com/auth/firebase.messaging',
+        aud: sa.token_uri || 'https://oauth2.googleapis.com/token',
+        iat: nowSec,
+        exp: nowSec + 3600,
+      })
+    ).toString('base64url');
+
+    const signInput = `${header}.${claim}`;
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(signInput);
+    const signature = signer.sign(sa.private_key, 'base64url');
+    const assertion = `${signInput}.${signature}`;
+
+    const tokenRes = await fetch(sa.token_uri || 'https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }),
+    });
+    if (!tokenRes.ok) return null;
+
+    const tokenData = (await tokenRes.json()) as { access_token?: string; expires_in?: number };
+    if (!tokenData.access_token) return null;
+
+    cachedGoogleAccessToken = {
+      token: tokenData.access_token,
+      projectId: sa.project_id,
+      expiresAtMs: Date.now() + (tokenData.expires_in || 3600) * 1000,
+    };
+
+    return { token: tokenData.access_token, projectId: sa.project_id };
+  } catch {
+    return null;
+  }
+}
+
+app.post('/api/push/send', async (req, res) => {
+  try {
+    const body = req.body as {
+      tokens?: string[];
+      title?: string;
+      body?: string;
+      data?: Record<string, string>;
+    };
+    const tokens = Array.isArray(body.tokens)
+      ? Array.from(new Set(body.tokens.map((t) => String(t || '').trim()).filter(Boolean))).slice(
+          0,
+          15
+        )
+      : [];
+
+    if (tokens.length === 0) {
+      res.json({ ok: true, mode: 'no_tokens', sent: 0 });
+      return;
+    }
+
+    const saJson = (process.env.FCM_SERVICE_ACCOUNT_JSON || '').trim();
+    if (!saJson) {
+      res.json({ ok: true, mode: 'client_realtime_only', sent: 0 });
+      return;
+    }
+
+    const oauth = await getFcmOAuthToken(saJson);
+    if (!oauth) {
+      res.json({ ok: false, mode: 'oauth_unavailable', sent: 0 });
+      return;
+    }
+
+    const cleanTitle = String(body.title || 'مسارك للإنجاز السياحي').slice(0, 160);
+    const cleanBody = String(body.body || 'لديك إشعار جديد').slice(0, 400);
+    const cleanData: Record<string, string> = {
+      title: cleanTitle,
+      body: cleanBody,
+    };
+    if (body.data && typeof body.data === 'object') {
+      for (const [k, v] of Object.entries(body.data)) {
+        cleanData[String(k).slice(0, 40)] = String(v ?? '').slice(0, 400);
+      }
+    }
+
+    let sent = 0;
+    await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const fcmRes = await fetch(
+            `https://fcm.googleapis.com/v1/projects/${oauth.projectId}/messages:send`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${oauth.token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                message: {
+                  token,
+                  notification: {
+                    title: cleanTitle,
+                    body: cleanBody,
+                  },
+                  data: cleanData,
+                  webpush: {
+                    notification: {
+                      icon: '/pwa-192x192.png',
+                      badge: '/pwa-192x192.png',
+                      dir: 'rtl',
+                      lang: 'ar',
+                      requireInteraction: true,
+                    },
+                    fcm_options: {
+                      link: cleanData.url || '/',
+                    },
+                  },
+                },
+              }),
+            }
+          );
+          if (fcmRes.ok) sent += 1;
+        } catch {
+          // Ignore individual token failure
+        }
+      })
+    );
+
+    res.json({ ok: true, mode: 'fcm_http_v1', sent });
+  } catch {
+    res.status(200).json({ ok: false, mode: 'error', sent: 0 });
   }
 });
 

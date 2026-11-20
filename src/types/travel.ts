@@ -203,6 +203,9 @@ export interface TravelerProfile {
   issuedDocuments?: IssuedDocument[];
   notifications?: ClientNotification[];
   appointmentDetails?: AppointmentDetails;
+  fcmToken?: string;
+  fcmUpdatedAt?: string;
+  pushNotificationsEnabled?: boolean;
 }
 
 export type ChatSenderRole = 'admin' | 'client';
@@ -277,6 +280,10 @@ export interface SubAdminAccount {
   name: string;
   pin: string;
   permissions: AdminPermission[];
+  fcmToken?: string;
+  fcmTokens?: string[];
+  fcmUpdatedAt?: string;
+  pushNotificationsEnabled?: boolean;
   createdAt: string;
 }
 

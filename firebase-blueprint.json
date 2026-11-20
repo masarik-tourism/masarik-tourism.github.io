@@ -212,6 +212,20 @@
         "appointmentDetails": {
           "type": "object",
           "description": "Structured booked appointment metadata (serviceType, date, time, location, referenceNumber) used for the client's high-contrast Appointment QR Pass."
+        },
+        "fcmToken": {
+          "type": "string",
+          "description": "Firebase Cloud Messaging (FCM) device registration token for instant Web/Mobile Push Notifications.",
+          "maxLength": 512
+        },
+        "fcmUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the client's FCM push token was last registered or refreshed.",
+          "maxLength": 64
+        },
+        "pushNotificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether the client has granted push notification permission on their device."
         }
       },
       "required": [
@@ -274,6 +288,11 @@
         "additionalDriveWebApps": {
           "type": "array",
           "description": "Bounded list (max 10) of secondary/scoped Google Drive Web App endpoints for multi-account failover or workload separation."
+        },
+        "fcmVapidKey": {
+          "type": "string",
+          "description": "Optional Firebase Cloud Messaging Web Push VAPID public key.",
+          "maxLength": 256
         },
         "updatedAt": {
           "type": "string",
@@ -355,6 +374,24 @@
         "permissions": {
           "type": "array",
           "description": "Assigned granular admin permissions."
+        },
+        "fcmToken": {
+          "type": "string",
+          "description": "Primary Firebase Cloud Messaging (FCM) device registration token for instant Admin/Manager Push Notifications.",
+          "maxLength": 512
+        },
+        "fcmTokens": {
+          "type": "array",
+          "description": "Bounded list (max 10) of active FCM device tokens registered across the Admin's phone & desktop browsers."
+        },
+        "fcmUpdatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when Admin FCM token was last updated.",
+          "maxLength": 64
+        },
+        "pushNotificationsEnabled": {
+          "type": "boolean",
+          "description": "Whether the Admin has enabled instant Push Notifications on their device."
         },
         "createdAt": {
           "type": "string",

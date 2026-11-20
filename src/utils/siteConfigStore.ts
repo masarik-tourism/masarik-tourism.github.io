@@ -21,6 +21,7 @@ export interface SiteConfig {
   heroHighlightEn: string;
   primaryDriveWebAppUrl: string;
   additionalDriveWebApps: DriveStorageEndpoint[];
+  fcmVapidKey?: string;
 }
 
 const SITE_CONFIG_STORAGE_KEY = 'masarik_site_config_v1';
@@ -39,6 +40,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   heroHighlightEn: 'Your Trusted Portal for Saudi Visas, Tasheer & Global Travel',
   primaryDriveWebAppUrl: DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
   additionalDriveWebApps: [],
+  fcmVapidKey: '',
 };
 
 function sanitizeHttpsUrl(rawUrl: unknown, fallback = ''): string {
@@ -99,6 +101,7 @@ function sanitizeSiteConfigPayload(cfg: SiteConfig) {
       DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
     ),
     additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(cfg.additionalDriveWebApps),
+    ...(cfg.fcmVapidKey ? { fcmVapidKey: String(cfg.fcmVapidKey).trim().slice(0, 256) } : {}),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -154,6 +157,7 @@ export function subscribeSiteConfigCloud(): () => void {
           DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
         ),
         additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(data.additionalDriveWebApps),
+        fcmVapidKey: data.fcmVapidKey ? String(data.fcmVapidKey).trim().slice(0, 256) : '',
       };
       writeSiteConfigLocalOnly(merged);
     },

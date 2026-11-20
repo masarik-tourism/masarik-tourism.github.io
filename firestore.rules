@@ -79,7 +79,10 @@ service cloud.firestore {
         'familyMembers',
         'issuedDocuments',
         'notifications',
-        'appointmentDetails'
+        'appointmentDetails',
+        'fcmToken',
+        'fcmUpdatedAt',
+        'pushNotificationsEnabled'
       ])
       && data.phone is string
       && data.phone == phoneId
@@ -278,7 +281,10 @@ service cloud.firestore {
           && isOptionalString(data.appointmentDetails, 'referenceNumber', 80)
           && isOptionalString(data.appointmentDetails, 'updatedAt', 64)
         )
-      );
+      )
+      && isOptionalString(data, 'fcmToken', 512)
+      && isOptionalString(data, 'fcmUpdatedAt', 64)
+      && (!('pushNotificationsEnabled' in data) || data.pushNotificationsEnabled is bool);
     }
 
     // Validation Blueprint: SiteGeneralConfig (/site_config/general)
@@ -306,6 +312,7 @@ service cloud.firestore {
         'heroHighlightEn',
         'primaryDriveWebAppUrl',
         'additionalDriveWebApps',
+        'fcmVapidKey',
         'updatedAt'
       ])
       && data.announcementEnabled is bool
@@ -344,6 +351,7 @@ service cloud.firestore {
           )
         )
       )
+      && isOptionalString(data, 'fcmVapidKey', 256)
       && isOptionalString(data, 'updatedAt', 64);
     }
 
@@ -365,7 +373,20 @@ service cloud.firestore {
     // Validation Blueprint: AdminAccount (/admins/{adminId})
     function isValidAdminAccount(data, adminId) {
       return data.keys().hasAll(['id', 'role', 'name', 'pinHash', 'permissions'])
-      && data.keys().hasOnly(['id', 'role', 'name', 'pinHash', 'pin', 'permissions', 'createdAt', 'updatedAt'])
+      && data.keys().hasOnly([
+        'id',
+        'role',
+        'name',
+        'pinHash',
+        'pin',
+        'permissions',
+        'fcmToken',
+        'fcmTokens',
+        'fcmUpdatedAt',
+        'pushNotificationsEnabled',
+        'createdAt',
+        'updatedAt'
+      ])
       && data.id is string
       && data.id == adminId
       && isValidId(data.id)
@@ -377,6 +398,17 @@ service cloud.firestore {
       && data.pinHash is string
       && data.pinHash.matches('^[a-f0-9]{64}$')
       && isOptionalString(data, 'pin', 32)
+      && isOptionalString(data, 'fcmToken', 512)
+      && (
+        !('fcmTokens' in data)
+        || (
+          data.fcmTokens is list
+          && data.fcmTokens.size() <= 10
+          && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 512))
+        )
+      )
+      && isOptionalString(data, 'fcmUpdatedAt', 64)
+      && (!('pushNotificationsEnabled' in data) || data.pushNotificationsEnabled is bool)
       && isOptionalString(data, 'createdAt', 64)
       && isOptionalString(data, 'updatedAt', 64)
       && data.permissions is list
@@ -436,7 +468,10 @@ service cloud.firestore {
           'familyMembers',
           'issuedDocuments',
           'notifications',
-          'appointmentDetails'
+          'appointmentDetails',
+          'fcmToken',
+          'fcmUpdatedAt',
+          'pushNotificationsEnabled'
         ]);
       allow delete: if isValidPhoneId(phoneId) && resource != null;
     }
@@ -513,6 +548,10 @@ service cloud.firestore {
           'pinHash',
           'pin',
           'permissions',
+          'fcmToken',
+          'fcmTokens',
+          'fcmUpdatedAt',
+          'pushNotificationsEnabled',
           'updatedAt'
         ]);
       allow delete: if isValidId(adminId) && adminId != 'master' && resource != null;

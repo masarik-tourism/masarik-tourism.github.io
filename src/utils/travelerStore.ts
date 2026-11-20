@@ -53,6 +53,7 @@ import {
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
 import { sendChatMessageCloud } from './chatStore';
+import { dispatchRemotePushNotification } from './fcmPushService';
 import { getSiteConfig } from './siteConfigStore';
 import { getCmsState } from './cmsStore';
 
@@ -632,6 +633,15 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       payload.appointmentDetails = cleanAppt;
     }
   }
+  if (profile.fcmToken) {
+    payload.fcmToken = String(profile.fcmToken).trim().slice(0, 512);
+  }
+  if (profile.fcmUpdatedAt) {
+    payload.fcmUpdatedAt = String(profile.fcmUpdatedAt).slice(0, 64);
+  }
+  if (typeof profile.pushNotificationsEnabled === 'boolean') {
+    payload.pushNotificationsEnabled = profile.pushNotificationsEnabled;
+  }
 
   return payload;
 }
@@ -738,6 +748,12 @@ function mergeCloudClientWithLocal(
     familyMembers: mergedFamilyMembers,
     issuedDocuments: mergedIssuedDocs,
     notifications: mergedNotifications,
+    fcmToken: cloudData.fcmToken || localExisting?.fcmToken,
+    fcmUpdatedAt: cloudData.fcmUpdatedAt || localExisting?.fcmUpdatedAt,
+    pushNotificationsEnabled:
+      typeof cloudData.pushNotificationsEnabled === 'boolean'
+        ? cloudData.pushNotificationsEnabled
+        : localExisting?.pushNotificationsEnabled,
   };
 }
 
@@ -2479,6 +2495,17 @@ export function updateTravelerProfileDetails(
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(updated);
+
+  if (nextNotifications.length > (existing.notifications || []).length && nextNotifications[0]) {
+    void dispatchRemotePushNotification({
+      targetRole: 'client',
+      targetPhone: phone,
+      title: nextNotifications[0].titleAr,
+      body: nextNotifications[0].bodyAr,
+      data: { role: 'client', action: 'orders', phone },
+    });
+  }
+
   return updated;
 }
 
@@ -2603,6 +2630,13 @@ export async function approveAndDeliverDocumentCloud(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  void dispatchRemotePushNotification({
+    targetRole: 'client',
+    targetPhone: phone,
+    title: deliverableNotification.titleAr,
+    body: deliverableNotification.bodyAr,
+    data: { role: 'client', action: 'documents', phone },
+  });
   return { ok: true, profile: updated, deliverable };
 }
 
@@ -2843,6 +2877,66 @@ export async function markClientNotificationsReadCloud(
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(updated);
   return updated;
+}
+
+export async function saveClientFcmTokenCloud(
+  rawPhone: string,
+  token: string,
+  enabled = true
+): Promise<boolean> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return false;
+
+  const cleanToken = String(token || '').trim().slice(0, 512);
+  const nowIso = new Date().toISOString();
+  const all = getAllTravelers();
+  let existing = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, existing);
+    }
+  } catch {
+    // Fallback to local snapshot
+  }
+
+  if (!existing) return false;
+
+  const updated: TravelerProfile = {
+    ...existing,
+    ...(cleanToken ? { fcmToken: cleanToken } : {}),
+    fcmUpdatedAt: nowIso,
+    pushNotificationsEnabled: Boolean(enabled),
+    updatedAt: nowIso,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return true;
+}
+
+export async function getClientFcmTokensCloud(rawPhone: string): Promise<string[]> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return [];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      const data = snap.data() as TravelerProfile;
+      if (data.pushNotificationsEnabled === false) return [];
+      if (data.fcmToken && typeof data.fcmToken === 'string' && data.fcmToken.trim()) {
+        return [data.fcmToken.trim()];
+      }
+    }
+  } catch {
+    // Ignore read error
+  }
+  const local = getAllTravelers()[phone];
+  if (local?.fcmToken && local.pushNotificationsEnabled !== false) {
+    return [local.fcmToken];
+  }
+  return [];
 }
 
 export async function attachPreOrderFilesToTravelerCloud(
@@ -3091,6 +3185,19 @@ export async function uploadBatchFilesToTravelerCloud(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  const senderLabel =
+    updated.accountType === 'b2b_partner' && updated.companyName
+      ? updated.companyName
+      : updated.name;
+  const hasReceipt = addedDocs.some((d) => d.docType === 'receipt');
+  void dispatchRemotePushNotification({
+    targetRole: 'admin',
+    title: hasReceipt
+      ? `إيصال دفع جديد من ${senderLabel}`
+      : `مستند جديد مرفوع من ${senderLabel}`,
+    body: addedDocs.map((d) => `${d.label} (${d.fileName})`).join(' • ').slice(0, 300),
+    data: { role: 'admin', action: 'client_folder', phone },
+  });
   return { uploadedCount: addedDocs.length, profile: updated, errors };
 }
 
@@ -3177,6 +3284,14 @@ export async function updateDocumentReviewStatusCloud(
     accountType: updated.accountType || 'individual',
     clientName: updated.name,
     companyName: updated.companyName,
+  });
+
+  void dispatchRemotePushNotification({
+    targetRole: 'client',
+    targetPhone: phone,
+    title: notif.titleAr,
+    body: notif.bodyAr,
+    data: { role: 'client', action: 'documents', phone },
   });
 
   return updated;
