@@ -416,10 +416,7 @@ export const App: React.FC = () => {
       if (prevAdminThreadsRef.current) {
         for (const [phone, th] of Object.entries(threadsMap)) {
           const prevUnreadForPhone = prevAdminThreadsRef.current[phone]?.unreadAdminCount || 0;
-          if (
-            (th.unreadAdminCount || 0) > prevUnreadForPhone &&
-            (!isDashboardMode || document.visibilityState !== 'visible')
-          ) {
+          if ((th.unreadAdminCount || 0) > prevUnreadForPhone) {
             playChatNotificationChime();
             void showBrowserPushNotification({
               title: t(

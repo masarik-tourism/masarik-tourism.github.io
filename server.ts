@@ -168,18 +168,35 @@ Inspect the attached image carefully and extract:
 
 let cachedGoogleAccessToken: { token: string; expiresAtMs: number; projectId: string } | null = null;
 
-async function getFcmOAuthToken(serviceAccountJson: string): Promise<{
+function parseServiceAccountJson(rawInput: string): {
+  project_id?: string;
+  client_email?: string;
+  private_key?: string;
+  token_uri?: string;
+} | null {
+  const trimmed = (rawInput || '').trim();
+  if (!trimmed) return null;
+  try {
+    if (trimmed.startsWith('{')) {
+      return JSON.parse(trimmed);
+    }
+    const decoded = Buffer.from(trimmed, 'base64').toString('utf8').trim();
+    if (decoded.startsWith('{')) {
+      return JSON.parse(decoded);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function getFcmOAuthToken(serviceAccountRaw: string): Promise<{
   token: string;
   projectId: string;
 } | null> {
   try {
-    const sa = JSON.parse(serviceAccountJson) as {
-      project_id?: string;
-      client_email?: string;
-      private_key?: string;
-      token_uri?: string;
-    };
-    if (!sa.project_id || !sa.client_email || !sa.private_key) return null;
+    const sa = parseServiceAccountJson(serviceAccountRaw);
+    if (!sa || !sa.project_id || !sa.client_email || !sa.private_key) return null;
 
     if (
       cachedGoogleAccessToken &&
@@ -255,7 +272,11 @@ app.post('/api/push/send', async (req, res) => {
       return;
     }
 
-    const saJson = (process.env.FCM_SERVICE_ACCOUNT_JSON || '').trim();
+    const saJson = (
+      process.env.FCM_SERVICE_ACCOUNT ||
+      process.env.FCM_SERVICE_ACCOUNT_JSON ||
+      ''
+    ).trim();
     if (!saJson) {
       res.json({ ok: true, mode: 'client_realtime_only', sent: 0 });
       return;
@@ -299,12 +320,22 @@ app.post('/api/push/send', async (req, res) => {
                     body: cleanBody,
                   },
                   data: cleanData,
+                  android: {
+                    priority: 'high',
+                    notification: {
+                      sound: 'default',
+                    },
+                  },
                   webpush: {
+                    headers: {
+                      Urgency: 'high',
+                    },
                     notification: {
                       icon: '/pwa-192x192.png',
                       badge: '/pwa-192x192.png',
                       dir: 'rtl',
                       lang: 'ar',
+                      vibrate: [240, 110, 240],
                       requireInteraction: true,
                     },
                     fcm_options: {

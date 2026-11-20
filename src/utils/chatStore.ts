@@ -28,13 +28,13 @@ let audioCtxRef: AudioContext | null = null;
 let lastChimeMs = 0;
 
 /**
- * Plays a gentle dual-tone Web Audio chime for newly incoming chat messages.
- * Debounced and resilient against browser autoplay restrictions.
+ * Plays a clear multi-tone Web Audio notification ring for incoming alerts or manual sound testing.
+ * Supports force=true to bypass debounce during explicit user test clicks.
  */
-export function playChatNotificationChime(): void {
+export function playChatNotificationChime(force = false): void {
   if (typeof window === 'undefined') return;
   const now = Date.now();
-  if (now - lastChimeMs < 1500) return;
+  if (!force && now - lastChimeMs < 1200) return;
   lastChimeMs = now;
 
   try {
@@ -54,7 +54,7 @@ export function playChatNotificationChime(): void {
       if (!audioCtxRef) return;
       const osc = audioCtxRef.createOscillator();
       const gain = audioCtxRef.createGain();
-      osc.type = 'sine';
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(freq, startTime + offset);
       gain.gain.setValueAtTime(0.0001, startTime + offset);
       gain.gain.exponentialRampToValueAtTime(peakGain, startTime + offset + 0.02);
@@ -65,8 +65,9 @@ export function playChatNotificationChime(): void {
       osc.stop(startTime + offset + dur + 0.02);
     };
 
-    playTone(880, 0, 0.14, 0.06);
-    playTone(1174.66, 0.1, 0.18, 0.055);
+    playTone(880, 0, 0.16, 0.18);
+    playTone(1174.66, 0.12, 0.18, 0.17);
+    playTone(1567.98, 0.24, 0.26, 0.16);
   } catch {
     // Ignore audio context block if user hasn't interacted yet
   }

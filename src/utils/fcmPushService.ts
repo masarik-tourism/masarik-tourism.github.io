@@ -104,8 +104,8 @@ export async function requestAndGetFcmToken(customVapidKey?: string): Promise<{
     const messaging = getMessaging(app);
     const configuredVapidKey = (
       customVapidKey ||
-      getSiteConfig().fcmVapidKey ||
       import.meta.env.VITE_FIREBASE_VAPID_KEY ||
+      getSiteConfig().fcmVapidKey ||
       ''
     ).trim();
 
@@ -158,10 +158,19 @@ export async function showBrowserPushNotification(opts: {
   tag?: string;
   data: PushDeepLinkPayload;
 }): Promise<boolean> {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
+  if (typeof window === 'undefined') {
     return false;
   }
-  if (window.Notification.permission !== 'granted') {
+
+  try {
+    if ('vibrate' in navigator && typeof navigator.vibrate === 'function') {
+      navigator.vibrate([240, 110, 240]);
+    }
+  } catch {
+    // Ignore vibration restriction
+  }
+
+  if (!('Notification' in window) || window.Notification.permission !== 'granted') {
     return false;
   }
 
@@ -176,7 +185,7 @@ export async function showBrowserPushNotification(opts: {
     dir: 'rtl',
     lang: 'ar',
     tag: opts.tag || `masarik-${opts.data.action}-${opts.data.phone || 'global'}`,
-    vibrate: [220, 100, 220],
+    vibrate: [240, 110, 240],
     renotify: true,
     requireInteraction: true,
     data: {
@@ -189,15 +198,23 @@ export async function showBrowserPushNotification(opts: {
 
   try {
     const fcmSwReg = await registerMessagingServiceWorker();
-    if (fcmSwReg && typeof fcmSwReg.showNotification === 'function') {
+    if (fcmSwReg?.active && typeof fcmSwReg.showNotification === 'function') {
       await fcmSwReg.showNotification(opts.title, notificationOptions);
       return true;
     }
 
     if ('serviceWorker' in navigator) {
       const mainSw = await navigator.serviceWorker.getRegistration();
-      if (mainSw && typeof mainSw.showNotification === 'function') {
+      if (mainSw?.active && typeof mainSw.showNotification === 'function') {
         await mainSw.showNotification(opts.title, notificationOptions);
+        return true;
+      }
+      const readySw = await Promise.race<ServiceWorkerRegistration | null>([
+        navigator.serviceWorker.ready,
+        new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 900)),
+      ]);
+      if (readySw?.active && typeof readySw.showNotification === 'function') {
+        await readySw.showNotification(opts.title, notificationOptions);
         return true;
       }
     }
@@ -214,7 +231,21 @@ export async function showBrowserPushNotification(opts: {
     };
     return true;
   } catch {
-    return false;
+    try {
+      const notif = new window.Notification(opts.title, notificationOptions);
+      notif.onclick = () => {
+        try {
+          window.focus();
+        } catch {
+          // Ignore focus restriction
+        }
+        emitPushNavigate(opts.data);
+        notif.close();
+      };
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
