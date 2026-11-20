@@ -20,6 +20,7 @@ import {
   FamilyMember,
   FamilyRelationship,
   IssuedDocument,
+  PendingLoginRequest,
   PublicOrderStatusSummary,
   TravelerDocument,
   TravelerProfile,
@@ -502,6 +503,32 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
         }))
     : [];
 
+  const validLoginRequests: PendingLoginRequest[] = Array.isArray(profile.pendingLoginRequests)
+    ? profile.pendingLoginRequests
+        .filter(
+          (r) =>
+            r &&
+            typeof r.requestId === 'string' &&
+            r.requestId.trim().length >= 6 &&
+            typeof r.deviceId === 'string' &&
+            r.deviceId.trim().length >= 8
+        )
+        .slice(0, 10)
+        .map((r) => ({
+          requestId: String(r.requestId).slice(0, 80),
+          deviceId: String(r.deviceId).slice(0, 64),
+          deviceLabel: String(r.deviceLabel || 'Web Device').trim().slice(0, 120) || 'Web Device',
+          status: (['pending', 'approved', 'rejected', 'expired'].includes(r.status)
+            ? r.status
+            : 'pending') as PendingLoginRequest['status'],
+          createdAt: String(r.createdAt || new Date().toISOString()).slice(0, 64),
+          expiresAt: String(
+            r.expiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString()
+          ).slice(0, 64),
+          ...(r.respondedAt ? { respondedAt: String(r.respondedAt).slice(0, 64) } : {}),
+        }))
+    : [];
+
   const safeIssuedDocuments: IssuedDocument[] = Array.isArray(profile.issuedDocuments)
     ? profile.issuedDocuments
         .filter((d) => d && typeof d.id === 'string' && d.id.trim().length > 0)
@@ -581,6 +608,7 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     documents: safeDocs,
     familyMembers: safeFamilyMembers,
     trustedDevices: validDevices,
+    ...(validLoginRequests.length > 0 ? { pendingLoginRequests: validLoginRequests } : {}),
     issuedDocuments: safeIssuedDocuments,
     notifications: safeNotifications,
   };
@@ -737,6 +765,9 @@ function mergeCloudClientWithLocal(
     trustedDevices: Array.isArray(cloudData.trustedDevices)
       ? cloudData.trustedDevices
       : localExisting?.trustedDevices || [],
+    pendingLoginRequests: Array.isArray(cloudData.pendingLoginRequests)
+      ? cloudData.pendingLoginRequests
+      : localExisting?.pendingLoginRequests || [],
     avatarUrl: cloudData.avatarUrl || localExisting?.avatarUrl || undefined,
     avatarStoragePath: cloudData.avatarStoragePath || localExisting?.avatarStoragePath || undefined,
     avatarSizeBytes:
@@ -917,8 +948,21 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
       if (!snap.exists()) return;
       const cloudProfile = snap.data() as TravelerProfile;
       const all = getAllTravelers();
-      all[normalized] = mergeCloudClientWithLocal(cloudProfile, all[normalized]);
+      const merged = mergeCloudClientWithLocal(cloudProfile, all[normalized]);
+      all[normalized] = merged;
       saveAllTravelersLocalOnly(all);
+
+      // Remote device revocation check: if this device was logged in permanently and removed remotely, log out immediately
+      const meta = readStoredSessionMeta();
+      if (
+        meta &&
+        meta.phone === normalized &&
+        meta.mode === 'trusted' &&
+        Date.now() - meta.startedAt > 6000 &&
+        !isDeviceInTrustedList(merged.trustedDevices, meta.deviceId)
+      ) {
+        logoutTravelerSession('manual');
+      }
     },
     (error) => {
       const msg = error instanceof Error ? error.message : String(error);
@@ -1008,12 +1052,27 @@ export function hashClientPin(rawPhone: string, rawPin: string): string {
 
 export function getTravelerSessionMeta(): TravelerSessionMeta | null {
   if (typeof window === 'undefined') return null;
-  const activePhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
-  if (!activePhone) return null;
   const meta = readStoredSessionMeta();
-  if (!meta || meta.phone !== activePhone) return null;
+  if (!meta) return null;
+
+  let activePhone: string | null = null;
+  try {
+    activePhone =
+      meta.mode === 'temporary'
+        ? window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY)
+        : window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+  } catch {
+    activePhone = null;
+  }
+
+  if (!activePhone || meta.phone !== activePhone) return null;
   if (meta.mode === 'temporary' && meta.expiresAt && Date.now() >= meta.expiresAt) {
-    window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    try {
+      window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+      window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
     writeStoredSessionMeta(null);
     markSessionExpiredNotice();
     emitUpdateEvent();
@@ -1024,18 +1083,32 @@ export function getTravelerSessionMeta(): TravelerSessionMeta | null {
 
 export function getActivePhone(): string | null {
   if (typeof window === 'undefined') return null;
-  const rawPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
-  if (!rawPhone) return null;
   const meta = readStoredSessionMeta();
-  if (meta && meta.phone === rawPhone && meta.mode === 'temporary' && meta.expiresAt) {
-    if (Date.now() >= meta.expiresAt) {
+  try {
+    const tempPhone = window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+    if (tempPhone) {
+      if (meta && meta.phone === tempPhone && meta.mode === 'temporary' && meta.expiresAt) {
+        if (Date.now() >= meta.expiresAt) {
+          window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+          writeStoredSessionMeta(null);
+          markSessionExpiredNotice();
+          return null;
+        }
+      }
+      return tempPhone;
+    }
+
+    const persistentPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+    if (!persistentPhone) return null;
+    // Security guard: if there's no trusted session meta (or stale temporary meta), do not auto-restore persistent phone
+    if (!meta || meta.mode === 'temporary') {
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
-      writeStoredSessionMeta(null);
-      markSessionExpiredNotice();
       return null;
     }
+    return persistentPhone;
+  } catch {
+    return null;
   }
-  return rawPhone;
 }
 
 export function getActiveTraveler(): TravelerProfile | null {
@@ -1056,6 +1129,7 @@ export function setActiveTravelerPhone(phone: string | null): void {
     window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, cleanPhone);
   } else {
     window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
     writeStoredSessionMeta(null);
   }
   emitUpdateEvent();
@@ -1076,7 +1150,18 @@ export function startTravelerSession(
     expiresAt: mode === 'temporary' ? now + TEMPORARY_SESSION_DURATION_MS : null,
   };
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
+    try {
+      if (mode === 'temporary') {
+        // Temporary sessions live exclusively inside browser sessionStorage so closing browser auto-expires immediately
+        window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+        window.sessionStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
+      } else {
+        window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+        window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
+      }
+    } catch {
+      // Ignore
+    }
     writeStoredSessionMeta(meta);
     emitUpdateEvent();
   }
@@ -1182,8 +1267,16 @@ export async function updateUserPresenceCloud(
 
 export function logoutTravelerSession(reason: 'manual' | 'expired' = 'manual'): void {
   if (typeof window === 'undefined') return;
-  const prevPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
-  window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+  let prevPhone: string | null = null;
+  try {
+    prevPhone =
+      window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY) ||
+      window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+    window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+    window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+  } catch {
+    prevPhone = null;
+  }
   writeStoredSessionMeta(null);
   if (prevPhone) {
     void updateUserPresenceCloud(prevPhone, false);
@@ -1208,6 +1301,7 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
   currentDeviceId: string;
   currentDeviceLabel: string;
 }> {
+  const rawDigits = digitsOnly(rawPhone);
   const phone = normalizePhone(rawPhone);
   const { deviceId, label } = getDeviceFingerprint();
   if (!/^[0-9]{8,20}$/.test(phone)) {
@@ -1227,22 +1321,32 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
   }
 
   const localAll = getAllTravelers();
-  let target: TravelerProfile | undefined = localAll[phone];
+  let target: TravelerProfile | undefined = localAll[phone] || localAll[rawDigits];
+  let resolvedPhone = target?.phoneNormalized || (target ? normalizePhone(target.phone) : phone);
   const path = `clients/${phone}`;
 
   try {
     const snap = await getDoc(doc(db, 'clients', phone));
     if (snap.exists()) {
       target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, localAll[phone]);
-      localAll[phone] = target;
+      resolvedPhone = normalizePhone(target.phone || phone);
+      localAll[resolvedPhone] = target;
       saveAllTravelersLocalOnly(localAll);
+    } else if (rawDigits && rawDigits !== phone && /^[0-9]{8,20}$/.test(rawDigits)) {
+      const legacySnap = await getDoc(doc(db, 'clients', rawDigits));
+      if (legacySnap.exists()) {
+        target = mergeCloudClientWithLocal(
+          legacySnap.data() as TravelerProfile,
+          localAll[rawDigits] || localAll[phone]
+        );
+        resolvedPhone = rawDigits;
+        localAll[rawDigits] = target;
+        saveAllTravelersLocalOnly(localAll);
+      }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.toLowerCase().includes('permission')) {
-      handleFirestoreError(error, OperationType.GET, path);
-    }
-    console.warn('Cloud device trust lookup deferred:', msg);
+    console.warn('Cloud device trust lookup deferred:', path, msg);
   }
 
   if (!target) {
@@ -1266,7 +1370,7 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
 
   return {
     validPhone: true,
-    phone,
+    phone: resolvedPhone,
     exists: true,
     profile: target,
     accountType,
@@ -1280,6 +1384,10 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
   };
 }
 
+/**
+ * Verifies a 6-digit PIN strictly on an ALREADY-TRUSTED device and opens trusted session.
+ * Untrusted devices must use verifyClientPinForNewDeviceCloud -> mandatory privacy device choice!
+ */
 export async function loginWithTrustedDevicePinCloud(
   rawPhone: string,
   enteredPin: string,
@@ -1314,49 +1422,35 @@ export async function loginWithTrustedDevicePinCloud(
     };
   }
 
-  const canDirectB2BPinLogin =
-    check.isB2BPartner && check.profile.verified && check.hasPin && Boolean(check.profile.pinHash);
-
-  if (!canDirectB2BPinLogin && (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash)) {
+  if (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash) {
     return {
       ok: false,
       fallbackToOtp: true,
       error:
         lang === 'en'
-          ? 'This device is not trusted or PIN is not set. Switching to WhatsApp OTP verification.'
-          : 'هذا الجهاز غير موثوق أو لم يتم تعيين رمز PIN بعد. سيتم التحقق عبر كود واتساب OTP.',
+          ? 'This device is not yet trusted. Please complete New Device Verification first.'
+          : 'هذا الجهاز غير موثوق بعد. يرجى إكمال التحقق من الجهاز الجديد أولاً.',
     };
   }
 
-  const enteredHash = hashClientPin(phone, cleanPin);
+  const enteredHash = hashClientPin(check.phone, cleanPin);
   if (enteredHash !== check.profile.pinHash) {
     return {
       ok: false,
       error:
         lang === 'en'
-          ? 'Incorrect 6-digit PIN. Please try again or tap Forgot PIN to verify via WhatsApp OTP.'
+          ? 'Incorrect 6-digit PIN. Please try again or use Forgot PIN.'
           : 'رمز الـ PIN غير صحيح. يرجى المحاولة مرة أخرى أو استخدام خيار نسيت رمز الـ PIN.',
     };
   }
 
   const nowIso = new Date().toISOString();
   const currentList = check.profile.trustedDevices || [];
-  const hasCurrentDevice = currentList.some((d) => d.deviceId === check.currentDeviceId);
-  const updatedDevices: TrustedDevice[] = hasCurrentDevice
-    ? currentList.map((d) =>
-        d.deviceId === check.currentDeviceId
-          ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
-          : d
-      )
-    : [
-        {
-          deviceId: check.currentDeviceId,
-          label: check.currentDeviceLabel,
-          addedAt: nowIso,
-          lastUsedAt: nowIso,
-        },
-        ...currentList,
-      ].slice(0, 15);
+  const updatedDevices: TrustedDevice[] = currentList.map((d) =>
+    d.deviceId === check.currentDeviceId
+      ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
+      : d
+  );
 
   const updated: TravelerProfile = {
     ...check.profile,
@@ -1365,11 +1459,185 @@ export async function loginWithTrustedDevicePinCloud(
     trustedDevices: updatedDevices,
   };
   const all = getAllTravelers();
-  all[phone] = updated;
+  all[check.phone] = updated;
   saveAllTravelersLocalOnly(all);
-  startTravelerSession(phone, 'trusted');
+  startTravelerSession(check.phone, 'trusted');
   await syncTravelerToCloud(updated);
   return { ok: true, profile: updated };
+}
+
+/**
+ * Option 2 on New Device Verification Screen:
+ * Verifies the client's permanent 6-digit PIN on a NEW untrusted device WITHOUT opening the session
+ * and WITHOUT auto-saving the device into trustedDevices. Routes to Privacy Device-Type Step next.
+ */
+export async function verifyClientPinForNewDeviceCloud(
+  rawPhone: string,
+  enteredPin: string,
+  lang: 'ar' | 'en' = 'ar'
+): Promise<{
+  ok: boolean;
+  error?: string;
+  profile?: TravelerProfile;
+}> {
+  const cleanPin = normalizeArabicDigits(enteredPin).replace(/\D/g, '');
+  if (cleanPin.length !== 6) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Please enter your 6-digit personal PIN.'
+          : 'يرجى إدخال رمز الـ PIN الشخصي المكون من 6 أرقام.',
+    };
+  }
+
+  const check = await checkClientAccountAndDeviceCloud(rawPhone);
+  if (!check.exists || !check.profile) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Account not found. Please check your WhatsApp number.'
+          : 'لم يتم العثور على الحساب. تأكد من رقم الواتساب.',
+    };
+  }
+
+  if (!check.hasPin || !check.profile.pinHash) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'No PIN is set on this account yet. Please verify using backup WhatsApp OTP.'
+          : 'لم يتم تعيين رمز PIN لهذا الحساب بعد. يرجى اختيار كود التفعيل عبر واتساب.',
+    };
+  }
+
+  const enteredHash = hashClientPin(check.phone, cleanPin);
+  if (enteredHash !== check.profile.pinHash) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Incorrect 6-digit PIN. Try again, or use Approved Device / WhatsApp OTP.'
+          : 'رمز الـ PIN غير صحيح. حاول مرة أخرى أو استخدم الموافقة من الجهاز الموثوق أو كود الواتساب.',
+    };
+  }
+
+  return { ok: true, profile: check.profile };
+}
+
+/**
+ * Option 1 on New Device Verification Screen:
+ * Creates a real-time pending login request on the client document so any open trusted device pops up an instant Allow/Reject prompt.
+ */
+export async function requestTrustedDeviceLoginApprovalCloud(rawPhone: string): Promise<{
+  ok: boolean;
+  request?: PendingLoginRequest;
+  error?: string;
+}> {
+  const check = await checkClientAccountAndDeviceCloud(rawPhone);
+  if (!check.exists || !check.profile) {
+    return { ok: false, error: 'لم يتم العثور على الحساب.' };
+  }
+
+  const phone = check.phone;
+  const { deviceId, label } = getDeviceFingerprint();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiresIso = new Date(nowMs + 10 * 60 * 1000).toISOString();
+  const request: PendingLoginRequest = {
+    requestId: `req_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+    deviceId,
+    deviceLabel: label,
+    status: 'pending',
+    createdAt: nowIso,
+    expiresAt: expiresIso,
+  };
+
+  const prevList = Array.isArray(check.profile.pendingLoginRequests)
+    ? check.profile.pendingLoginRequests
+    : [];
+  const filtered = prevList
+    .filter((r) => r && r.deviceId !== deviceId && Date.parse(r.expiresAt) > nowMs - 60000)
+    .slice(0, 9);
+  const nextList = [request, ...filtered].slice(0, 10);
+
+  const updated: TravelerProfile = {
+    ...check.profile,
+    pendingLoginRequests: nextList,
+    updatedAt: nowIso,
+  };
+  const all = getAllTravelers();
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      pendingLoginRequests: nextList,
+      updatedAt: nowIso,
+    });
+  } catch {
+    await syncTravelerToCloud(updated);
+  }
+
+  void dispatchRemotePushNotification({
+    targetRole: 'client',
+    targetPhone: phone,
+    title: 'طلب تسجيل دخول من جهاز جديد',
+    body: `محاولة تسجيل دخول لحسابك من جهاز (${label}) — افتح التطبيق للموافقة أو الرفض.`,
+    data: { role: 'client', action: 'chat', phone },
+  });
+
+  return { ok: true, request };
+}
+
+/**
+ * Trusted Device response: Approves or rejects a new-device login request in real time.
+ */
+export async function respondToLoginApprovalRequestCloud(
+  rawPhone: string,
+  requestId: string,
+  decision: 'approved' | 'rejected'
+): Promise<boolean> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone) || !requestId) return false;
+
+  const all = getAllTravelers();
+  let target = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, target);
+    }
+  } catch {
+    // Use local cache fallback
+  }
+  if (!target) return false;
+
+  const nowIso = new Date().toISOString();
+  const prevList = Array.isArray(target.pendingLoginRequests) ? target.pendingLoginRequests : [];
+  const nextList: PendingLoginRequest[] = prevList.map((r) =>
+    r.requestId === requestId ? { ...r, status: decision, respondedAt: nowIso } : r
+  );
+
+  const updated: TravelerProfile = {
+    ...target,
+    pendingLoginRequests: nextList,
+    updatedAt: nowIso,
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      pendingLoginRequests: nextList,
+      updatedAt: nowIso,
+    });
+    return true;
+  } catch {
+    await syncTravelerToCloud(updated);
+    return true;
+  }
 }
 
 /**

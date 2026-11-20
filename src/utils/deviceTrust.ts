@@ -127,10 +127,26 @@ export function isDeviceInTrustedList(
 export function readStoredSessionMeta(): TravelerSessionMeta | null {
   if (typeof window === 'undefined') return null;
   try {
+    const tempRaw = window.sessionStorage.getItem(SESSION_META_STORAGE_KEY);
+    if (tempRaw) {
+      const parsedTemp = JSON.parse(tempRaw) as TravelerSessionMeta;
+      if (parsedTemp && typeof parsedTemp.phone === 'string') {
+        return parsedTemp;
+      }
+    }
+  } catch {
+    // Ignore sessionStorage error
+  }
+  try {
     const raw = window.localStorage.getItem(SESSION_META_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as TravelerSessionMeta;
     if (!parsed || typeof parsed.phone !== 'string') return null;
+    // Security guard: temporary sessions must never survive a browser close
+    if (parsed.mode === 'temporary') {
+      window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
+      return null;
+    }
     return parsed;
   } catch {
     return null;
@@ -142,7 +158,14 @@ export function writeStoredSessionMeta(meta: TravelerSessionMeta | null): void {
   try {
     if (!meta) {
       window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
+      window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
+      return;
+    }
+    if (meta.mode === 'temporary') {
+      window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
+      window.sessionStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
     } else {
+      window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
       window.localStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
     }
   } catch {

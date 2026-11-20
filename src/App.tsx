@@ -30,6 +30,7 @@ import {
   activateViaMagicLinkCloud,
   getActivePhone,
   getActiveTraveler,
+  getAllTravelers,
   getPendingVerificationPhone,
   getTravelerDisplayNames,
   getTravelerSessionMeta,
@@ -44,6 +45,14 @@ import {
   subscribeAllChatThreads,
   subscribeChatThread,
 } from './utils/chatStore';
+import {
+  PUSH_NAVIGATE_EVENT,
+  PushDeepLinkPayload,
+  PushNotificationAction,
+  registerMessagingServiceWorker,
+  showBrowserPushNotification,
+  subscribeForegroundFcmMessages,
+} from './utils/fcmPushService';
 import { consumeSessionExpiredNotice } from './utils/deviceTrust';
 import { ChatThreadSummary, TravelerProfile, TravelerSessionMeta } from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
@@ -124,7 +133,21 @@ export const App: React.FC = () => {
   const prevChatUnreadRef = useRef<number | null>(null);
   const [adminChatThreads, setAdminChatThreads] = useState<Record<string, ChatThreadSummary>>({});
   const prevAdminUnreadRef = useRef<number | null>(null);
+  const prevAdminThreadsRef = useRef<Record<string, ChatThreadSummary> | null>(null);
+  const prevAdminClientsSnapRef = useRef<
+    Record<string, { docs: number; receipts: number; preferredVisa: string }> | null
+  >(null);
+  const prevClientSnapRef = useRef<{
+    phone: string;
+    orderStatus: string;
+    issuedCount: number;
+    docStatuses: string;
+  } | null>(null);
   const [adminRequestedChat, setAdminRequestedChat] = useState<{
+    phone: string;
+    nonce: number;
+  } | null>(null);
+  const [adminRequestedFolder, setAdminRequestedFolder] = useState<{
     phone: string;
     nonce: number;
   } | null>(null);
@@ -274,7 +297,7 @@ export const App: React.FC = () => {
     };
   }, [activeTravelerPhone]);
 
-  // Real-time unread chat counter & chime for signed-in traveler / B2B partner
+  // Real-time unread chat counter, audio chime & push alert for signed-in traveler / B2B partner
   useEffect(() => {
     prevChatUnreadRef.current = null;
     if (!activeTravelerPhone) {
@@ -287,18 +310,98 @@ export const App: React.FC = () => {
       if (
         prevChatUnreadRef.current !== null &&
         nextCount > prevChatUnreadRef.current &&
-        travelerSection !== 'chat'
+        (travelerSection !== 'chat' || document.visibilityState !== 'visible')
       ) {
         playChatNotificationChime();
+        void showBrowserPushNotification({
+          title: t('رسالة جديدة من إدارة مسارك', 'New Message from Masarik Team'),
+          body: thread?.lastMessageText || t('لديك رسالة جديدة في المحادثة المباشرة.', 'You have a new message in live chat.'),
+          tag: `masarik-client-chat-${activeTravelerPhone}`,
+          data: {
+            role: 'client',
+            action: 'chat',
+            phone: activeTravelerPhone,
+          },
+        });
       }
       prevChatUnreadRef.current = nextCount;
       setChatUnreadCount(nextCount);
     });
-  }, [activeTravelerPhone, travelerSection]);
+  }, [activeTravelerPhone, travelerSection, t]);
+
+  // Client profile watcher: alert instantly on doc review status update, deliverable upload, or order status change
+  useEffect(() => {
+    if (!activeTraveler) {
+      prevClientSnapRef.current = null;
+      return;
+    }
+
+    const docStatuses = (activeTraveler.documents || [])
+      .map((d) => `${d.id}:${d.status || 'received'}`)
+      .join('|');
+    const issuedCount = (activeTraveler.issuedDocuments || []).length;
+    const orderStatus = String(activeTraveler.orderStatus || '');
+
+    const prev = prevClientSnapRef.current;
+    if (!prev || prev.phone !== activeTraveler.phone) {
+      prevClientSnapRef.current = {
+        phone: activeTraveler.phone,
+        orderStatus,
+        issuedCount,
+        docStatuses,
+      };
+      return;
+    }
+
+    const deliverableAdded = issuedCount > prev.issuedCount;
+    const docsChanged = docStatuses !== prev.docStatuses;
+    const orderChanged = orderStatus !== prev.orderStatus;
+
+    prevClientSnapRef.current = {
+      phone: activeTraveler.phone,
+      orderStatus,
+      issuedCount,
+      docStatuses,
+    };
+
+    if (deliverableAdded) {
+      playChatNotificationChime();
+      void showBrowserPushNotification({
+        title: t('تم إصدار مستند جديد في حسابك', 'New Deliverable Ready in Your Account'),
+        body: t(
+          'أصدرت إدارة مسارك مستنداً نهائياً جديداً — اضغط للعرض والتحميل.',
+          'Masarik issued a final document — tap to view and download.'
+        ),
+        tag: `masarik-client-deliverable-${activeTraveler.phone}`,
+        data: { role: 'client', action: 'documents', phone: activeTraveler.phone },
+      });
+    } else if (docsChanged) {
+      playChatNotificationChime();
+      void showBrowserPushNotification({
+        title: t('تحديث حالة مراجعة مستنداتك', 'Document Review Status Updated'),
+        body: t(
+          'قامت الإدارة بتحديث حالة مراجعة أحد مستنداتك. اضغط للاطلاع.',
+          'Admin updated the review status of one of your documents.'
+        ),
+        tag: `masarik-client-docs-${activeTraveler.phone}`,
+        data: { role: 'client', action: 'documents', phone: activeTraveler.phone },
+      });
+    } else if (orderChanged) {
+      playChatNotificationChime();
+      void showBrowserPushNotification({
+        title: t('تحديث حالة طلبك في مسارك', 'Your Masarik Order Status Updated'),
+        body: orderStatus,
+        tag: `masarik-client-order-${activeTraveler.phone}`,
+        data: { role: 'client', action: 'orders', phone: activeTraveler.phone },
+      });
+    }
+  }, [activeTraveler, t]);
 
   // Real-time cloud subscription for all clients & live chat threads when Admin/Sub-Admin session is active
   useEffect(() => {
     prevAdminUnreadRef.current = null;
+    prevAdminThreadsRef.current = null;
+    prevAdminClientsSnapRef.current = null;
     if (!isAdminActive) {
       setAdminChatThreads({});
       return;
@@ -310,25 +413,200 @@ export const App: React.FC = () => {
         (sum, th) => sum + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
         0
       );
-      if (
+      if (prevAdminThreadsRef.current) {
+        for (const [phone, th] of Object.entries(threadsMap)) {
+          const prevUnreadForPhone = prevAdminThreadsRef.current[phone]?.unreadAdminCount || 0;
+          if (
+            (th.unreadAdminCount || 0) > prevUnreadForPhone &&
+            (!isDashboardMode || document.visibilityState !== 'visible')
+          ) {
+            playChatNotificationChime();
+            void showBrowserPushNotification({
+              title: t(
+                `رسالة جديدة من ${th.clientName || phone}`,
+                `New Chat Message from ${th.clientName || phone}`
+              ),
+              body: th.lastMessageText || t('رسالة واردة جديدة في صندوق المحادثات.', 'New live chat message arrived.'),
+              tag: `masarik-admin-chat-${phone}`,
+              data: { role: 'admin', action: 'live_chat', phone },
+            });
+            break;
+          }
+        }
+      } else if (
         prevAdminUnreadRef.current !== null &&
         nextUnread > prevAdminUnreadRef.current &&
         !isDashboardMode
       ) {
         playChatNotificationChime();
       }
+      prevAdminThreadsRef.current = threadsMap;
       prevAdminUnreadRef.current = nextUnread;
     });
+
+    const handleClientsChangeForAdminPush = () => {
+      const allMap = getAllTravelers();
+      const nextSnap: Record<
+        string,
+        { docs: number; receipts: number; preferredVisa: string }
+      > = {};
+      for (const [ph, prof] of Object.entries(allMap)) {
+        const docs = Array.isArray(prof.documents) ? prof.documents : [];
+        nextSnap[ph] = {
+          docs: docs.length,
+          receipts: docs.filter((d) => d.docType === 'receipt').length,
+          preferredVisa: String(prof.preferredVisaType || ''),
+        };
+      }
+      const prevSnap = prevAdminClientsSnapRef.current;
+      prevAdminClientsSnapRef.current = nextSnap;
+      if (!prevSnap) return;
+
+      for (const [ph, counts] of Object.entries(nextSnap)) {
+        const old = prevSnap[ph];
+        const prof = allMap[ph];
+        const clientLabel = prof ? getTravelerDisplayNames(prof).fullDisplayName || ph : ph;
+        if (!old) {
+          playChatNotificationChime();
+          void showBrowserPushNotification({
+            title: t(`طلب / عميل جديد: ${clientLabel}`, `New Client / Order: ${clientLabel}`),
+            body: t(
+              'تم تسجيل حساب أو طلب جديد — اضغط لفتح ملف العميل.',
+              'New client or order registered — tap to open client folder.'
+            ),
+            tag: `masarik-admin-folder-${ph}`,
+            data: { role: 'admin', action: 'client_folder', phone: ph },
+          });
+          break;
+        }
+        if (
+          counts.receipts > old.receipts ||
+          counts.docs > old.docs ||
+          (counts.preferredVisa && counts.preferredVisa !== old.preferredVisa)
+        ) {
+          playChatNotificationChime();
+          void showBrowserPushNotification({
+            title:
+              counts.receipts > old.receipts
+                ? t(`إيصال دفع جديد من ${clientLabel}`, `New Payment Receipt from ${clientLabel}`)
+                : counts.docs > old.docs
+                ? t(`مستند جديد مرفوع من ${clientLabel}`, `New Document Uploaded by ${clientLabel}`)
+                : t(`طلب خدمة جديد من ${clientLabel}`, `New Service Order from ${clientLabel}`),
+            body: t(
+              'اضغط لفتح مجلد العميل ومراجعة المرفقات فوراً.',
+              'Tap to open client folder and review immediately.'
+            ),
+            tag: `masarik-admin-folder-${ph}`,
+            data: { role: 'admin', action: 'client_folder', phone: ph },
+          });
+          break;
+        }
+      }
+    };
+
+    window.addEventListener(TRAVELERS_UPDATED_EVENT, handleClientsChangeForAdminPush);
+
     return () => {
       unsubClients();
       unsubThreads();
+      window.removeEventListener(TRAVELERS_UPDATED_EVENT, handleClientsChangeForAdminPush);
     };
-  }, [isAdminActive, isDashboardMode]);
+  }, [isAdminActive, isDashboardMode, t]);
+
+  const handlePushDeepLink = useCallback(
+    (payload: PushDeepLinkPayload) => {
+      if (payload.role === 'admin') {
+        if (isAdminActive) {
+          setAdminMode('dashboard');
+        } else {
+          openAdminLoginModal();
+        }
+        if (payload.action === 'client_folder' && payload.phone) {
+          setAdminRequestedFolder({ phone: payload.phone, nonce: Date.now() });
+        } else {
+          setAdminRequestedChat({ phone: payload.phone || '', nonce: Date.now() });
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+
+      const targetSub: TravelerSubTab =
+        payload.action === 'documents'
+          ? 'documents'
+          : payload.action === 'orders'
+          ? 'orders'
+          : 'chat';
+      setTravelerSection(targetSub);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [isAdminActive, openAdminLoginModal, setAdminMode]
+  );
+
+  // Register FCM background Service Worker, foreground message handler, and SW/custom deep-link listeners
+  useEffect(() => {
+    void registerMessagingServiceWorker();
+    const unsubForeground = subscribeForegroundFcmMessages(() => {
+      playChatNotificationChime();
+    });
+
+    const onCustomPushNav = (evt: Event) => {
+      const detail = (evt as CustomEvent<PushDeepLinkPayload>).detail;
+      if (detail) handlePushDeepLink(detail);
+    };
+    const onSwMessage = (evt: MessageEvent) => {
+      const msg = evt.data as { type?: string; payload?: PushDeepLinkPayload } | null;
+      if (msg && msg.type === 'MASARIK_PUSH_NAVIGATE' && msg.payload) {
+        handlePushDeepLink(msg.payload);
+      }
+    };
+
+    window.addEventListener(PUSH_NAVIGATE_EVENT, onCustomPushNav);
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', onSwMessage);
+    }
+
+    return () => {
+      unsubForeground();
+      window.removeEventListener(PUSH_NAVIGATE_EVENT, onCustomPushNav);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', onSwMessage);
+      }
+    };
+  }, [handlePushDeepLink]);
 
   useEffect(() => {
     const handleUrlActions = async () => {
       try {
         const url = new URL(window.location.href);
+        const pushRole = url.searchParams.get('push_role');
+        const pushAction = url.searchParams.get('push_action');
+        const pushPhone = url.searchParams.get('push_phone') || undefined;
+        if (pushRole && pushAction) {
+          const validActions: PushNotificationAction[] = [
+            'live_chat',
+            'client_folder',
+            'chat',
+            'documents',
+            'orders',
+          ];
+          const safeAction: PushNotificationAction = validActions.includes(
+            pushAction as PushNotificationAction
+          )
+            ? (pushAction as PushNotificationAction)
+            : pushRole === 'admin'
+            ? 'live_chat'
+            : 'chat';
+          handlePushDeepLink({
+            role: pushRole === 'admin' ? 'admin' : 'client',
+            action: safeAction,
+            phone: pushPhone,
+          });
+          url.searchParams.delete('push_role');
+          url.searchParams.delete('push_action');
+          url.searchParams.delete('push_phone');
+          window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
+        }
+
         const adminParam = url.searchParams.get('admin');
         if (adminParam === '1') {
           if (isAdminActive) {
@@ -508,7 +786,10 @@ export const App: React.FC = () => {
       {/* Full-Page Admin Workspace OR Full-Page Traveler Workspace OR Live Site Viewport */}
       {isDashboardMode ? (
         <main className="flex-1" data-no-admin-edit="true">
-          <AdminDashboardWorkspace requestedChat={adminRequestedChat} />
+          <AdminDashboardWorkspace
+            requestedChat={adminRequestedChat}
+            requestedFolder={adminRequestedFolder}
+          />
         </main>
       ) : travelerSection ? (
         <main className="flex-1" data-no-admin-edit="true">

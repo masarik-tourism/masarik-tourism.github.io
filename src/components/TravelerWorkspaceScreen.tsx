@@ -42,12 +42,14 @@ import {
 } from 'lucide-react';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
+import { PushPermissionBanner } from './PushPermissionBanner';
 import {
   AccountType,
   DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
   PassportAiCheckResult,
+  PendingLoginRequest,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
@@ -74,6 +76,8 @@ import {
   normalizeArabicDigits,
   normalizePhone,
   requestAccountSecurityOtpCloud,
+  requestTrustedDeviceLoginApprovalCloud,
+  respondToLoginApprovalRequestCloud,
   revokeTrustedDeviceCloud,
   saveFamilyMemberCloud,
   setClientPinCloud,
@@ -84,8 +88,10 @@ import {
   uploadAndSaveAvatarImmediateCloud,
   uploadBatchFilesToTravelerCloud,
   verifyAccountSecurityOtpCloud,
+  verifyClientPinForNewDeviceCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
+import { playChatNotificationChime } from '../utils/chatStore';
 import {
   getDeviceFingerprint,
   getRemainingTemporaryMinutes,
@@ -115,6 +121,7 @@ type LoggedOutAuthStage =
   | 'phone_entry'
   | 'register_details'
   | 'pin_login'
+  | 'new_device_verify'
   | 'otp_verify'
   | 'pin_setup'
   | 'device_trust_prompt';
@@ -187,6 +194,25 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [showPinLogin, setShowPinLogin] = useState(false);
   const [pinLoginError, setPinLoginError] = useState('');
   const [isLoggingInWithPin, setIsLoggingInWithPin] = useState(false);
+
+  // New / Untrusted Device Verification Hub (3 Options -> Mandatory Privacy Choice)
+  const [detectedHasPin, setDetectedHasPin] = useState(true);
+  const [pendingApprovalReqId, setPendingApprovalReqId] = useState<string | null>(null);
+  const [approvalRequestState, setApprovalRequestState] = useState<
+    'idle' | 'waiting' | 'rejected' | 'error'
+  >('idle');
+  const [approvalRequestError, setApprovalRequestError] = useState('');
+  const [isRequestingApproval, setIsRequestingApproval] = useState(false);
+  const [newDevicePinInput, setNewDevicePinInput] = useState('');
+  const [showNewDevicePin, setShowNewDevicePin] = useState(false);
+  const [newDevicePinError, setNewDevicePinError] = useState('');
+  const [isVerifyingNewDevicePin, setIsVerifyingNewDevicePin] = useState(false);
+  const [isSwitchingNewDeviceOtp, setIsSwitchingNewDeviceOtp] = useState(false);
+
+  // Logged-in Trusted Device Incoming Remote Login Approval Modal State
+  const [respondingLoginReqId, setRespondingLoginReqId] = useState<string | null>(null);
+  const [dismissedLoginReqIds, setDismissedLoginReqIds] = useState<string[]>([]);
+  const lastChimeLoginReqIdRef = useRef<string | null>(null);
 
   // Logged-out Step 2 OTP unlock (with 24h validity countdown & Admin real-time instant activation)
   const [otpInput, setOtpInput] = useState('');
@@ -302,7 +328,9 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       pendingOtpPhone &&
       authStage !== 'otp_verify' &&
       authStage !== 'pin_setup' &&
-      authStage !== 'device_trust_prompt'
+      authStage !== 'device_trust_prompt' &&
+      authStage !== 'new_device_verify' &&
+      authStage !== 'pin_login'
     ) {
       setTrustedPhone(pendingOtpPhone);
       setAuthStage('otp_verify');
@@ -352,8 +380,9 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         onSetPendingOtpPhone(null);
         setAuthStage('pin_login');
       } else {
-        setOtpPurpose('untrusted_device');
-        setAuthStage('otp_verify');
+        onSetPendingOtpPhone(null);
+        setDetectedHasPin(check.hasPin);
+        setAuthStage('new_device_verify');
       }
     });
 
@@ -367,6 +396,78 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     onSetPendingOtpPhone,
     onSetPendingPostAuthFlow,
   ]);
+
+  // Real-time listener while waiting on "Request Approval from Trusted Device"
+  useEffect(() => {
+    if (
+      activeTraveler ||
+      authStage !== 'new_device_verify' ||
+      approvalRequestState !== 'waiting'
+    ) {
+      return;
+    }
+    const targetPhone = trustedPhone || normalizePhone(loginPhone);
+    if (!targetPhone) return;
+
+    return subscribePendingClientCloud(targetPhone, (cloudProfile) => {
+      const list = Array.isArray(cloudProfile.pendingLoginRequests)
+        ? cloudProfile.pendingLoginRequests
+        : [];
+      const matched =
+        (pendingApprovalReqId
+          ? list.find((r) => r.requestId === pendingApprovalReqId)
+          : undefined) ||
+        list.find((r) => r.deviceId === currentDevice.deviceId);
+      if (!matched) return;
+
+      if (matched.status === 'approved') {
+        setApprovalRequestState('idle');
+        setApprovalRequestError('');
+        setPendingApprovalReqId(null);
+        onSetPendingPostAuthFlow?.({
+          phone: cloudProfile.phone,
+          stage: 'device_trust_prompt',
+        });
+        setAuthStage('device_trust_prompt');
+      } else if (matched.status === 'rejected') {
+        setApprovalRequestState('rejected');
+        setPendingApprovalReqId(null);
+        setApprovalRequestError(
+          t(
+            'تم رفض محاولة تسجيل الدخول من قبل جهازك الموثوق. يمكنك التحقق برمز الـ PIN أو كود الواتساب.',
+            'Login request was rejected by your trusted device. You may verify with PIN or WhatsApp OTP.'
+          )
+        );
+      }
+    });
+  }, [
+    activeTraveler,
+    authStage,
+    approvalRequestState,
+    pendingApprovalReqId,
+    trustedPhone,
+    loginPhone,
+    currentDevice.deviceId,
+    onSetPendingPostAuthFlow,
+    t,
+  ]);
+
+  // Real-time audio alert when a new-device approval request arrives on a Trusted logged-in session
+  useEffect(() => {
+    if (!activeTraveler || sessionMeta?.mode !== 'trusted') return;
+    const nowMs = Date.now();
+    const pendingReq = (activeTraveler.pendingLoginRequests || []).find(
+      (r) =>
+        r.status === 'pending' &&
+        r.deviceId !== currentDevice.deviceId &&
+        Date.parse(r.expiresAt) > nowMs &&
+        !dismissedLoginReqIds.includes(r.requestId)
+    );
+    if (pendingReq && lastChimeLoginReqIdRef.current !== pendingReq.requestId) {
+      lastChimeLoginReqIdRef.current = pendingReq.requestId;
+      playChatNotificationChime();
+    }
+  }, [activeTraveler, sessionMeta?.mode, currentDevice.deviceId, dismissedLoginReqIds]);
 
   // Live 1-second countdown ticker for 24-hour OTP validity window
   useEffect(() => {
@@ -712,6 +813,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         setDetectedClientName(check.profile.name || '');
         setDetectedAccountType(check.accountType);
         setDetectedCompanyName(check.companyName || check.profile.companyName || '');
+        setDetectedHasPin(check.hasPin);
 
         const isPendingVerification =
           !check.profile.verified || check.profile.accountStatus === 'pending_verification';
@@ -737,11 +839,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           return;
         }
 
-        // Trusted Device OR Verified B2B Partner Account with PIN -> Direct PIN Login (with B2B auto-detect badge)
-        if (
-          (check.isTrustedDevice && check.hasPin) ||
-          (check.isB2BPartner && check.profile.verified && check.hasPin)
-        ) {
+        // Pre-registered & Trusted Current Device with PIN -> Direct PIN Login
+        if (check.isTrustedDevice && check.hasPin) {
           setPinLoginInput('');
           setPinLoginError('');
           onSetPendingOtpPhone(null);
@@ -771,24 +870,30 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           return;
         }
 
-        // Untrusted device or missing PIN -> issue fresh 6-digit OTP
-        setOtpPurpose(check.hasPin ? 'untrusted_device' : 'first_login');
-        const res = await initiateTravelerOtpLoginCloud('', '', check.phone);
-        if (!res.ok) {
-          setAuthError(res.error || t('تعذر بدء تسجيل الدخول.', 'Could not start login.'));
-          return;
-        }
-        setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
-        setOtpInfoBanner('');
-        onSetPendingOtpPhone(check.phone);
-        setOtpInput('');
-        setAuthStage('otp_verify');
+        // Pre-registered verified client on a NEW / UNTRUSTED device (individual OR B2B):
+        // Never open account directly and never auto-trust — route straight to 3-option New Device Verification!
+        onSetPendingOtpPhone(null);
+        onSetPendingPostAuthFlow?.(null);
+        setApprovalRequestState('idle');
+        setApprovalRequestError('');
+        setPendingApprovalReqId(null);
+        setNewDevicePinInput('');
+        setNewDevicePinError('');
+        setAuthStage('new_device_verify');
         return;
       }
 
       // Brand new client -> gather passport-matching First & Last Name first
       setDetectedClientName('');
       setAuthStage('register_details');
+    } catch (err) {
+      console.error('Phone lookup error:', err);
+      setAuthError(
+        t(
+          'تعذر التحقق من رقم الواتساب حالياً بسبب ضعف الاتصال. يرجى المحاولة مرة أخرى.',
+          'Unable to verify your WhatsApp number right now due to a connection issue. Please try again.'
+        )
+      );
     } finally {
       setIsCheckingPhone(false);
     }
@@ -964,6 +1069,147 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setAuthStage('otp_verify');
     } finally {
       setIsLoggingInWithPin(false);
+    }
+  };
+
+  // New / Untrusted Device Option 1: Request Instant Approval from an already Trusted Device
+  const handleRequestTrustedApproval = async () => {
+    const targetPhone = trustedPhone || normalizePhone(loginPhone);
+    if (!targetPhone) return;
+    setApprovalRequestError('');
+    setNewDevicePinError('');
+    setIsRequestingApproval(true);
+    try {
+      const res = await requestTrustedDeviceLoginApprovalCloud(targetPhone);
+      if (!res.ok || !res.request) {
+        setApprovalRequestState('error');
+        setApprovalRequestError(
+          res.error ||
+            t(
+              'تعذر إرسال طلب الموافقة الآن. يمكنك استخدام رمز الـ PIN أو كود الواتساب.',
+              'Could not send approval request right now. Please try PIN or WhatsApp OTP.'
+            )
+        );
+        return;
+      }
+      setPendingApprovalReqId(res.request.requestId);
+      setApprovalRequestState('waiting');
+    } catch {
+      setApprovalRequestState('error');
+      setApprovalRequestError(
+        t(
+          'حدث خطأ في الاتصال أثناء إرسال طلب الموافقة. حاول مرة أخرى.',
+          'Connection error while sending approval request. Please try again.'
+        )
+      );
+    } finally {
+      setIsRequestingApproval(false);
+    }
+  };
+
+  // New / Untrusted Device Option 2: Verify 6-Digit Permanent PIN -> Advances to Privacy Device Choice
+  const handleVerifyNewDevicePin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetPhone = trustedPhone || normalizePhone(loginPhone);
+    if (!targetPhone) return;
+    setNewDevicePinError('');
+
+    const cleanPin = normalizeArabicDigits(newDevicePinInput).replace(/\D/g, '');
+    if (cleanPin.length !== 6) {
+      setNewDevicePinError(
+        t('يرجى إدخال رمز الـ PIN المكون من 6 أرقام.', 'Please enter your 6-digit personal PIN.')
+      );
+      return;
+    }
+
+    setIsVerifyingNewDevicePin(true);
+    try {
+      const res = await verifyClientPinForNewDeviceCloud(targetPhone, cleanPin, lang);
+      if (!res.ok) {
+        setNewDevicePinError(
+          res.error || t('رمز الـ PIN غير صحيح.', 'Incorrect 6-digit personal PIN.')
+        );
+        return;
+      }
+      const verifiedPhone = res.profile?.phone || targetPhone;
+      setNewDevicePinInput('');
+      setApprovalRequestState('idle');
+      setPendingApprovalReqId(null);
+      onSetPendingPostAuthFlow?.({
+        phone: verifiedPhone,
+        stage: 'device_trust_prompt',
+      });
+      setAuthStage('device_trust_prompt');
+    } catch {
+      setNewDevicePinError(
+        t(
+          'حدث خطأ أثناء التحقق من رمز الـ PIN. يرجى المحاولة مرة أخرى.',
+          'Failed to verify PIN. Please try again.'
+        )
+      );
+    } finally {
+      setIsVerifyingNewDevicePin(false);
+    }
+  };
+
+  // New / Untrusted Device Option 3: Backup WhatsApp OTP Verification
+  const handleSwitchNewDeviceToWhatsappOtp = async () => {
+    const targetPhone = trustedPhone || normalizePhone(loginPhone);
+    if (!targetPhone) return;
+    setNewDevicePinError('');
+    setApprovalRequestError('');
+    setIsSwitchingNewDeviceOtp(true);
+    try {
+      const sec = await requestAccountSecurityOtpCloud(targetPhone);
+      if (!sec.ok) {
+        setApprovalRequestError(
+          sec.error ||
+            t(
+              'تعذر إصدار كود واتساب الاحتياطي حالياً. يرجى المحاولة مرة أخرى.',
+              'Could not generate backup WhatsApp OTP right now.'
+            )
+        );
+        return;
+      }
+      setOtpPurpose(detectedHasPin ? 'untrusted_device' : 'first_login');
+      setOtpExpiresAt(sec.otpExpiresAt || null);
+      setOtpInfoBanner('');
+      setOtpInput('');
+      setOtpError('');
+      onSetPendingOtpPhone(targetPhone);
+      setAuthStage('otp_verify');
+    } catch {
+      setApprovalRequestError(
+        t(
+          'تعذر إرسال كود التحقق عبر واتساب حالياً.',
+          'Failed to initiate WhatsApp OTP right now.'
+        )
+      );
+    } finally {
+      setIsSwitchingNewDeviceOtp(false);
+    }
+  };
+
+  // Trusted Device Handler: Approve or Reject Incoming New-Device Login Request
+  const handleRespondLoginApproval = async (
+    requestId: string,
+    decision: 'approved' | 'rejected'
+  ) => {
+    if (!activeTraveler || respondingLoginReqId) return;
+    setRespondingLoginReqId(requestId);
+    try {
+      const ok = await respondToLoginApprovalRequestCloud(
+        activeTraveler.phone,
+        requestId,
+        decision
+      );
+      if (ok) {
+        setDismissedLoginReqIds((prev) =>
+          prev.includes(requestId) ? prev : [...prev, requestId]
+        );
+      }
+    } finally {
+      setRespondingLoginReqId(null);
     }
   };
 
@@ -1838,6 +2084,8 @@ Please advise on the next steps for my application.`
     const headerTitle =
       authStage === 'pin_login'
         ? t('الدخول السريع برمز الـ PIN', 'Quick PIN Sign In')
+        : authStage === 'new_device_verify'
+        ? t('التحقق من الجهاز الجديد', 'New Device Verification')
         : authStage === 'otp_verify'
         ? isPinResetFlow
           ? t('استعادة رمز الـ PIN عبر واتساب', 'Recover PIN via WhatsApp')
@@ -1858,6 +2106,11 @@ Please advise on the next steps for my application.`
             'تم التعرف على جهازك الموثوق — أدخل رمز الـ 6 أرقام للدخول الفوري',
             'Trusted device recognized — enter your 6-digit PIN to sign in instantly'
           )
+        : authStage === 'new_device_verify'
+        ? t(
+            'تم التعرف على حسابك — اختر إحدى طرق التحقق المرنة التالية للمتابعة من هذا الجهاز',
+            'Account recognized — choose a flexible verification method below to continue on this new device'
+          )
         : authStage === 'otp_verify'
         ? t(
             'تحقق من هويتك بكود الدخول المرسل لرقمك لفتح الحساب',
@@ -1870,8 +2123,8 @@ Please advise on the next steps for my application.`
           )
         : authStage === 'device_trust_prompt'
         ? t(
-            'حدد ما إذا كنت تستخدم جهازك الشخصي أو جهازاً عاماً مؤقتاً',
-            'Choose between permanent trusted access or a 1-hour temporary session'
+            'حدد ما إذا كنت تستخدم جهازك الشخصي دائماً أو دخولاً مؤقتاً لمرة واحدة',
+            'Choose between permanent trusted access or a single temporary session'
           )
         : t(
             'بوابة المسافر الموثقة لرفع الجواز ومتابعة حالة التأشيرة',
@@ -2211,7 +2464,220 @@ Please advise on the next steps for my application.`
               </div>
             )}
 
-            {/* STAGE 2B: WHATSAPP OTP VERIFICATION (FIRST TIME / UNTRUSTED DEVICE / FORGOT PIN) */}
+            {/* STAGE 2B: NEW / UNTRUSTED DEVICE VERIFICATION HUB (3 FLEXIBLE OPTIONS -> MANDATORY PRIVACY STEP) */}
+            {authStage === 'new_device_verify' && (
+              <div className="p-5 sm:p-6 space-y-4">
+                <div
+                  className={`border rounded-2xl p-4 space-y-2 text-center ${
+                    detectedAccountType === 'b2b_partner'
+                      ? 'bg-gradient-to-br from-[#FAF6EA] to-amber-50 border-[#C6A052]'
+                      : 'bg-sky-50 border-sky-200'
+                  }`}
+                >
+                  {detectedAccountType === 'b2b_partner' ? (
+                    <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-[11px] font-black shadow-xs">
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span>{t('شركة شريكة (B2B) · جهاز جديد', 'B2B Partner · New Device')}</span>
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0F2438] text-[#E5C887] text-[11px] font-black">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>{t('تحقق أمني من جهاز جديد', 'New Device Security Check')}</span>
+                    </div>
+                  )}
+
+                  {(detectedCompanyName || detectedClientName) && (
+                    <span className="text-sm sm:text-base font-black text-[#0F2438] block pt-1">
+                      {t('مرحباً،', 'Hello,')}{' '}
+                      {detectedCompanyName || detectedClientName}
+                    </span>
+                  )}
+
+                  <span className="text-xs font-bold text-slate-600 tabular-nums block" dir="ltr">
+                    {formatPhoneForDisplay(activeAuthPhone)} · {currentDevice.label}
+                  </span>
+                </div>
+
+                {/* Option 1: Instant Approval from Previously Trusted Device */}
+                <div className="border border-slate-200 rounded-2xl p-4 bg-slate-50/70 space-y-2.5">
+                  <div className="flex items-start gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+                      <Smartphone className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-xs sm:text-sm font-black text-[#0F2438]">
+                        {t(
+                          '1. طلب موافقة فورية من جهازك الموثوق مسبقاً',
+                          '1. Instant Approval from Your Trusted Device'
+                        )}
+                      </h3>
+                      <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                        {t(
+                          'سيظهر تنبيه فوري على جهازك المفتوح مسبقاً بضغطة زر للموافقة على دخول هذا الجهاز.',
+                          'Sends a live prompt to your already signed-in trusted device for 1-tap approval.'
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  {approvalRequestState === 'waiting' && (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs font-bold text-amber-950 flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-700 shrink-0" />
+                      <span>
+                        {t(
+                          'جاري انتظار الموافقة من جهازك الموثوق... افتح حسابك على الجهاز الآخر واضغط "موافقة على الدخول".',
+                          'Waiting for approval from your trusted device... Open your signed-in device and tap Allow.'
+                        )}
+                      </span>
+                    </div>
+                  )}
+
+                  {(approvalRequestState === 'rejected' || approvalRequestState === 'error') &&
+                    approvalRequestError && (
+                      <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-bold text-red-900 flex items-start gap-2">
+                        <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                        <span>{approvalRequestError}</span>
+                      </div>
+                    )}
+
+                  <button
+                    type="button"
+                    disabled={isRequestingApproval || approvalRequestState === 'waiting'}
+                    onClick={() => void handleRequestTrustedApproval()}
+                    className="w-full min-h-[42px] py-2.5 px-4 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    {isRequestingApproval ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Bell className="w-4 h-4" />
+                    )}
+                    <span>
+                      {approvalRequestState === 'waiting'
+                        ? t('تم إرسال طلب الموافقة — في الانتظار...', 'Request Sent — Waiting...')
+                        : t(
+                            'طلب موافقة من جهازي الموثوق مسبقاً',
+                            'Request Approval from My Trusted Device'
+                          )}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Option 2: Verify via 6-Digit Permanent Personal PIN */}
+                {detectedHasPin && (
+                  <form
+                    onSubmit={handleVerifyNewDevicePin}
+                    className="border border-slate-200 rounded-2xl p-4 bg-white space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Lock className="w-4 h-4 text-[#C6A052]" />
+                        <span>
+                          {t(
+                            '2. التحقق بالرقم السري الدائم (6 أرقام PIN)',
+                            '2. Verify via Permanent 6-Digit PIN'
+                          )}
+                        </span>
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => setShowNewDevicePin((v) => !v)}
+                        className="text-[11px] font-bold text-[#0284C7] hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        {showNewDevicePin ? (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                        <span>{showNewDevicePin ? t('إخفاء', 'Hide') : t('إظهار', 'Show')}</span>
+                      </button>
+                    </div>
+
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={6}
+                      dir="ltr"
+                      value={newDevicePinInput}
+                      onChange={(e) => {
+                        setNewDevicePinError('');
+                        setNewDevicePinInput(
+                          normalizeArabicDigits(e.target.value).replace(/\D/g, '').slice(0, 6)
+                        );
+                      }}
+                      placeholder="••••••"
+                      className={`w-full px-4 py-3 rounded-xl border border-slate-300 text-center text-lg font-black tracking-[0.4em] text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7] ${
+                        showNewDevicePin ? '' : '[-webkit-text-security:disc]'
+                      }`}
+                    />
+
+                    {newDevicePinError && (
+                      <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-xs font-semibold text-red-800">
+                        {newDevicePinError}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={isVerifyingNewDevicePin}
+                      className="w-full min-h-[42px] py-2.5 px-4 bg-[#C6A052] hover:bg-[#d4b063] disabled:opacity-60 text-[#0A1926] rounded-xl text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer"
+                    >
+                      {isVerifyingNewDevicePin && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <Lock className="w-4 h-4" />
+                      <span>{t('التحقق برمز الـ PIN والمتابعة', 'Verify PIN & Continue')}</span>
+                    </button>
+                  </form>
+                )}
+
+                {/* Option 3: Backup WhatsApp OTP Verification */}
+                <div className="border border-emerald-200 rounded-2xl p-4 bg-emerald-50/40 space-y-2.5">
+                  <h3 className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-1.5">
+                    <WhatsAppIcon className="w-4 h-4 shrink-0" variant="colored" />
+                    <span>
+                      {detectedHasPin
+                        ? t(
+                            '3. طلب كود تفعيل احتياطي (OTP) عبر الواتساب',
+                            '3. Request Backup WhatsApp OTP Code'
+                          )
+                        : t(
+                            '2. طلب كود تفعيل احتياطي (OTP) عبر الواتساب',
+                            '2. Request Backup WhatsApp OTP Code'
+                          )}
+                    </span>
+                  </h3>
+                  <button
+                    type="button"
+                    disabled={isSwitchingNewDeviceOtp}
+                    onClick={() => void handleSwitchNewDeviceToWhatsappOtp()}
+                    className="w-full min-h-[42px] py-2.5 px-4 bg-[#25D366] hover:bg-[#128C7E] disabled:opacity-60 text-white rounded-xl text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer shadow-xs"
+                  >
+                    {isSwitchingNewDeviceOtp ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <WhatsAppIcon className="w-4 h-4 shrink-0" variant="white" />
+                    )}
+                    <span>
+                      {t(
+                        'طلب كود تفعيل احتياطي (OTP) عبر الواتساب',
+                        'Request Backup WhatsApp OTP'
+                      )}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="pt-1 text-center">
+                  <button
+                    type="button"
+                    onClick={resetToPhoneEntry}
+                    className="text-xs font-bold text-slate-600 hover:text-[#0F2438] cursor-pointer py-1"
+                  >
+                    {t('تغيير رقم الواتساب', 'Switch WhatsApp Number')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STAGE 2C: WHATSAPP OTP VERIFICATION (FIRST TIME / UNTRUSTED DEVICE / FORGOT PIN) */}
             {authStage === 'otp_verify' && (() => {
               const remMs = otpRemainingMs;
               const isExpired = remMs !== null && remMs <= 0;
@@ -2519,8 +2985,8 @@ Please advise on the next steps for my application.`
                   </p>
                   <p className="text-[11px] text-slate-500 leading-relaxed">
                     {t(
-                      'إذا كان هذا هاتفك أو جهازك الشخصي، اختر حفظه كجهاز موثوق للدخول الفوري بالـ PIN مستقبلاً. وإذا كان جهازاً عاماً أو مشتركاً، اختر الجلسة المؤقتة لتسجيل الخروج التلقائي بعد ساعة واحدة.',
-                      'If this is your personal phone or PC, save it as a trusted device for instant PIN login later. For shared devices, use a 1-hour temporary session.'
+                      'اختر "هذا جهازي الشخصي دائماً" لحفظ الجهاز والدخول الفوري بالـ PIN مستقبلاً، أو "دخول مؤقت" لفتح جلسة واحدة تنتهي تلقائياً فور إغلاق المتصفح أو الخروج أو بعد 60 دقيقة دون حفظ الجهاز.',
+                      'Choose "Personal Device" to save & trust this device permanently, or "Temporary Login" for a single session expiring automatically on browser close, logout, or after 60 minutes.'
                     )}
                   </p>
                 </div>
@@ -2538,7 +3004,10 @@ Please advise on the next steps for my application.`
                       <ShieldCheck className="w-4.5 h-4.5" />
                     )}
                     <span>
-                      {t('نعم، جهاز موثوق (حفظ دائماً)', 'Yes, Trusted Device (Save Permanently)')}
+                      {t(
+                        'هذا جهازي الشخصي دائماً (توثيق وحفظ الجهاز)',
+                        'This is Always My Personal Device (Trust & Save Device)'
+                      )}
                     </span>
                   </button>
 
@@ -2550,7 +3019,10 @@ Please advise on the next steps for my application.`
                   >
                     <Clock className="w-4 h-4 text-amber-700" />
                     <span>
-                      {t('لا، جلسة مؤقتة (لمدة ساعة واحدة)', 'No, Temporary Session (1 Hour Only)')}
+                      {t(
+                        'دخول مؤقت (جلسة واحدة فقط - جهاز شخص آخر)',
+                        'Temporary Login (Single Session Only - Other Device)'
+                      )}
                     </span>
                   </button>
                 </div>
@@ -3277,9 +3749,79 @@ Please advise on the next steps for my application.`
     </div>
   );
 
+  const incomingApprovalRequest: PendingLoginRequest | null =
+    sessionMeta?.mode === 'trusted'
+      ? (activeTraveler.pendingLoginRequests || []).find(
+          (r) =>
+            r.status === 'pending' &&
+            r.deviceId !== currentDevice.deviceId &&
+            Date.parse(r.expiresAt) > Date.now() &&
+            !dismissedLoginReqIds.includes(r.requestId)
+        ) || null
+      : null;
+
   return (
     <div className="min-h-[80vh] bg-[#FAF9F6] pb-24 md:pb-16 pt-5 px-3 sm:px-4" dir={dir}>
       <div className="max-w-5xl mx-auto space-y-5">
+        {/* Instant Security Approval Prompt for Trusted Devices when a New Device tries to log in */}
+        {incomingApprovalRequest && (
+          <div className="bg-gradient-to-l from-amber-50 via-white to-amber-50 border-2 border-[#C6A052] rounded-2xl p-4 sm:p-5 shadow-md space-y-3">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <span className="inline-block px-2.5 py-0.5 rounded-full bg-amber-200/80 text-[#0F2438] text-[10.5px] font-black mb-1">
+                  {t('تنبيه أمان فوري · جهاز جديد', 'Instant Security Alert · New Device')}
+                </span>
+                <p className="text-xs sm:text-sm font-black text-[#0F2438] leading-snug">
+                  {t(
+                    `محاولة تسجيل دخول جديدة لحسابك من جهاز (${incomingApprovalRequest.deviceLabel}) — هل توافق؟`,
+                    `New login attempt on your account from device (${incomingApprovalRequest.deviceLabel}) — Do you approve?`
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
+                onClick={() =>
+                  void handleRespondLoginApproval(incomingApprovalRequest.requestId, 'approved')
+                }
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                {respondingLoginReqId === incomingApprovalRequest.requestId ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" />
+                )}
+                <span>{t('موافقة على الدخول', 'Approve Sign In')}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
+                onClick={() =>
+                  void handleRespondLoginApproval(incomingApprovalRequest.requestId, 'rejected')
+                }
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+                <span>{t('رفض', 'Reject')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        <PushPermissionBanner
+          role="client"
+          phone={activeTraveler.phone}
+          existingToken={activeTraveler.fcmToken}
+          pushEnabled={activeTraveler.pushNotificationsEnabled}
+        />
+
         {magicLinkFeedback && (
           <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -4165,7 +4707,7 @@ Please advise on the next steps for my application.`
                                 className="min-h-[36px] px-3 py-1.5 rounded-xl bg-white border border-red-200 hover:bg-red-50 text-red-700 text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
-                                <span>{t('إلغاء الثقة / حذف الجهاز', 'Revoke / Remove')}</span>
+                                <span>{t('إزالة / تسجيل خروج الجهاز', 'Remove & Log Out Device')}</span>
                               </button>
                             )}
                           </div>

@@ -1,9 +1,7 @@
+import { collection, doc, getDoc, getDocs, query, where } from 'firebase/firestore';
 import { getMessaging, getToken, isSupported, onMessage } from 'firebase/messaging';
-import { app } from '../firebase';
+import { app, db } from '../firebase';
 import { getSiteConfig } from './siteConfigStore';
-import { getAllAdminFcmTokensCloud } from './adminAuthStore';
-import { getClientFcmTokensCloud } from './travelerStore';
-import { playChatNotificationChime } from './chatStore';
 
 export type PushNotificationAction =
   | 'live_chat'

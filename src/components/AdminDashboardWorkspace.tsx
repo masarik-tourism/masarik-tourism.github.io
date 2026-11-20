@@ -37,6 +37,7 @@ import {
   Inbox,
   MessageSquare,
   Bell,
+  BellRing,
   Plus,
   Volume2,
   Building2,
@@ -54,6 +55,11 @@ import {
 } from '../types/travel';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
+import { PushPermissionBanner } from './PushPermissionBanner';
+import {
+  requestAndGetFcmToken,
+  showBrowserPushNotification,
+} from '../utils/fcmPushService';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
@@ -137,10 +143,12 @@ type OrderFilter = 'all' | 'online' | 'active' | 'with_files' | 'completed';
 
 interface AdminDashboardWorkspaceProps {
   requestedChat?: { phone: string; nonce: number } | null;
+  requestedFolder?: { phone: string; nonce: number } | null;
 }
 
 export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = ({
   requestedChat,
+  requestedFolder,
 }) => {
   const { lang, isAr, dir, t } = useLanguage();
   const {
@@ -258,6 +266,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [newDriveUrl, setNewDriveUrl] = useState('');
   const [newDriveScope, setNewDriveScope] = useState<DriveEndpointScope>('all');
   const [confirmResetCms, setConfirmResetCms] = useState(false);
+  const [fcmSavedMsg, setFcmSavedMsg] = useState('');
+  const [isTestingPush, setIsTestingPush] = useState(false);
 
   // Real-time Instant Admin Alert (Audio Chime + Top Banner for Incoming OTP Requests)
   const [alertSoundEnabled, setAlertSoundEnabled] = useState(true);
@@ -395,6 +405,24 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setActiveChatPhone(matched ? matched.phone : targetDigits || requestedChat.phone);
     }
   }, [requestedChat?.nonce]);
+
+  useEffect(() => {
+    if (!requestedFolder || !canManageClients || !requestedFolder.phone) return;
+    const targetDigits = requestedFolder.phone.replace(/\D/g, '');
+    const matched = travelers.find(
+      (tr) =>
+        tr.phone === requestedFolder.phone ||
+        tr.phoneNormalized === targetDigits ||
+        tr.phone.replace(/\D/g, '') === targetDigits
+    );
+    if (matched) {
+      setActiveTab(matched.accountType === 'b2b_partner' ? 'b2b_partners' : 'individuals');
+      setSelectedClientPhone(matched.phone);
+    } else {
+      setActiveTab('individuals');
+      setSelectedClientPhone(requestedFolder.phone);
+    }
+  }, [requestedFolder?.nonce]);
 
   // Arm instant audio + visual alert whenever a new pending OTP request arrives live
   useEffect(() => {
@@ -957,6 +985,58 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     setTimeout(() => setSettingsSavedMsg(''), 3500);
   };
 
+  const handleSaveFcmSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEditContent || !isEditUnlocked) return;
+    const updated = saveSiteConfig({
+      ...siteDraft,
+      fcmVapidKey: (siteDraft.fcmVapidKey || '').trim(),
+    });
+    setSiteDraft(updated);
+    setFcmSavedMsg(
+      t(
+        'تم حفظ إعدادات مفتاح الإشعارات الفورية (FCM VAPID Key) بنجاح.',
+        'FCM Push Notification VAPID Key saved successfully.'
+      )
+    );
+    setTimeout(() => setFcmSavedMsg(''), 3500);
+  };
+
+  const handleTestAdminPush = async () => {
+    if (isTestingPush) return;
+    setIsTestingPush(true);
+    setFcmSavedMsg('');
+    try {
+      const tokenRes = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+      const shown = await showBrowserPushNotification({
+        title: t('تجربة إشعار المدير العام — مسارك', 'Masarik Admin Test Push'),
+        body: t(
+          'نظام الإشعارات الفورية يعمل بنجاح على هذا الجهاز ✅',
+          'Push notifications are active and working on this device ✅'
+        ),
+        tag: 'masarik-admin-test-push',
+        data: { role: 'admin', action: 'live_chat' },
+      });
+      playChatNotificationChime();
+      setFcmSavedMsg(
+        shown
+          ? t(
+              tokenRes.token
+                ? 'تم إرسال إشعار التجربة وربط رمز الجهاز (FCM Token) بنجاح ✅'
+                : 'تم عرض إشعار التجربة بنجاح (الإشعار المحلي عبر Service Worker مفعل) ✅',
+              'Test push notification sent successfully ✅'
+            )
+          : tokenRes.error ||
+            t(
+              'تعذر عرض الإشعار — تأكد من منح إذن الإشعارات من المتصفح.',
+              'Could not display push notification — check browser permissions.'
+            )
+      );
+    } finally {
+      setIsTestingPush(false);
+    }
+  };
+
   const handleSaveDriveStorageConfig = (e: React.FormEvent) => {
     e.preventDefault();
     if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked) return;
@@ -1406,6 +1486,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
             </button>
           </div>
         </div>
+
+        <PushPermissionBanner role="admin" adminId={session?.adminId} />
 
         {/* Real-Time Instant Alert Toast for New Pending OTP Requests */}
         {realtimeAlert && (
@@ -4433,6 +4515,81 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     <Save className="w-4 h-4" />
                     <span>{t('حفظ روابط التخزين السحابي', 'Save Cloud Storage Settings')}</span>
                   </button>
+                </form>
+
+                {/* Firebase Cloud Messaging (FCM) Web Push VAPID Key & Diagnostics */}
+                <form
+                  onSubmit={handleSaveFcmSettings}
+                  className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <BellRing className="w-4.5 h-4.5 text-[#C6A052] shrink-0" />
+                      <div>
+                        <h4 className="text-sm font-black text-[#0F2438]">
+                          {t(
+                            'إعدادات إشعارات الدفع الفورية (Firebase Cloud Messaging - FCM)',
+                            'Push Notifications Configuration (Firebase Cloud Messaging - FCM)'
+                          )}
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          {t(
+                            'أضف مفتاح Web Push VAPID Key (اختياري) من لوحة Firebase Project Settings → Cloud Messaging، واختبر الإشعارات على جهازك.',
+                            'Optionally configure your Web Push VAPID Key from Firebase Cloud Messaging and send a test alert.'
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-xs space-y-1.5">
+                    <label className="block font-bold text-slate-700">
+                      {t('مفتاح Web Push VAPID Key (اختياري)', 'FCM Web Push VAPID Key (Optional)')}
+                    </label>
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={siteDraft.fcmVapidKey || ''}
+                      onChange={(e) =>
+                        setSiteDraft((prev) => ({
+                          ...prev,
+                          fcmVapidKey: e.target.value,
+                        }))
+                      }
+                      placeholder="B..."
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-[#0F2438] text-xs font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  {fcmSavedMsg && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                      {fcmSavedMsg}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="submit"
+                      className="min-h-[40px] px-4 py-2 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>{t('حفظ مفتاح الإشعارات', 'Save Push Key')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isTestingPush}
+                      onClick={() => void handleTestAdminPush()}
+                      className="min-h-[40px] px-4 py-2 bg-[#C6A052] hover:bg-[#d4b063] disabled:opacity-60 text-[#0A1926] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                    >
+                      {isTestingPush ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <BellRing className="w-4 h-4" />
+                      )}
+                      <span>{t('إرسال إشعار تجريبي الآن', 'Send Test Notification')}</span>
+                    </button>
+                  </div>
                 </form>
 
                 {/* Saved Live CMS Overrides, Custom Items & Deleted Blocks */}

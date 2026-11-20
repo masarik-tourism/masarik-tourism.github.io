@@ -63,6 +63,7 @@ service cloud.firestore {
         'pinHash',
         'pinUpdatedAt',
         'trustedDevices',
+        'pendingLoginRequests',
         'verified',
         'accountStatus',
         'verifiedAt',
@@ -171,6 +172,33 @@ service cloud.firestore {
               && data.trustedDevices[0].addedAt.size() <= 64
               && data.trustedDevices[0].lastUsedAt is string
               && data.trustedDevices[0].lastUsedAt.size() <= 64
+            )
+          )
+        )
+      )
+      && (
+        !('pendingLoginRequests' in data)
+        || (
+          data.pendingLoginRequests is list
+          && data.pendingLoginRequests.size() <= 10
+          && (
+            data.pendingLoginRequests.size() == 0
+            || (
+              data.pendingLoginRequests[0] is map
+              && data.pendingLoginRequests[0].requestId is string
+              && data.pendingLoginRequests[0].requestId.size() >= 6
+              && data.pendingLoginRequests[0].requestId.size() <= 80
+              && data.pendingLoginRequests[0].deviceId is string
+              && data.pendingLoginRequests[0].deviceId.size() >= 8
+              && data.pendingLoginRequests[0].deviceId.size() <= 64
+              && data.pendingLoginRequests[0].deviceLabel is string
+              && data.pendingLoginRequests[0].deviceLabel.size() <= 120
+              && data.pendingLoginRequests[0].status is string
+              && data.pendingLoginRequests[0].status in ['pending', 'approved', 'rejected', 'expired']
+              && data.pendingLoginRequests[0].createdAt is string
+              && data.pendingLoginRequests[0].createdAt.size() <= 64
+              && data.pendingLoginRequests[0].expiresAt is string
+              && data.pendingLoginRequests[0].expiresAt.size() <= 64
             )
           )
         )
@@ -453,6 +481,7 @@ service cloud.firestore {
           'pinHash',
           'pinUpdatedAt',
           'trustedDevices',
+          'pendingLoginRequests',
           'verified',
           'accountStatus',
           'verifiedAt',

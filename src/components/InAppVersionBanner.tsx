@@ -38,8 +38,10 @@ export const InAppVersionBanner: React.FC = () => {
   const [installedVersion] = useState<string>(() => getInstalledAndroidAppVersion());
   const abortRef = useRef<AbortController | null>(null);
   const autoCheckedRef = useRef(false);
+  const downloadInFlightRef = useRef(false);
 
   const cancelOngoingDownload = useCallback(() => {
+    downloadInFlightRef.current = false;
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
@@ -48,7 +50,9 @@ export const InAppVersionBanner: React.FC = () => {
 
   const triggerBlobOrDirectDownload = useCallback(
     async (info: Omit<LatestApkInfo, 'isLoading'>) => {
+      if (downloadInFlightRef.current) return;
       cancelOngoingDownload();
+      downloadInFlightRef.current = true;
       const targetUrl = info.downloadUrl || FALLBACK_PAGES_APK_URL;
       setStage('downloading');
       setProgress(2);
@@ -91,6 +95,7 @@ export const InAppVersionBanner: React.FC = () => {
 
             setProgress(100);
             setStage('ready');
+            downloadInFlightRef.current = false;
 
             const blobParts = chunks.map((chunk) => new Uint8Array(chunk).buffer);
             const blob = new Blob(blobParts, {
@@ -109,13 +114,14 @@ export const InAppVersionBanner: React.FC = () => {
           }
         } catch (err) {
           if (err instanceof DOMException && err.name === 'AbortError') {
+            downloadInFlightRef.current = false;
             return;
           }
           // Fall through cleanly to direct binary transfer fallback when GitHub release CDN blocks CORS streaming
         }
       }
 
-      // Smooth verified progress (0% -> 100%) + direct binary APK launch (no external GitHub webpage)
+      // Smooth verified progress (0% -> 100%) + single direct binary APK launch (never double-downloaded)
       let currentPct = 8;
       await new Promise<void>((resolve) => {
         const timer = window.setInterval(() => {
@@ -129,6 +135,7 @@ export const InAppVersionBanner: React.FC = () => {
       });
 
       setStage('ready');
+      downloadInFlightRef.current = false;
       launchDirectApkInstall(targetUrl);
     },
     [cancelOngoingDownload]
@@ -184,6 +191,10 @@ export const InAppVersionBanner: React.FC = () => {
   // Listen for manual Footer / Home button triggers
   useEffect(() => {
     const handleOpen = (ev: Event) => {
+      if (downloadInFlightRef.current) {
+        setModalOpen(true);
+        return;
+      }
       const detail = (ev as CustomEvent<{ mode?: 'check' | 'download' }>).detail;
       const mode = detail?.mode === 'download' ? 'download' : 'check';
       void runUpdateFlow(mode, false);
@@ -331,11 +342,11 @@ export const InAppVersionBanner: React.FC = () => {
                 />
               </div>
 
-              <p className="text-[11px] text-slate-300 leading-relaxed">
+              <p className="text-xs text-emerald-100 leading-relaxed font-bold">
                 {stage === 'ready'
                   ? t(
-                      'اكتمل التجهيز (100%)! إذا لم يبدأ التثبيت أو التنزيل تلقائياً على جهازك، اضغط الزر أدناه.',
-                      'Download complete (100%)! If installation did not start automatically, tap the button below.'
+                      'بدأ تنزيل التحديث في مدير التنزيلات بهاتفك ✅ — اسحب شريط إشعارات الهاتف من الأعلى واضغط على ملف (Masarik-Tourism.apk) فور اكتماله لإتمام التثبيت',
+                      'The update download has started in your phone download manager ✅ — swipe down your notification bar and tap (Masarik-Tourism.apk) once finished to complete installation'
                     )
                   : t(
                       'جاري سحب وتنزيل حزمة التطبيق الرسمية مباشرة داخل المنصة...',
@@ -355,22 +366,26 @@ export const InAppVersionBanner: React.FC = () => {
             </div>
 
             {stage === 'ready' && (
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => launchDirectApkInstall(releaseInfo.downloadUrl)}
-                  className="flex-1 min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center justify-center gap-2 cursor-pointer transition"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>{t('فتح / تثبيت الآن', 'Install / Download Now')}</span>
-                </button>
+              <div className="space-y-2.5 pt-1">
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="min-h-[42px] px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold cursor-pointer transition"
+                  className="w-full min-h-[42px] px-4 py-2.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black cursor-pointer transition"
                 >
-                  {t('إغلاق', 'Close')}
+                  {t('تم — متابعة الاستخدام', 'Done — Continue')}
                 </button>
+                <div className="text-center">
+                  <button
+                    type="button"
+                    onClick={() => launchDirectApkInstall(releaseInfo.downloadUrl)}
+                    className="text-[11px] font-semibold text-slate-400 hover:text-[#E5C887] underline underline-offset-4 cursor-pointer transition"
+                  >
+                    {t(
+                      'إعادة المحاولة في حال فشل التنزيل',
+                      'Retry if the download failed to start'
+                    )}
+                  </button>
+                </div>
               </div>
             )}
           </div>

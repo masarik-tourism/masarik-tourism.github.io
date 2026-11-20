@@ -124,6 +124,10 @@
           "type": "array",
           "description": "Bounded list (max 15) of trusted device fingerprints authorized for quick PIN login."
         },
+        "pendingLoginRequests": {
+          "type": "array",
+          "description": "Bounded list (max 10) of new-device login approval requests sent to the client's previously trusted device."
+        },
         "verified": {
           "type": "boolean",
           "description": "Whether the client account has been verified."

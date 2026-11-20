@@ -152,6 +152,18 @@ export interface TravelerSessionMeta {
 
 export type AccountVerificationStatus = 'pending_verification' | 'verified';
 
+export type PendingLoginRequestStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+
+export interface PendingLoginRequest {
+  requestId: string;
+  deviceId: string;
+  deviceLabel: string;
+  status: PendingLoginRequestStatus;
+  createdAt: string;
+  expiresAt: string;
+  respondedAt?: string;
+}
+
 export type DriveEndpointScope = 'all' | 'client_docs' | 'admin_deliverables';
 
 export interface DriveStorageEndpoint {
@@ -184,6 +196,7 @@ export interface TravelerProfile {
   pinHash?: string;
   pinUpdatedAt?: string;
   trustedDevices?: TrustedDevice[];
+  pendingLoginRequests?: PendingLoginRequest[];
   verified: boolean;
   accountStatus?: AccountVerificationStatus;
   verifiedAt?: string;
