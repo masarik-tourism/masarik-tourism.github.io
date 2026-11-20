@@ -36,6 +36,7 @@ import {
   getTravelerDisplayNames,
   getTravelerSessionMeta,
   logoutTravelerSession,
+  saveClientFcmTokenCloud,
   setPendingVerificationPhone,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
@@ -47,12 +48,15 @@ import {
   subscribeChatThread,
 } from './utils/chatStore';
 import {
+  NATIVE_FCM_TOKEN_EVENT,
   PUSH_NAVIGATE_EVENT,
   PushDeepLinkPayload,
   PushNotificationAction,
+  getNativeAndroidFcmToken,
   registerMessagingServiceWorker,
   showBrowserPushNotification,
   subscribeForegroundFcmMessages,
+  waitForNativeAndroidFcmToken,
 } from './utils/fcmPushService';
 import { consumeSessionExpiredNotice } from './utils/deviceTrust';
 import { ChatThreadSummary, TravelerProfile, TravelerSessionMeta } from './types/travel';
@@ -61,7 +65,7 @@ import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
 import { subscribeSiteConfigCloud, useSiteConfig } from './utils/siteConfigStore';
 import { subscribeCmsCloud } from './utils/cmsStore';
-import { subscribeAdminsCloud } from './utils/adminAuthStore';
+import { saveAdminFcmTokenCloud, subscribeAdminsCloud } from './utils/adminAuthStore';
 import { useAdmin } from './contexts/AdminContext';
 
 function buildDraftFromTraveler(
@@ -105,7 +109,8 @@ function buildDraftFromTraveler(
 export const App: React.FC = () => {
   const { lang, dir, t } = useLanguage();
   const siteConfig = useSiteConfig();
-  const { isDashboardMode, openAdminLoginModal, isAdminActive, setAdminMode } = useAdmin();
+  const { session: adminSession, isDashboardMode, openAdminLoginModal, isAdminActive, setAdminMode } =
+    useAdmin();
   const localized = getLocalizedTravelContent(lang);
 
   const [currentTab, setCurrentTab] = useState<number>(0);
@@ -572,6 +577,50 @@ export const App: React.FC = () => {
       }
     };
   }, [handlePushDeepLink]);
+
+  // Automatically sync native Android FCM Token into Firestore on app launch, login, and token refresh
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.AndroidBridge) return;
+    if (!activeTravelerPhone && !isAdminActive) return;
+
+    let cancelled = false;
+    const syncNativeToken = async (explicitToken?: string) => {
+      const token = (explicitToken || (await waitForNativeAndroidFcmToken(4500))).trim();
+      if (!token || cancelled) return;
+
+      if (
+        activeTravelerPhone &&
+        (activeTraveler?.fcmToken !== token || activeTraveler?.pushNotificationsEnabled !== true)
+      ) {
+        await saveClientFcmTokenCloud(activeTravelerPhone, token, true);
+      }
+      if (isAdminActive) {
+        await saveAdminFcmTokenCloud(adminSession?.adminId, token, true);
+      }
+    };
+
+    void syncNativeToken(getNativeAndroidFcmToken() || undefined);
+
+    const onNativeTokenRefresh = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ token?: string }>).detail;
+      const tk = (detail?.token || getNativeAndroidFcmToken()).trim();
+      if (tk) {
+        void syncNativeToken(tk);
+      }
+    };
+
+    window.addEventListener(NATIVE_FCM_TOKEN_EVENT, onNativeTokenRefresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(NATIVE_FCM_TOKEN_EVENT, onNativeTokenRefresh);
+    };
+  }, [
+    activeTravelerPhone,
+    activeTraveler?.fcmToken,
+    activeTraveler?.pushNotificationsEnabled,
+    isAdminActive,
+    adminSession?.adminId,
+  ]);
 
   useEffect(() => {
     const handleUrlActions = async () => {

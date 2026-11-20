@@ -2701,6 +2701,7 @@ export function updateTravelerProfileDetails(
 
   // Automatically create a live notification when the order status stage advances/changes
   let nextNotifications = cleanUpdates.notifications ?? existing.notifications ?? [];
+  let shouldDispatchOrderPush = false;
   if (
     cleanUpdates.orderStatus &&
     normalizeOrderStatusValue(cleanUpdates.orderStatus) !==
@@ -2719,6 +2720,7 @@ export function updateTravelerProfileDetails(
       read: false,
     };
     nextNotifications = [statusNote, ...nextNotifications].slice(0, 30);
+    shouldDispatchOrderPush = true;
   }
 
   const nextAppointment =
@@ -2741,6 +2743,7 @@ export function updateTravelerProfileDetails(
       read: false,
     };
     nextNotifications = [apptNote, ...nextNotifications].slice(0, 30);
+    shouldDispatchOrderPush = true;
   }
 
   const updated: TravelerProfile = {
@@ -2764,7 +2767,7 @@ export function updateTravelerProfileDetails(
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(updated);
 
-  if (nextNotifications.length > (existing.notifications || []).length && nextNotifications[0]) {
+  if (shouldDispatchOrderPush && nextNotifications[0]) {
     void dispatchRemotePushNotification({
       targetRole: 'client',
       targetPhone: phone,
@@ -3303,6 +3306,23 @@ export async function attachPreOrderFilesToTravelerCloud(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  if (addedDocs.length > 0 || input.serviceTitle) {
+    const senderLabel =
+      updated.accountType === 'b2b_partner' && updated.companyName
+        ? updated.companyName
+        : updated.name;
+    const hasReceipt = addedDocs.some((d) => d.docType === 'receipt');
+    void dispatchRemotePushNotification({
+      targetRole: 'admin',
+      title: hasReceipt
+        ? `إيصال دفع جديد من ${senderLabel}`
+        : `طلب / مستندات جديدة من ${senderLabel}`,
+      body: addedDocs.length > 0
+        ? addedDocs.map((d) => d.label).join(' • ').slice(0, 300)
+        : `طلب خدمة جديد: ${input.serviceTitle || ''}`.slice(0, 300),
+      data: { role: 'admin', action: 'client_folder', phone },
+    });
+  }
   return updated;
 }
 
@@ -3349,6 +3369,19 @@ export async function uploadAndAddDocumentToTravelerCloud(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  const senderLabel =
+    updated.accountType === 'b2b_partner' && updated.companyName
+      ? updated.companyName
+      : updated.name;
+  void dispatchRemotePushNotification({
+    targetRole: 'admin',
+    title:
+      newDoc.docType === 'receipt'
+        ? `إيصال دفع جديد من ${senderLabel}`
+        : `مستند جديد مرفوع من ${senderLabel}`,
+    body: `${newDoc.label} (${newDoc.fileName})`.slice(0, 300),
+    data: { role: 'admin', action: 'client_folder', phone },
+  });
   return { profile: updated, document: newDoc };
 }
 
@@ -3674,6 +3707,21 @@ export async function commitTravelerProfileDraftCloud(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  if (uploadedNewDocs.length > 0) {
+    const senderLabel =
+      updated.accountType === 'b2b_partner' && updated.companyName
+        ? updated.companyName
+        : updated.name;
+    const hasReceipt = uploadedNewDocs.some((d) => d.docType === 'receipt');
+    void dispatchRemotePushNotification({
+      targetRole: 'admin',
+      title: hasReceipt
+        ? `إيصال دفع جديد من ${senderLabel}`
+        : `مستند جديد مرفوع من ${senderLabel}`,
+      body: uploadedNewDocs.map((d) => `${d.label} (${d.fileName})`).join(' • ').slice(0, 300),
+      data: { role: 'admin', action: 'client_folder', phone },
+    });
+  }
   return updated;
 }
 
@@ -3949,6 +3997,19 @@ export async function uploadAndAddDocumentToTraveler(
   latestAll[phone] = updated;
   saveAllTravelersLocalOnly(latestAll);
   await syncTravelerToCloud(updated);
+  const senderLabel =
+    updated.accountType === 'b2b_partner' && updated.companyName
+      ? updated.companyName
+      : updated.name;
+  void dispatchRemotePushNotification({
+    targetRole: 'admin',
+    title:
+      newDoc.docType === 'receipt'
+        ? `إيصال دفع جديد من ${senderLabel}`
+        : `مستند جديد مرفوع من ${senderLabel}`,
+    body: `${newDoc.label} (${newDoc.fileName})`.slice(0, 300),
+    data: { role: 'admin', action: 'client_folder', phone },
+  });
   return updated;
 }
 

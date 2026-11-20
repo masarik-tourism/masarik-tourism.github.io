@@ -17,6 +17,9 @@ export interface PushDeepLinkPayload {
 }
 
 export const PUSH_NAVIGATE_EVENT = 'masarik-push-navigate';
+export const NATIVE_FCM_TOKEN_EVENT = 'masarik-native-fcm-token';
+export const CLOUDFLARE_PUSH_WORKER_URL =
+  'https://masarik-otp.masarik-tourism.workers.dev/send-push';
 const FCM_SW_SCRIPT_URL = '/firebase-messaging-sw.js';
 const FCM_SW_SCOPE = '/firebase-cloud-messaging-push-scope';
 
@@ -84,6 +87,50 @@ function waitForNativeAndroidPermission(): Promise<boolean> {
   });
 }
 
+export function getNativeAndroidFcmToken(): string {
+  if (typeof window === 'undefined') return '';
+  const bridgeToken = window.AndroidBridge?.getNativeFcmToken?.() || '';
+  if (bridgeToken.trim()) return bridgeToken.trim();
+  const winToken = window.__MASARIK_NATIVE_FCM_TOKEN__ || '';
+  return winToken.trim();
+}
+
+export function waitForNativeAndroidFcmToken(timeoutMs = 3500): Promise<string> {
+  return new Promise((resolve) => {
+    const immediate = getNativeAndroidFcmToken();
+    if (immediate) {
+      resolve(immediate);
+      return;
+    }
+
+    let settled = false;
+    const finish = (token: string) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener(NATIVE_FCM_TOKEN_EVENT, onToken);
+      window.clearTimeout(timer);
+      resolve(token.trim());
+    };
+
+    const onToken = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ token?: string }>).detail;
+      const tk = (detail?.token || getNativeAndroidFcmToken()).trim();
+      if (tk) finish(tk);
+    };
+
+    window.addEventListener(NATIVE_FCM_TOKEN_EVENT, onToken);
+    const timer = window.setTimeout(() => {
+      finish(getNativeAndroidFcmToken());
+    }, timeoutMs);
+
+    try {
+      window.AndroidBridge?.refreshNativeFcmToken?.();
+    } catch {
+      // Ignore bridge error
+    }
+  });
+}
+
 export async function requestAndGetFcmToken(customVapidKey?: string): Promise<{
   ok: boolean;
   permission: NotificationPermission | 'unsupported';
@@ -104,11 +151,12 @@ export async function requestAndGetFcmToken(customVapidKey?: string): Promise<{
       };
     }
 
+    const nativeToken = await waitForNativeAndroidFcmToken();
     return {
       ok: true,
       permission: 'granted',
-      token: '',
-      localOnly: true,
+      token: nativeToken,
+      ...(nativeToken ? {} : { localOnly: true }),
     };
   }
 
@@ -391,18 +439,15 @@ export async function dispatchRemotePushNotification(opts: {
   data: PushDeepLinkPayload;
 }): Promise<void> {
   if (typeof window === 'undefined') return;
-  // Static GitHub Pages has no /api server route; skip silently to avoid 404 noise in console
-  if (window.location.hostname.endsWith('github.io')) return;
 
   try {
-    let tokens: string[] = [];
+    const tokenSet = new Set<string>();
     if (opts.targetRole === 'admin') {
       const q = query(
         collection(db, 'admins'),
         where('role', 'in', ['super_admin', 'sub_admin'])
       );
       const snap = await getDocs(q);
-      const tokenSet = new Set<string>();
       snap.forEach((docSnap) => {
         const d = docSnap.data() as {
           fcmToken?: string;
@@ -419,7 +464,6 @@ export async function dispatchRemotePushNotification(opts: {
           });
         }
       });
-      tokens = Array.from(tokenSet).slice(0, 15);
     } else if (opts.targetPhone) {
       const cleanPhone = String(opts.targetPhone).replace(/\D/g, '');
       if (/^[0-9]{8,20}$/.test(cleanPhone)) {
@@ -427,33 +471,52 @@ export async function dispatchRemotePushNotification(opts: {
         if (snap.exists()) {
           const d = snap.data() as {
             fcmToken?: string;
+            fcmTokens?: string[];
             pushNotificationsEnabled?: boolean;
           };
-          if (d.pushNotificationsEnabled !== false && d.fcmToken && typeof d.fcmToken === 'string') {
-            tokens = [d.fcmToken.trim()];
+          if (d.pushNotificationsEnabled !== false) {
+            if (d.fcmToken && typeof d.fcmToken === 'string' && d.fcmToken.trim()) {
+              tokenSet.add(d.fcmToken.trim());
+            }
+            if (Array.isArray(d.fcmTokens)) {
+              d.fcmTokens.forEach((tk) => {
+                if (typeof tk === 'string' && tk.trim()) tokenSet.add(tk.trim());
+              });
+            }
           }
         }
       }
     }
 
+    const tokens = Array.from(tokenSet).slice(0, 15);
     if (tokens.length === 0) return;
 
-    await fetch('/api/push/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tokens,
-        title: opts.title,
-        body: opts.body,
-        data: {
-          role: opts.data.role,
-          action: opts.data.action,
-          phone: opts.data.phone || '',
-          url: buildPushDeepLinkUrl(opts.data),
-          tag: `masarik-${opts.data.action}-${opts.data.phone || 'global'}`,
-        },
-      }),
-    });
+    const cleanTitle = String(opts.title || 'مسارك للإنجاز السياحي').slice(0, 160);
+    const cleanBody = String(opts.body || 'لديك رسالة أو تحديث جديد.').slice(0, 400);
+    const pushData: Record<string, string> = {
+      role: opts.data.role,
+      action: opts.data.action,
+      phone: opts.data.phone || '',
+      url: buildPushDeepLinkUrl(opts.data),
+      tag: `masarik-${opts.data.action}-${opts.data.phone || 'global'}`,
+      title: cleanTitle,
+      body: cleanBody,
+    };
+
+    await Promise.allSettled(
+      tokens.map((token) =>
+        fetch(CLOUDFLARE_PUSH_WORKER_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token,
+            title: cleanTitle,
+            body: cleanBody,
+            data: pushData,
+          }),
+        })
+      )
+    );
   } catch {
     // Non-blocking remote push dispatch
   }

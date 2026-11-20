@@ -14,10 +14,13 @@ interface AndroidBridgeInterface {
     phone: string
   ) => void;
   showNotification?: (title: string, body: string) => void;
+  getNativeFcmToken?: () => string;
+  refreshNativeFcmToken?: () => void;
 }
 
 interface Window {
   AndroidBridge?: AndroidBridgeInterface;
+  __MASARIK_NATIVE_FCM_TOKEN__?: string;
 }
 
 declare module '*.jpg' {

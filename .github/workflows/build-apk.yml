@@ -57,6 +57,22 @@ jobs:
           cp release.keystore debug.keystore
           ls -lh release.keystore
 
+      - name: Setup Google Services Config
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "Restoring app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret..."
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '\n\r ' | base64 -d > app/google-services.json
+          elif [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            echo "Restoring app/google-services.json from GOOGLE_SERVICES_JSON secret..."
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+          else
+            echo "Using repository app/google-services.json"
+          fi
+          ls -lh app/google-services.json
+
       - name: Set Official Release Version 1.0.1
         run: |
           echo "VERSION_CODE=2" > version.properties
@@ -116,9 +132,9 @@ jobs:
           name: "مسارك للسياحة ${{ github.event.release.tag_name || 'v1.0.1' }}"
           body: |
             الإصدار الرسمي من تطبيق **مسارك للسياحة** (`v1.0.1` - Build `2`).
+            - تفعيل خدمة Firebase Cloud Messaging الأصلية (`MasarikFirebaseMessagingService`) لاستقبال الإشعارات في الخلفية وحتى عند إغلاق التطبيق تماماً عبر قناة `masarik_alerts`.
+            - مزامنة تلقائية لرمز الجهاز (`FCM Token`) في Firestore والربط الفوري مع سيرفر الإشعارات عبر Cloudflare Worker.
             - بناء وتوقيع تلقائي للملف الرسمي `Masarik-Tourism.apk` وتحديثه داخل نفس الإصدار (`v1.0.1`).
-            - دعم إشعارات نظام الأندرويد الأصلية (`POST_NOTIFICATIONS` و `NotificationChannel` مع الصوت والاهتزاز).
-            - دعم مباشر لجسر `AndroidBridge` والفحص التلقائي للتحديثات داخل التطبيق.
           draft: false
           prerelease: false
           make_latest: true

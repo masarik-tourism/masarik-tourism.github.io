@@ -3,16 +3,12 @@ package com.masarik.tourism
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.media.AudioAttributes
-import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -63,10 +59,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.google.firebase.messaging.FirebaseMessaging
 import com.masarik.tourism.data.TravelRepository
 import com.masarik.tourism.ui.theme.MasarikTourismTheme
 import kotlinx.coroutines.Dispatchers
@@ -79,146 +74,10 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-data class PushNavigationPayload(
-    val role: String,
-    val action: String,
-    val phone: String,
-    val nonce: Long = System.currentTimeMillis()
-)
-
-private object MasarikNotificationHelper {
-    const val CHANNEL_ID = "masarik_notifications_channel"
-    const val EXTRA_PUSH_ROLE = "push_role"
-    const val EXTRA_PUSH_ACTION = "push_action"
-    const val EXTRA_PUSH_PHONE = "push_phone"
-
-    fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager =
-                context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    ?: return
-            val existing = manager.getNotificationChannel(CHANNEL_ID)
-            if (existing != null) return
-
-            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
-
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "إشعارات مسارك للسياحة",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "تنبيهات المحادثات الفورية وتحديثات الطلبات والمستندات"
-                enableLights(true)
-                lightColor = android.graphics.Color.parseColor("#C6A052")
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0L, 240L, 110L, 240L)
-                setSound(soundUri, audioAttributes)
-                setShowBadge(true)
-            }
-            manager.createNotificationChannel(channel)
-        }
-    }
-
-    fun hasPermission(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) return false
-        }
-        return NotificationManagerCompat.from(context).areNotificationsEnabled()
-    }
-
-    fun showNotification(
-        context: Context,
-        title: String,
-        body: String,
-        role: String = "client",
-        action: String = "chat",
-        phone: String = ""
-    ) {
-        ensureChannel(context)
-        if (!hasPermission(context)) return
-
-        val safeRole = role.ifBlank { "client" }
-        val safeAction = action.ifBlank { if (safeRole == "admin") "live_chat" else "chat" }
-        val safeTitle = title.ifBlank { "مسارك للإنجاز السياحي" }
-        val safeBody = body.ifBlank { "لديك رسالة أو تحديث جديد." }
-
-        val tapIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_PUSH_ROLE, safeRole)
-            putExtra(EXTRA_PUSH_ACTION, safeAction)
-            if (phone.isNotBlank()) {
-                putExtra(EXTRA_PUSH_PHONE, phone)
-            }
-        }
-
-        val requestCode = (System.currentTimeMillis() and 0x7FFFFFFF).toInt()
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            requestCode,
-            tapIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val largeIconBitmap = try {
-            BitmapFactory.decodeResource(context.resources, R.drawable.masarik_logo)
-        } catch (_: Exception) {
-            null
-        }
-
-        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setColor(android.graphics.Color.parseColor("#0F2438"))
-            .setContentTitle(safeTitle)
-            .setContentText(safeBody)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(safeBody))
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setSound(soundUri)
-            .setVibrate(longArrayOf(0L, 240L, 110L, 240L))
-            .setDefaults(
-                NotificationCompat.DEFAULT_LIGHTS or
-                    NotificationCompat.DEFAULT_SOUND or
-                    NotificationCompat.DEFAULT_VIBRATE
-            )
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-
-        if (largeIconBitmap != null) {
-            builder.setLargeIcon(largeIconBitmap)
-        }
-
-        try {
-            NotificationManagerCompat.from(context).notify(requestCode, builder.build())
-        } catch (_: SecurityException) {
-        }
-    }
-
-    fun extractPushPayload(intent: Intent?): PushNavigationPayload? {
-        intent ?: return null
-        val role = intent.getStringExtra(EXTRA_PUSH_ROLE)?.trim().orEmpty()
-        val action = intent.getStringExtra(EXTRA_PUSH_ACTION)?.trim().orEmpty()
-        val phone = intent.getStringExtra(EXTRA_PUSH_PHONE)?.trim().orEmpty()
-        if (role.isEmpty() && action.isEmpty()) return null
-        return PushNavigationPayload(
-            role = role.ifEmpty { "client" },
-            action = action.ifEmpty { if (role == "admin") "live_chat" else "chat" },
-            phone = phone
-        )
-    }
-}
-
 class AndroidBridge(
     private val context: Context,
-    private val onRequestNotificationPermission: () -> Unit
+    private val onRequestNotificationPermission: () -> Unit,
+    private val onRefreshFcmToken: () -> Unit
 ) {
     @JavascriptInterface
     fun openExternalUrl(url: String) {
@@ -243,6 +102,21 @@ class AndroidBridge(
             act.runOnUiThread { onRequestNotificationPermission() }
         } else {
             onRequestNotificationPermission()
+        }
+    }
+
+    @JavascriptInterface
+    fun getNativeFcmToken(): String {
+        return MasarikNotificationHelper.getSavedFcmToken(context)
+    }
+
+    @JavascriptInterface
+    fun refreshNativeFcmToken() {
+        val act = context as? Activity
+        if (act != null) {
+            act.runOnUiThread { onRefreshFcmToken() }
+        } else {
+            onRefreshFcmToken()
         }
     }
 
@@ -611,6 +485,52 @@ fun MainWebViewScreen(
         callback.onReceiveValue(uris)
     }
 
+    val fetchAndDispatchFcmToken = rememberUpdatedState {
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val token = task.result?.trim().orEmpty()
+                    if (token.isNotEmpty()) {
+                        MasarikNotificationHelper.saveFcmToken(context, token)
+                        val tokenJson = JSONObject.quote(token)
+                        webViewInstance?.post {
+                            webViewInstance?.evaluateJavascript(
+                                "window.__MASARIK_NATIVE_FCM_TOKEN__ = $tokenJson; window.dispatchEvent(new CustomEvent('masarik-native-fcm-token', { detail: { token: $tokenJson } }));",
+                                null
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                val token = intent?.getStringExtra(MasarikNotificationHelper.EXTRA_FCM_TOKEN)?.trim().orEmpty()
+                if (token.isNotEmpty()) {
+                    val tokenJson = JSONObject.quote(token)
+                    webViewInstance?.post {
+                        webViewInstance?.evaluateJavascript(
+                            "window.__MASARIK_NATIVE_FCM_TOKEN__ = $tokenJson; window.dispatchEvent(new CustomEvent('masarik-native-fcm-token', { detail: { token: $tokenJson } }));",
+                            null
+                        )
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(MasarikNotificationHelper.ACTION_FCM_TOKEN_UPDATED)
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -618,6 +538,7 @@ fun MainWebViewScreen(
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        fetchAndDispatchFcmToken.value.invoke()
         availableUpdate = checkLatestGitHubRelease(installedVersion)
     }
 
@@ -675,9 +596,13 @@ fun MainWebViewScreen(
                         userAgentString = "$userAgentString MasarikApp/$installedVersion"
                     }
 
-                    // Register JS-to-Android bridge for external URLs & Native OS Notifications
+                    // Register JS-to-Android bridge for external URLs, Native OS Notifications & FCM Token
                     addJavascriptInterface(
-                        AndroidBridge(ctx) { requestPostNotificationsPermission.value.invoke() },
+                        AndroidBridge(
+                            context = ctx,
+                            onRequestNotificationPermission = { requestPostNotificationsPermission.value.invoke() },
+                            onRefreshFcmToken = { fetchAndDispatchFcmToken.value.invoke() }
+                        ),
                         "AndroidBridge"
                     )
 
@@ -751,12 +676,29 @@ fun MainWebViewScreen(
                             isLoading = true
                             hasError = false
                             view?.evaluateJavascript(NATIVE_NOTIFICATION_JS_SHIM, null)
+                            val cachedToken = MasarikNotificationHelper.getSavedFcmToken(ctx)
+                            if (cachedToken.isNotEmpty()) {
+                                val quoted = JSONObject.quote(cachedToken)
+                                view?.evaluateJavascript(
+                                    "window.__MASARIK_NATIVE_FCM_TOKEN__ = $quoted;",
+                                    null
+                                )
+                            }
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             isLoading = false
                             view?.evaluateJavascript(NATIVE_NOTIFICATION_JS_SHIM, null)
+                            val cachedToken = MasarikNotificationHelper.getSavedFcmToken(ctx)
+                            if (cachedToken.isNotEmpty()) {
+                                val quoted = JSONObject.quote(cachedToken)
+                                view?.evaluateJavascript(
+                                    "window.__MASARIK_NATIVE_FCM_TOKEN__ = $quoted; window.dispatchEvent(new CustomEvent('masarik-native-fcm-token', { detail: { token: $quoted } }));",
+                                    null
+                                )
+                            }
+                            fetchAndDispatchFcmToken.value.invoke()
                         }
 
                         override fun onReceivedError(
