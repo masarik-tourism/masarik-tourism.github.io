@@ -54,6 +54,7 @@ import {
   PushNotificationAction,
   getNativeAndroidFcmToken,
   registerMessagingServiceWorker,
+  requestAndGetFcmToken,
   showBrowserPushNotification,
   subscribeForegroundFcmMessages,
   waitForNativeAndroidFcmToken,
@@ -63,7 +64,7 @@ import { ChatThreadSummary, TravelerProfile, TravelerSessionMeta } from './types
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
-import { subscribeSiteConfigCloud, useSiteConfig } from './utils/siteConfigStore';
+import { getSiteConfig, subscribeSiteConfigCloud, useSiteConfig } from './utils/siteConfigStore';
 import { subscribeCmsCloud } from './utils/cmsStore';
 import { saveAdminFcmTokenCloud, subscribeAdminsCloud } from './utils/adminAuthStore';
 import { useAdmin } from './contexts/AdminContext';
@@ -578,34 +579,62 @@ export const App: React.FC = () => {
     };
   }, [handlePushDeepLink]);
 
-  // Automatically sync native Android FCM Token into Firestore on app launch, login, and token refresh
+  const activeTravelerFcmTokensKey = Array.isArray(activeTraveler?.fcmTokens)
+    ? activeTraveler.fcmTokens.join('|')
+    : '';
+
+  // Automatically sync native Android (and granted Web) FCM Token into Firestore on launch, login, and refresh
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.AndroidBridge) return;
+    if (typeof window === 'undefined') return;
     if (!activeTravelerPhone && !isAdminActive) return;
 
     let cancelled = false;
-    const syncNativeToken = async (explicitToken?: string) => {
-      const token = (explicitToken || (await waitForNativeAndroidFcmToken(4500))).trim();
-      if (!token || cancelled) return;
+    const persistTokenForSession = async (token: string) => {
+      const cleanToken = token.trim();
+      if (!cleanToken || cancelled) return;
+
+      const hasTokenInClientList = Array.isArray(activeTraveler?.fcmTokens)
+        ? activeTraveler.fcmTokens.includes(cleanToken)
+        : false;
 
       if (
         activeTravelerPhone &&
-        (activeTraveler?.fcmToken !== token || activeTraveler?.pushNotificationsEnabled !== true)
+        (activeTraveler?.fcmToken !== cleanToken ||
+          !hasTokenInClientList ||
+          activeTraveler?.pushNotificationsEnabled !== true)
       ) {
-        await saveClientFcmTokenCloud(activeTravelerPhone, token, true);
+        await saveClientFcmTokenCloud(activeTravelerPhone, cleanToken, true);
       }
       if (isAdminActive) {
-        await saveAdminFcmTokenCloud(adminSession?.adminId, token, true);
+        await saveAdminFcmTokenCloud(adminSession?.adminId, cleanToken, true);
       }
     };
 
-    void syncNativeToken(getNativeAndroidFcmToken() || undefined);
+    const syncSessionToken = async (explicitToken?: string) => {
+      if (window.AndroidBridge) {
+        const token = (explicitToken || (await waitForNativeAndroidFcmToken(4500))).trim();
+        if (token) {
+          await persistTokenForSession(token);
+        }
+        return;
+      }
+
+      // On web browser: if Notification permission is already granted, silently refresh & save FCM token
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        const res = await requestAndGetFcmToken(getSiteConfig().fcmVapidKey);
+        if (res.ok && res.token) {
+          await persistTokenForSession(res.token);
+        }
+      }
+    };
+
+    void syncSessionToken(getNativeAndroidFcmToken() || undefined);
 
     const onNativeTokenRefresh = (evt: Event) => {
       const detail = (evt as CustomEvent<{ token?: string }>).detail;
       const tk = (detail?.token || getNativeAndroidFcmToken()).trim();
       if (tk) {
-        void syncNativeToken(tk);
+        void syncSessionToken(tk);
       }
     };
 
@@ -617,6 +646,7 @@ export const App: React.FC = () => {
   }, [
     activeTravelerPhone,
     activeTraveler?.fcmToken,
+    activeTravelerFcmTokensKey,
     activeTraveler?.pushNotificationsEnabled,
     isAdminActive,
     adminSession?.adminId,

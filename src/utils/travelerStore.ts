@@ -661,8 +661,14 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       payload.appointmentDetails = cleanAppt;
     }
   }
+  const normalizedTokens = normalizeFcmTokenList(profile.fcmTokens, profile.fcmToken, 10);
   if (profile.fcmToken) {
     payload.fcmToken = String(profile.fcmToken).trim().slice(0, 512);
+  } else if (normalizedTokens.length > 0) {
+    payload.fcmToken = normalizedTokens[0];
+  }
+  if (normalizedTokens.length > 0 || Array.isArray(profile.fcmTokens)) {
+    payload.fcmTokens = normalizedTokens;
   }
   if (profile.fcmUpdatedAt) {
     payload.fcmUpdatedAt = String(profile.fcmUpdatedAt).slice(0, 64);
@@ -672,6 +678,23 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
   }
 
   return payload;
+}
+
+function normalizeFcmTokenList(
+  existingTokens?: unknown,
+  primaryToken?: string,
+  max = 10
+): string[] {
+  const prev = Array.isArray(existingTokens)
+    ? existingTokens
+        .map((t) => String(t || '').trim())
+        .filter((t) => t.length >= 10 && t.length <= 512)
+    : [];
+  const cleanPrimary = String(primaryToken || '').trim().slice(0, 512);
+  if (cleanPrimary.length >= 10) {
+    return [cleanPrimary, ...prev.filter((t) => t !== cleanPrimary)].slice(0, max);
+  }
+  return Array.from(new Set(prev)).slice(0, max);
 }
 
 function mergeCloudClientWithLocal(
@@ -780,6 +803,14 @@ function mergeCloudClientWithLocal(
     issuedDocuments: mergedIssuedDocs,
     notifications: mergedNotifications,
     fcmToken: cloudData.fcmToken || localExisting?.fcmToken,
+    fcmTokens: normalizeFcmTokenList(
+      [
+        ...(Array.isArray(cloudData.fcmTokens) ? cloudData.fcmTokens : []),
+        ...(Array.isArray(localExisting?.fcmTokens) ? localExisting.fcmTokens : []),
+      ],
+      cloudData.fcmToken || localExisting?.fcmToken,
+      10
+    ),
     fcmUpdatedAt: cloudData.fcmUpdatedAt || localExisting?.fcmUpdatedAt,
     pushNotificationsEnabled:
       typeof cloudData.pushNotificationsEnabled === 'boolean'
@@ -3174,9 +3205,11 @@ export async function saveClientFcmTokenCloud(
 
   if (!existing) return false;
 
+  const nextTokens = normalizeFcmTokenList(existing.fcmTokens, cleanToken || existing.fcmToken, 10);
   const updated: TravelerProfile = {
     ...existing,
     ...(cleanToken ? { fcmToken: cleanToken } : {}),
+    fcmTokens: nextTokens,
     fcmUpdatedAt: nowIso,
     pushNotificationsEnabled: Boolean(enabled),
     updatedAt: nowIso,
@@ -3191,23 +3224,23 @@ export async function saveClientFcmTokenCloud(
 export async function getClientFcmTokensCloud(rawPhone: string): Promise<string[]> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) return [];
+  const tokenSet = new Set<string>();
   try {
     const snap = await getDoc(doc(db, 'clients', phone));
     if (snap.exists()) {
       const data = snap.data() as TravelerProfile;
       if (data.pushNotificationsEnabled === false) return [];
-      if (data.fcmToken && typeof data.fcmToken === 'string' && data.fcmToken.trim()) {
-        return [data.fcmToken.trim()];
-      }
+      normalizeFcmTokenList(data.fcmTokens, data.fcmToken, 10).forEach((tk) => tokenSet.add(tk));
+      if (tokenSet.size > 0) return Array.from(tokenSet);
     }
   } catch {
     // Ignore read error
   }
   const local = getAllTravelers()[phone];
-  if (local?.fcmToken && local.pushNotificationsEnabled !== false) {
-    return [local.fcmToken];
+  if (local && local.pushNotificationsEnabled !== false) {
+    normalizeFcmTokenList(local.fcmTokens, local.fcmToken, 10).forEach((tk) => tokenSet.add(tk));
   }
-  return [];
+  return Array.from(tokenSet);
 }
 
 export async function attachPreOrderFilesToTravelerCloud(

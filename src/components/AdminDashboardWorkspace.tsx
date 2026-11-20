@@ -41,6 +41,7 @@ import {
   Plus,
   Volume2,
   Building2,
+  Smartphone,
 } from 'lucide-react';
 import {
   AdminPermission,
@@ -57,9 +58,17 @@ import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
 import { PushPermissionBanner } from './PushPermissionBanner';
 import {
+  NATIVE_FCM_TOKEN_EVENT,
+  PUSH_LOG_UPDATED_EVENT,
+  PushDiagnosticLog,
+  getLastPushDiagnosticLog,
+  getNativeAndroidFcmToken,
   requestAndGetFcmToken,
+  sendTestCloudflareWorkerPush,
   showBrowserPushNotification,
+  waitForNativeAndroidFcmToken,
 } from '../utils/fcmPushService';
+import { isRunningInApp } from '../utils/appEnvironment';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
@@ -111,6 +120,7 @@ import {
   deleteSubAdmin,
   getSubAdmins,
   saveAdminFcmTokenCloud,
+  subscribeNotificationSettingsTokens,
   updateSubAdminPermissions,
 } from '../utils/adminAuthStore';
 import {
@@ -269,6 +279,10 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [confirmResetCms, setConfirmResetCms] = useState(false);
   const [fcmSavedMsg, setFcmSavedMsg] = useState('');
   const [isTestingPush, setIsTestingPush] = useState(false);
+  const [nativeBridgeToken, setNativeBridgeToken] = useState<string>(() => getNativeAndroidFcmToken());
+  const [adminCloudTokens, setAdminCloudTokens] = useState<string[]>([]);
+  const [lastPushLog, setLastPushLog] = useState<PushDiagnosticLog | null>(() => getLastPushDiagnosticLog());
+  const [isTestingWorkerPush, setIsTestingWorkerPush] = useState(false);
 
   // Real-time Instant Admin Alert (Audio Chime + Top Banner for Incoming OTP Requests)
   const [alertSoundEnabled, setAlertSoundEnabled] = useState(true);
@@ -424,6 +438,33 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setSelectedClientPhone(requestedFolder.phone);
     }
   }, [requestedFolder?.nonce]);
+
+  useEffect(() => {
+    setNativeBridgeToken(getNativeAndroidFcmToken());
+    const unsubNotifSettings = subscribeNotificationSettingsTokens(({ adminFcmTokens }) => {
+      setAdminCloudTokens(adminFcmTokens);
+    });
+    const onTokenEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ token?: string }>).detail;
+      const tk = (detail?.token || getNativeAndroidFcmToken()).trim();
+      if (tk) setNativeBridgeToken(tk);
+    };
+    const onPushLogEvent = (evt: Event) => {
+      const detail = (evt as CustomEvent<PushDiagnosticLog>).detail;
+      if (detail) {
+        setLastPushLog(detail);
+      } else {
+        setLastPushLog(getLastPushDiagnosticLog());
+      }
+    };
+    window.addEventListener(NATIVE_FCM_TOKEN_EVENT, onTokenEvent);
+    window.addEventListener(PUSH_LOG_UPDATED_EVENT, onPushLogEvent);
+    return () => {
+      unsubNotifSettings();
+      window.removeEventListener(NATIVE_FCM_TOKEN_EVENT, onTokenEvent);
+      window.removeEventListener(PUSH_LOG_UPDATED_EVENT, onPushLogEvent);
+    };
+  }, []);
 
   // Arm instant audio + visual alert whenever a new pending OTP request arrives live
   useEffect(() => {
@@ -1043,6 +1084,88 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       );
     } finally {
       setIsTestingPush(false);
+    }
+  };
+
+  const handleRefreshNativeBridgeToken = async () => {
+    const tk = (await waitForNativeAndroidFcmToken(3500)).trim();
+    if (tk) {
+      setNativeBridgeToken(tk);
+      await saveAdminFcmTokenCloud(session?.adminId, tk, true);
+      setFcmSavedMsg(
+        t(
+          'تم تحديث وحفظ توكن الأندرويد (Android FCM Token) في settings/notifications بنجاح ✅.',
+          'Android FCM Token refreshed and saved to settings/notifications ✅.'
+        )
+      );
+    } else {
+      const res = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+      if (res.ok && res.token) {
+        await saveAdminFcmTokenCloud(session?.adminId, res.token, true);
+        setFcmSavedMsg(
+          t(
+            'تم تسجيل توكن المتصفح (FCM Token) وحفظه في السحابة ✅.',
+            'Web FCM Token registered and saved to Firestore ✅.'
+          )
+        );
+      } else {
+        setFcmSavedMsg(
+          t(
+            'لم يتم رصد توكن أندرويد بعد — تأكد من فتح تطبيق الأندرويد والسماح بالإشعارات.',
+            'No Android FCM Token detected yet — open inside Android app with notification permission.'
+          )
+        );
+      }
+    }
+  };
+
+  const handleTestCloudflareWorkerPush = async () => {
+    if (isTestingWorkerPush) return;
+    setIsTestingWorkerPush(true);
+    setFcmSavedMsg('');
+    try {
+      const mergedTargets = Array.from(
+        new Set(
+          [...adminCloudTokens, nativeBridgeToken]
+            .map((tk) => tk.trim())
+            .filter((tk) => tk.length >= 10)
+        )
+      );
+      const log = await sendTestCloudflareWorkerPush({
+        tokens: mergedTargets.length > 0 ? mergedTargets : undefined,
+        title: t('مسارك للإنجاز السياحي — اختبار الخلفية 🚀', 'Masarik Tourism — Worker Push Test 🚀'),
+        body: t(
+          'تجربة إرسال إشعار FCM عبر سيرفر Cloudflare Worker (يجب أن يصلك حتى في الخلفية ✅)',
+          'Live Cloudflare Worker → FCM background delivery test ✅'
+        ),
+      });
+      if (log) {
+        setLastPushLog(log);
+        if (log.outcome === 'sent') {
+          setFcmSavedMsg(
+            t(
+              `تم الإرسال عبر Cloudflare Worker بنجاح (${log.okCount}/${log.tokenCount}) ✅`,
+              `Cloudflare Worker push delivered (${log.okCount}/${log.tokenCount}) ✅`
+            )
+          );
+        } else if (log.outcome === 'no_tokens') {
+          setFcmSavedMsg(
+            t(
+              'لم يتم الإرسال: لا يوجد أي FCM Token محفوظ للإدارة في Firestore بعد.',
+              'Skipped: No Admin FCM Tokens saved in Firestore yet.'
+            )
+          );
+        } else {
+          setFcmSavedMsg(
+            t(
+              `استجابة السيرفر (${log.lastStatus ?? log.statusText}): ${log.responseBody}`,
+              `Worker response (${log.lastStatus ?? log.statusText}): ${log.responseBody}`
+            )
+          );
+        }
+      }
+    } finally {
+      setIsTestingWorkerPush(false);
     }
   };
 
@@ -4598,6 +4721,183 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       )}
                       <span>{t('اختبار الإشعار والصوت 🔊', 'Test Alert & Sound 🔊')}</span>
                     </button>
+
+                    <button
+                      type="button"
+                      disabled={isTestingWorkerPush}
+                      onClick={() => void handleTestCloudflareWorkerPush()}
+                      className="min-h-[40px] px-4 py-2 bg-[#0284C7] hover:bg-[#0369A1] disabled:opacity-60 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                    >
+                      {isTestingWorkerPush ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                      <span>
+                        {t(
+                          'اختبار إرسال الخلفية عبر Cloudflare Worker 🚀',
+                          'Test Background Worker Push 🚀'
+                        )}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Push Diagnostic Panel (Push Log) */}
+                  <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50/90 p-3.5 sm:p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
+                      <div className="flex items-center gap-2">
+                        <Smartphone className="w-4 h-4 text-[#0284C7] shrink-0" />
+                        <h5 className="text-xs font-black text-[#0F2438]">
+                          {t(
+                            'سجل تشخيص الإشعارات الفورية (Push Diagnostic Log)',
+                            'Push Notifications Diagnostic Log'
+                          )}
+                        </h5>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleRefreshNativeBridgeToken()}
+                        className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer transition"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>{t('تحديث ومزامنة التوكن', 'Refresh & Sync Token')}</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                      {/* Android Native Bridge Token Status */}
+                      <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-slate-600">
+                            {t('حالة Android FCM Token:', 'Android FCM Token Status:')}
+                          </span>
+                          {nativeBridgeToken ? (
+                            <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[11px] font-black">
+                              {t('متصل ✅', 'Connected ✅')}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[11px] font-black">
+                              {isRunningInApp()
+                                ? t('بانتظار الجسر ⏳', 'Waiting Bridge ⏳')
+                                : t('غير متصل (متصفح ويب)', 'Not in Android App')}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          dir="ltr"
+                          className="text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200/80 rounded-lg px-2 py-1 truncate"
+                        >
+                          {nativeBridgeToken
+                            ? `${nativeBridgeToken.slice(0, 18)}...${nativeBridgeToken.slice(-12)}`
+                            : t('لا يوجد توكن جسر أندرويد نشط', 'No active AndroidBridge token')}
+                        </div>
+                      </div>
+
+                      {/* Firestore settings/notifications -> adminFcmTokens Status */}
+                      <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-slate-600">
+                            {t('سجل الإدارة (settings/notifications):', 'Firestore adminFcmTokens:')}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-black ${
+                              adminCloudTokens.length > 0
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-red-100 text-red-700'
+                            }`}
+                          >
+                            {adminCloudTokens.length > 0
+                              ? t(`${adminCloudTokens.length} توكن محفوظ ✅`, `${adminCloudTokens.length} Saved ✅`)
+                              : t('0 توكن ⚠️', '0 Tokens ⚠️')}
+                          </span>
+                        </div>
+                        <div
+                          dir="ltr"
+                          className="text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200/80 rounded-lg px-2 py-1 truncate"
+                        >
+                          {adminCloudTokens.length > 0
+                            ? `${adminCloudTokens[0].slice(0, 18)}...${adminCloudTokens[0].slice(-12)}`
+                            : t('سيُحفظ تلقائياً عند دخول الإدارة من التطبيق', 'Auto-saved on Admin launch')}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Latest Cloudflare Worker Dispatch Response */}
+                    <div className="rounded-xl bg-white border border-slate-200 p-3 space-y-2 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-black text-[#0F2438]">
+                          {t(
+                            'نتيجة آخر محاولة إرسال (Cloudflare Worker Response):',
+                            'Latest Server Dispatch (Cloudflare Worker Response):'
+                          )}
+                        </span>
+                        {lastPushLog ? (
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-black ${
+                              lastPushLog.outcome === 'sent'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : lastPushLog.outcome === 'partial'
+                                ? 'bg-amber-100 text-amber-800'
+                                : lastPushLog.outcome === 'no_tokens'
+                                ? 'bg-slate-200 text-slate-700'
+                                : 'bg-red-100 text-red-800'
+                            }`}
+                          >
+                            {lastPushLog.outcome === 'sent'
+                              ? t(`تم الإرسال ✅ (${lastPushLog.okCount}/${lastPushLog.tokenCount})`, `Sent ✅ (${lastPushLog.okCount}/${lastPushLog.tokenCount})`)
+                              : lastPushLog.outcome === 'partial'
+                              ? t(`إرسال جزئي ⚠️ (${lastPushLog.okCount}/${lastPushLog.tokenCount})`, `Partial ⚠️ (${lastPushLog.okCount}/${lastPushLog.tokenCount})`)
+                              : lastPushLog.outcome === 'no_tokens'
+                              ? t('لا يوجد توكن مستلم ⚠️', 'No Recipient Tokens ⚠️')
+                              : t(`فشل الإرسال ❌ (${lastPushLog.failCount})`, `Failed ❌ (${lastPushLog.failCount})`)}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-bold">
+                            {t('بانتظار أول عملية إرسال', 'No push dispatched yet')}
+                          </span>
+                        )}
+                      </div>
+
+                      {lastPushLog ? (
+                        <div className="space-y-1.5 text-[11px]">
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-600">
+                            <span>
+                              <strong>{t('المستلم:', 'Target:')}</strong>{' '}
+                              {lastPushLog.targetRole === 'admin'
+                                ? t('الإدارة', 'Admin')
+                                : `${t('عميل', 'Client')} (${lastPushLog.targetPhone || '-'})`}
+                            </span>
+                            <span>
+                              <strong>{t('الحالة:', 'HTTP:')}</strong>{' '}
+                              <span dir="ltr" className="font-mono">
+                                {lastPushLog.lastStatus ?? lastPushLog.statusText}
+                              </span>
+                            </span>
+                            <span>
+                              <strong>{t('الوقت:', 'Time:')}</strong>{' '}
+                              {new Date(lastPushLog.timestamp).toLocaleString(isAr ? 'ar-EG' : 'en-US')}
+                            </span>
+                          </div>
+                          <div className="text-slate-700 font-bold truncate">
+                            {lastPushLog.title}
+                          </div>
+                          <pre
+                            dir="ltr"
+                            className="p-2 rounded-lg bg-slate-900 text-emerald-300 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap break-all"
+                          >
+                            {lastPushLog.responseBody}
+                          </pre>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-slate-500">
+                          {t(
+                            'أرسل رسالة محادثة أو ارفع مستنداً أو اضغط زر «اختبار إرسال الخلفية عبر Cloudflare Worker» لعرض استجابة السيرفر هنا.',
+                            'Send a chat message, upload a file, or click "Test Background Worker Push" to inspect the server response.'
+                          )}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </form>
 

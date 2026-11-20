@@ -107,7 +107,11 @@ class AndroidBridge(
 
     @JavascriptInterface
     fun getNativeFcmToken(): String {
-        return MasarikNotificationHelper.getSavedFcmToken(context)
+        val saved = MasarikNotificationHelper.getSavedFcmToken(context)
+        if (saved.isEmpty()) {
+            refreshNativeFcmToken()
+        }
+        return saved
     }
 
     @JavascriptInterface
@@ -162,6 +166,22 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         MasarikNotificationHelper.ensureChannel(this)
         incomingPushPayload = MasarikNotificationHelper.extractPushPayload(intent)
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val token = task.result?.trim().orEmpty()
+                    if (token.isNotEmpty()) {
+                        MasarikNotificationHelper.saveFcmToken(this, token)
+                        val updateIntent = Intent(MasarikNotificationHelper.ACTION_FCM_TOKEN_UPDATED).apply {
+                            setPackage(packageName)
+                            putExtra(MasarikNotificationHelper.EXTRA_FCM_TOKEN, token)
+                        }
+                        sendBroadcast(updateIntent)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
 
         setContent {
             MasarikTourismTheme {
@@ -540,6 +560,20 @@ fun MainWebViewScreen(
         }
         fetchAndDispatchFcmToken.value.invoke()
         availableUpdate = checkLatestGitHubRelease(installedVersion)
+    }
+
+    LaunchedEffect(webViewInstance) {
+        val wv = webViewInstance ?: return@LaunchedEffect
+        val cachedToken = MasarikNotificationHelper.getSavedFcmToken(context)
+        if (cachedToken.isNotEmpty()) {
+            val tokenJson = JSONObject.quote(cachedToken)
+            wv.post {
+                wv.evaluateJavascript(
+                    "window.__MASARIK_NATIVE_FCM_TOKEN__ = $tokenJson; window.dispatchEvent(new CustomEvent('masarik-native-fcm-token', { detail: { token: $tokenJson } }));",
+                    null
+                )
+            }
+        }
     }
 
     LaunchedEffect(livePushPayload, webViewInstance) {

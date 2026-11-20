@@ -82,6 +82,7 @@ service cloud.firestore {
         'notifications',
         'appointmentDetails',
         'fcmToken',
+        'fcmTokens',
         'fcmUpdatedAt',
         'pushNotificationsEnabled'
       ])
@@ -311,6 +312,14 @@ service cloud.firestore {
         )
       )
       && isOptionalString(data, 'fcmToken', 512)
+      && (
+        !('fcmTokens' in data)
+        || (
+          data.fcmTokens is list
+          && data.fcmTokens.size() <= 10
+          && (data.fcmTokens.size() == 0 || (data.fcmTokens[0] is string && data.fcmTokens[0].size() <= 512))
+        )
+      )
       && isOptionalString(data, 'fcmUpdatedAt', 64)
       && (!('pushNotificationsEnabled' in data) || data.pushNotificationsEnabled is bool);
     }
@@ -499,6 +508,7 @@ service cloud.firestore {
           'notifications',
           'appointmentDetails',
           'fcmToken',
+          'fcmTokens',
           'fcmUpdatedAt',
           'pushNotificationsEnabled'
         ]);
@@ -584,6 +594,33 @@ service cloud.firestore {
           'updatedAt'
         ]);
       allow delete: if isValidId(adminId) && adminId != 'master' && resource != null;
+    }
+
+    // Validation Blueprint: NotificationSettings (/settings/notifications)
+    function isValidNotificationSettings(data) {
+      return data.keys().hasAll(['adminFcmTokens', 'updatedAt'])
+      && data.keys().hasOnly(['adminFcmTokens', 'updatedAt'])
+      && data.adminFcmTokens is list
+      && data.adminFcmTokens.size() <= 20
+      && (
+        data.adminFcmTokens.size() == 0
+        || (
+          data.adminFcmTokens[0] is string
+          && data.adminFcmTokens[0].size() >= 10
+          && data.adminFcmTokens[0].size() <= 512
+        )
+      )
+      && data.updatedAt is string
+      && data.updatedAt.size() <= 64;
+    }
+
+    // Canonical Global Notification Settings Document (/settings/notifications)
+    match /settings/{settingId} {
+      allow get: if settingId == 'notifications';
+      allow list: if resource.data.updatedAt is string;
+      allow create, update: if settingId == 'notifications'
+        && isValidNotificationSettings(incoming());
+      allow delete: if false;
     }
 
     // Validation Blueprint: ChatThread (/chats/{phoneId})

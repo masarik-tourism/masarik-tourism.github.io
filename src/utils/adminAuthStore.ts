@@ -24,6 +24,7 @@ const SUB_ADMINS_STORAGE_KEY = 'masarik_sub_admins_v1';
 const ADMIN_SESSION_STORAGE_KEY = 'masarik_admin_session_v1';
 
 export const ADMIN_AUTH_UPDATED_EVENT = 'masarik-admin-auth-updated';
+export const ADMIN_FCM_SETTINGS_UPDATED_EVENT = 'masarik-admin-fcm-settings-updated';
 
 export const ALL_ADMIN_PERMISSIONS: AdminPermission[] = [
   'manage_clients',
@@ -120,6 +121,95 @@ export function getAdminFirestoreDocId(adminId?: string | null): string {
   return adminId.slice(0, 64);
 }
 
+function normalizeAdminTokens(existing: unknown, primaryToken?: string, max = 20): string[] {
+  const prev = Array.isArray(existing)
+    ? existing.map((t) => String(t || '').trim()).filter((t) => t.length >= 10 && t.length <= 512)
+    : [];
+  const cleanPrimary = String(primaryToken || '').trim().slice(0, 512);
+  if (cleanPrimary.length >= 10) {
+    return [cleanPrimary, ...prev.filter((t) => t !== cleanPrimary)].slice(0, max);
+  }
+  return Array.from(new Set(prev)).slice(0, max);
+}
+
+export async function saveTokenToNotificationSettingsCloud(token: string): Promise<string[]> {
+  const path = 'settings/notifications';
+  const cleanToken = String(token || '').trim().slice(0, 512);
+  const nowIso = new Date().toISOString();
+
+  try {
+    const ref = doc(db, 'settings', 'notifications');
+    let prevTokens: unknown = [];
+    try {
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        prevTokens = (snap.data() as { adminFcmTokens?: unknown }).adminFcmTokens;
+      }
+    } catch {
+      // Proceed with empty list if initial read fails
+    }
+
+    const nextTokens = normalizeAdminTokens(prevTokens, cleanToken, 20);
+    await setDoc(ref, {
+      adminFcmTokens: nextTokens,
+      updatedAt: nowIso,
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent(ADMIN_FCM_SETTINGS_UPDATED_EVENT, { detail: { adminFcmTokens: nextTokens, updatedAt: nowIso } })
+      );
+    }
+    return nextTokens;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+    console.warn('Notification settings adminFcmTokens write skipped:', msg);
+    return [];
+  }
+}
+
+export async function getNotificationSettingsTokensCloud(): Promise<{
+  adminFcmTokens: string[];
+  updatedAt?: string;
+}> {
+  try {
+    const snap = await getDoc(doc(db, 'settings', 'notifications'));
+    if (!snap.exists()) return { adminFcmTokens: [] };
+    const data = snap.data() as { adminFcmTokens?: unknown; updatedAt?: string };
+    return {
+      adminFcmTokens: normalizeAdminTokens(data.adminFcmTokens, undefined, 20),
+      updatedAt: data.updatedAt,
+    };
+  } catch {
+    return { adminFcmTokens: [] };
+  }
+}
+
+export function subscribeNotificationSettingsTokens(
+  onUpdate: (data: { adminFcmTokens: string[]; updatedAt?: string }) => void
+): () => void {
+  const ref = doc(db, 'settings', 'notifications');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onUpdate({ adminFcmTokens: [] });
+        return;
+      }
+      const data = snap.data() as { adminFcmTokens?: unknown; updatedAt?: string };
+      onUpdate({
+        adminFcmTokens: normalizeAdminTokens(data.adminFcmTokens, undefined, 20),
+        updatedAt: data.updatedAt,
+      });
+    },
+    () => {
+      onUpdate({ adminFcmTokens: [] });
+    }
+  );
+}
+
 export async function saveAdminFcmTokenCloud(
   adminId: string | undefined,
   token: string,
@@ -129,18 +219,20 @@ export async function saveAdminFcmTokenCloud(
   const path = `admins/${docId}`;
   const cleanToken = String(token || '').trim().slice(0, 512);
   const nowIso = new Date().toISOString();
+  let savedSettings = false;
+  let savedAdminDoc = false;
+
+  if (enabled && cleanToken.length >= 10) {
+    const updatedTokens = await saveTokenToNotificationSettingsCloud(cleanToken);
+    savedSettings = updatedTokens.length > 0;
+  }
 
   try {
     const ref = doc(db, 'admins', docId);
     const snap = await getDoc(ref);
     if (snap.exists()) {
       const existingData = snap.data() as { fcmTokens?: unknown };
-      const prevTokens = Array.isArray(existingData.fcmTokens)
-        ? existingData.fcmTokens.map((t) => String(t || '').trim()).filter(Boolean)
-        : [];
-      const nextTokens = cleanToken
-        ? [cleanToken, ...prevTokens.filter((t) => t !== cleanToken)].slice(0, 10)
-        : prevTokens.slice(0, 10);
+      const nextTokens = normalizeAdminTokens(existingData.fcmTokens, cleanToken, 10);
 
       await updateDoc(ref, {
         ...(cleanToken ? { fcmToken: cleanToken } : {}),
@@ -149,10 +241,8 @@ export async function saveAdminFcmTokenCloud(
         pushNotificationsEnabled: Boolean(enabled),
         updatedAt: nowIso,
       });
-      return true;
-    }
-
-    if (docId === 'master') {
+      savedAdminDoc = true;
+    } else if (docId === 'master') {
       const defaultPin = getAdminPin();
       await setDoc(ref, {
         id: 'master',
@@ -166,17 +256,17 @@ export async function saveAdminFcmTokenCloud(
         createdAt: nowIso,
         updatedAt: nowIso,
       });
-      return true;
+      savedAdminDoc = true;
     }
-    return false;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.toLowerCase().includes('permission')) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
     console.warn('Admin FCM token save skipped:', msg);
-    return false;
   }
+
+  return savedSettings || savedAdminDoc;
 }
 
 export async function getAdminFcmStatusCloud(
@@ -185,28 +275,47 @@ export async function getAdminFcmStatusCloud(
   const docId = getAdminFirestoreDocId(adminId);
   try {
     const snap = await getDoc(doc(db, 'admins', docId));
-    if (!snap.exists()) return { enabled: false };
-    const data = snap.data() as {
-      fcmToken?: string;
-      pushNotificationsEnabled?: boolean;
-    };
-    return {
-      enabled: Boolean(data.pushNotificationsEnabled),
-      fcmToken: data.fcmToken,
-    };
+    if (snap.exists()) {
+      const data = snap.data() as {
+        fcmToken?: string;
+        fcmTokens?: string[];
+        pushNotificationsEnabled?: boolean;
+      };
+      const firstToken =
+        data.fcmToken ||
+        (Array.isArray(data.fcmTokens) && data.fcmTokens.length > 0 ? data.fcmTokens[0] : undefined);
+      if (firstToken || data.pushNotificationsEnabled) {
+        return {
+          enabled: Boolean(data.pushNotificationsEnabled),
+          fcmToken: firstToken,
+        };
+      }
+    }
+    const globalSettings = await getNotificationSettingsTokensCloud();
+    if (globalSettings.adminFcmTokens.length > 0) {
+      return { enabled: true, fcmToken: globalSettings.adminFcmTokens[0] };
+    }
+    return { enabled: false };
   } catch {
     return { enabled: false };
   }
 }
 
 export async function getAllAdminFcmTokensCloud(): Promise<string[]> {
+  const tokens = new Set<string>();
+  try {
+    const settingsData = await getNotificationSettingsTokensCloud();
+    settingsData.adminFcmTokens.forEach((tk) => tokens.add(tk));
+  } catch {
+    // Continue to admins query fallback
+  }
+
   try {
     const q = query(
       collection(db, 'admins'),
       where('role', 'in', ['super_admin', 'sub_admin'])
     );
     const snap = await getDocs(q);
-    const tokens = new Set<string>();
     snap.forEach((docSnap) => {
       const data = docSnap.data() as {
         fcmToken?: string;
@@ -214,19 +323,19 @@ export async function getAllAdminFcmTokensCloud(): Promise<string[]> {
         pushNotificationsEnabled?: boolean;
       };
       if (data.pushNotificationsEnabled === false) return;
-      if (data.fcmToken && typeof data.fcmToken === 'string') {
+      if (data.fcmToken && typeof data.fcmToken === 'string' && data.fcmToken.trim().length >= 10) {
         tokens.add(data.fcmToken.trim());
       }
       if (Array.isArray(data.fcmTokens)) {
         data.fcmTokens.forEach((tk) => {
-          if (typeof tk === 'string' && tk.trim()) tokens.add(tk.trim());
+          if (typeof tk === 'string' && tk.trim().length >= 10) tokens.add(tk.trim());
         });
       }
     });
-    return Array.from(tokens).slice(0, 15);
   } catch {
-    return [];
+    // Non-blocking fallback
   }
+  return Array.from(tokens).slice(0, 20);
 }
 
 let masterSeedAttempted = false;

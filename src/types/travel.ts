@@ -217,6 +217,7 @@ export interface TravelerProfile {
   notifications?: ClientNotification[];
   appointmentDetails?: AppointmentDetails;
   fcmToken?: string;
+  fcmTokens?: string[];
   fcmUpdatedAt?: string;
   pushNotificationsEnabled?: boolean;
 }

@@ -222,6 +222,10 @@
           "description": "Firebase Cloud Messaging (FCM) device registration token for instant Web/Mobile Push Notifications.",
           "maxLength": 512
         },
+        "fcmTokens": {
+          "type": "array",
+          "description": "Bounded list (max 10) of active FCM device tokens registered across the client's phone & browsers."
+        },
         "fcmUpdatedAt": {
           "type": "string",
           "description": "ISO timestamp when the client's FCM push token was last registered or refreshed.",
@@ -535,6 +539,25 @@
         "readByClient",
         "createdAt"
       ]
+    },
+    "NotificationSettings": {
+      "title": "Global Notification Settings",
+      "description": "Canonical global FCM token registry (settings/notifications) holding adminFcmTokens for instant background push notifications.",
+      "type": "object",
+      "properties": {
+        "adminFcmTokens": {
+          "type": "array",
+          "description": "Bounded list (max 20) of active Admin & General Manager FCM device registration tokens."
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "adminFcmTokens",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -553,6 +576,10 @@
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminAccount" },
       "description": "Master General Manager config ('master') and Sub-Admin permission accounts."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/NotificationSettings" },
+      "description": "Canonical settings document ('notifications') holding adminFcmTokens for background push delivery."
     },
     "/chats/{phoneId}": {
       "schema": { "$ref": "#/entities/ChatThread" },
