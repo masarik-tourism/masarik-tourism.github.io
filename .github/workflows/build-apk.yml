@@ -116,11 +116,12 @@ jobs:
           name: "مسارك للسياحة ${{ github.event.release.tag_name || 'v1.0.1' }}"
           body: |
             الإصدار الرسمي من تطبيق **مسارك للسياحة** (`v1.0.1` - Build `2`).
-            - بناء وتوقيع تلقائي للملف الرسمي `Masarik-Tourism.apk` مع كل تحديث للمنصة.
-            - تقليص حجم التطبيق عبر R8 + shrinkResources لسرعة تحميل فائقة.
+            - بناء وتوقيع تلقائي للملف الرسمي `Masarik-Tourism.apk` وتحديثه داخل نفس الإصدار (`v1.0.1`).
+            - دعم إشعارات نظام الأندرويد الأصلية (`POST_NOTIFICATIONS` و `NotificationChannel` مع الصوت والاهتزاز).
             - دعم مباشر لجسر `AndroidBridge` والفحص التلقائي للتحديثات داخل التطبيق.
           draft: false
           prerelease: false
           make_latest: true
+          overwrite_files: true
           fail_on_unmatched_files: true
           files: app/build/outputs/apk/release/Masarik-Tourism.apk

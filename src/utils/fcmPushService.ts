@@ -23,7 +23,11 @@ const FCM_SW_SCOPE = '/firebase-cloud-messaging-push-scope';
 let swRegistrationPromise: Promise<ServiceWorkerRegistration | null> | null = null;
 
 export function getBrowserNotificationPermission(): NotificationPermission | 'unsupported' {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
+  if (typeof window === 'undefined') return 'unsupported';
+  if (window.AndroidBridge?.hasNotificationPermission) {
+    return window.AndroidBridge.hasNotificationPermission() ? 'granted' : 'default';
+  }
+  if (!('Notification' in window)) {
     return 'unsupported';
   }
   return window.Notification.permission;
@@ -50,6 +54,36 @@ export async function registerMessagingServiceWorker(): Promise<ServiceWorkerReg
   return swRegistrationPromise;
 }
 
+function waitForNativeAndroidPermission(): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (window.AndroidBridge?.hasNotificationPermission?.()) {
+      resolve(true);
+      return;
+    }
+
+    let settled = false;
+    const finish = (granted: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('masarik-native-permission', onResult);
+      window.clearTimeout(timer);
+      resolve(granted);
+    };
+
+    const onResult = (evt: Event) => {
+      const detail = (evt as CustomEvent<{ granted?: boolean }>).detail;
+      finish(Boolean(detail?.granted));
+    };
+
+    window.addEventListener('masarik-native-permission', onResult);
+    const timer = window.setTimeout(() => {
+      finish(Boolean(window.AndroidBridge?.hasNotificationPermission?.()));
+    }, 10000);
+
+    window.AndroidBridge?.requestNotificationPermission?.();
+  });
+}
+
 export async function requestAndGetFcmToken(customVapidKey?: string): Promise<{
   ok: boolean;
   permission: NotificationPermission | 'unsupported';
@@ -57,6 +91,27 @@ export async function requestAndGetFcmToken(customVapidKey?: string): Promise<{
   localOnly?: boolean;
   error?: string;
 }> {
+  if (typeof window !== 'undefined' && window.AndroidBridge?.requestNotificationPermission) {
+    const alreadyGranted = Boolean(window.AndroidBridge.hasNotificationPermission?.());
+    const granted = alreadyGranted ? true : await waitForNativeAndroidPermission();
+    if (!granted) {
+      return {
+        ok: false,
+        permission: 'denied',
+        token: '',
+        error:
+          'تم رفض إذن الإشعارات في تطبيق الأندرويد. يرجى السماح بالإشعارات لتطبيق مسارك للسياحة من إعدادات الهاتف.',
+      };
+    }
+
+    return {
+      ok: true,
+      permission: 'granted',
+      token: '',
+      localOnly: true,
+    };
+  }
+
   const permBefore = getBrowserNotificationPermission();
   if (permBefore === 'unsupported') {
     return {
@@ -168,6 +223,29 @@ export async function showBrowserPushNotification(opts: {
     }
   } catch {
     // Ignore vibration restriction
+  }
+
+  // Native Android WebView bridge: fire true OS NotificationManager alert with channel ringtone & vibration
+  if (window.AndroidBridge?.showNativeNotification) {
+    try {
+      window.AndroidBridge.showNativeNotification(
+        opts.title,
+        opts.body,
+        opts.data.role,
+        opts.data.action,
+        opts.data.phone || ''
+      );
+      return Boolean(window.AndroidBridge.hasNotificationPermission?.() ?? true);
+    } catch {
+      // Fall through to web Notification fallback if bridge fails
+    }
+  } else if (window.AndroidBridge?.showNotification) {
+    try {
+      window.AndroidBridge.showNotification(opts.title, opts.body);
+      return true;
+    } catch {
+      // Fall through
+    }
   }
 
   if (!('Notification' in window) || window.Notification.permission !== 'granted') {

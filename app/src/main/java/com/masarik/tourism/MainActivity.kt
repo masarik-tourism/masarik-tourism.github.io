@@ -1,15 +1,25 @@
 package com.masarik.tourism
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -53,6 +63,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.masarik.tourism.data.TravelRepository
 import com.masarik.tourism.ui.theme.MasarikTourismTheme
@@ -66,7 +79,147 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-class AndroidBridge(private val context: Context) {
+data class PushNavigationPayload(
+    val role: String,
+    val action: String,
+    val phone: String,
+    val nonce: Long = System.currentTimeMillis()
+)
+
+private object MasarikNotificationHelper {
+    const val CHANNEL_ID = "masarik_notifications_channel"
+    const val EXTRA_PUSH_ROLE = "push_role"
+    const val EXTRA_PUSH_ACTION = "push_action"
+    const val EXTRA_PUSH_PHONE = "push_phone"
+
+    fun ensureChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager =
+                context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    ?: return
+            val existing = manager.getNotificationChannel(CHANNEL_ID)
+            if (existing != null) return
+
+            val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "إشعارات مسارك للسياحة",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "تنبيهات المحادثات الفورية وتحديثات الطلبات والمستندات"
+                enableLights(true)
+                lightColor = android.graphics.Color.parseColor("#C6A052")
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0L, 240L, 110L, 240L)
+                setSound(soundUri, audioAttributes)
+                setShowBadge(true)
+            }
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    fun hasPermission(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return false
+        }
+        return NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+
+    fun showNotification(
+        context: Context,
+        title: String,
+        body: String,
+        role: String = "client",
+        action: String = "chat",
+        phone: String = ""
+    ) {
+        ensureChannel(context)
+        if (!hasPermission(context)) return
+
+        val safeRole = role.ifBlank { "client" }
+        val safeAction = action.ifBlank { if (safeRole == "admin") "live_chat" else "chat" }
+        val safeTitle = title.ifBlank { "مسارك للإنجاز السياحي" }
+        val safeBody = body.ifBlank { "لديك رسالة أو تحديث جديد." }
+
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_PUSH_ROLE, safeRole)
+            putExtra(EXTRA_PUSH_ACTION, safeAction)
+            if (phone.isNotBlank()) {
+                putExtra(EXTRA_PUSH_PHONE, phone)
+            }
+        }
+
+        val requestCode = (System.currentTimeMillis() and 0x7FFFFFFF).toInt()
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            requestCode,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val largeIconBitmap = try {
+            BitmapFactory.decodeResource(context.resources, R.drawable.masarik_logo)
+        } catch (_: Exception) {
+            null
+        }
+
+        val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setColor(android.graphics.Color.parseColor("#0F2438"))
+            .setContentTitle(safeTitle)
+            .setContentText(safeBody)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(safeBody))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setSound(soundUri)
+            .setVibrate(longArrayOf(0L, 240L, 110L, 240L))
+            .setDefaults(
+                NotificationCompat.DEFAULT_LIGHTS or
+                    NotificationCompat.DEFAULT_SOUND or
+                    NotificationCompat.DEFAULT_VIBRATE
+            )
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+
+        if (largeIconBitmap != null) {
+            builder.setLargeIcon(largeIconBitmap)
+        }
+
+        try {
+            NotificationManagerCompat.from(context).notify(requestCode, builder.build())
+        } catch (_: SecurityException) {
+        }
+    }
+
+    fun extractPushPayload(intent: Intent?): PushNavigationPayload? {
+        intent ?: return null
+        val role = intent.getStringExtra(EXTRA_PUSH_ROLE)?.trim().orEmpty()
+        val action = intent.getStringExtra(EXTRA_PUSH_ACTION)?.trim().orEmpty()
+        val phone = intent.getStringExtra(EXTRA_PUSH_PHONE)?.trim().orEmpty()
+        if (role.isEmpty() && action.isEmpty()) return null
+        return PushNavigationPayload(
+            role = role.ifEmpty { "client" },
+            action = action.ifEmpty { if (role == "admin") "live_chat" else "chat" },
+            phone = phone
+        )
+    }
+}
+
+class AndroidBridge(
+    private val context: Context,
+    private val onRequestNotificationPermission: () -> Unit
+) {
     @JavascriptInterface
     fun openExternalUrl(url: String) {
         if (url.isBlank()) return
@@ -77,6 +230,48 @@ class AndroidBridge(private val context: Context) {
         } catch (_: Exception) {
         }
     }
+
+    @JavascriptInterface
+    fun hasNotificationPermission(): Boolean {
+        return MasarikNotificationHelper.hasPermission(context)
+    }
+
+    @JavascriptInterface
+    fun requestNotificationPermission() {
+        val act = context as? Activity
+        if (act != null) {
+            act.runOnUiThread { onRequestNotificationPermission() }
+        } else {
+            onRequestNotificationPermission()
+        }
+    }
+
+    @JavascriptInterface
+    fun showNativeNotification(
+        title: String,
+        body: String,
+        role: String,
+        action: String,
+        phone: String
+    ) {
+        MasarikNotificationHelper.showNotification(
+            context = context,
+            title = title,
+            body = body,
+            role = role,
+            action = action,
+            phone = phone
+        )
+    }
+
+    @JavascriptInterface
+    fun showNotification(title: String, body: String) {
+        MasarikNotificationHelper.showNotification(
+            context = context,
+            title = title,
+            body = body
+        )
+    }
 }
 
 data class AppReleaseUpdate(
@@ -86,25 +281,50 @@ data class AppReleaseUpdate(
 )
 
 class MainActivity : ComponentActivity() {
+    private var incomingPushPayload by mutableStateOf<PushNavigationPayload?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        MasarikNotificationHelper.ensureChannel(this)
+        incomingPushPayload = MasarikNotificationHelper.extractPushPayload(intent)
+
         setContent {
             MasarikTourismTheme {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                    val finalUrl = if (TravelRepository.WEB_URL.contains("?")) {
-                        "${TravelRepository.WEB_URL}&app=1"
-                    } else {
-                        "${TravelRepository.WEB_URL}?app=1"
-                    }
+                    val launchPush = remember { incomingPushPayload }
+                    val finalUrl = buildInitialWebUrl(TravelRepository.WEB_URL, launchPush)
                     MainWebViewScreen(
                         targetUrl = finalUrl,
+                        livePushPayload = incomingPushPayload,
+                        onConsumeLivePush = { incomingPushPayload = null },
                         onFinishActivity = { finish() }
                     )
                 }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        MasarikNotificationHelper.extractPushPayload(intent)?.let { payload ->
+            incomingPushPayload = payload
+        }
+    }
+}
+
+private fun buildInitialWebUrl(baseUrl: String, push: PushNavigationPayload?): String {
+    val builder = Uri.parse(baseUrl).buildUpon()
+    builder.appendQueryParameter("app", "1")
+    if (push != null) {
+        builder.appendQueryParameter("push_role", push.role)
+        builder.appendQueryParameter("push_action", push.action)
+        if (push.phone.isNotBlank()) {
+            builder.appendQueryParameter("push_phone", push.phone)
+        }
+    }
+    return builder.build().toString()
 }
 
 private fun getInstalledVersionName(context: Context): String {
@@ -275,10 +495,66 @@ private fun installApkFile(context: Context, apkFile: File) {
     context.startActivity(installIntent)
 }
 
+private val NATIVE_NOTIFICATION_JS_SHIM = """
+(function() {
+  if (window.__masarikNativeNotifPatched || !window.AndroidBridge) return;
+  window.__masarikNativeNotifPatched = true;
+  var MasarikNativeNotification = function(title, options) {
+    var opts = options || {};
+    var data = opts.data || {};
+    var role = data.role || 'client';
+    var action = data.action || (role === 'admin' ? 'live_chat' : 'chat');
+    var phone = data.phone || '';
+    if (window.AndroidBridge.showNativeNotification) {
+      window.AndroidBridge.showNativeNotification(
+        String(title || 'مسارك للإنجاز السياحي'),
+        String(opts.body || ''),
+        String(role),
+        String(action),
+        String(phone)
+      );
+    } else if (window.AndroidBridge.showNotification) {
+      window.AndroidBridge.showNotification(
+        String(title || 'مسارك للإنجاز السياحي'),
+        String(opts.body || '')
+      );
+    }
+  };
+  Object.defineProperty(MasarikNativeNotification, 'permission', {
+    get: function() {
+      try {
+        return window.AndroidBridge &&
+          window.AndroidBridge.hasNotificationPermission &&
+          window.AndroidBridge.hasNotificationPermission()
+          ? 'granted'
+          : 'default';
+      } catch (e) {
+        return 'default';
+      }
+    }
+  });
+  MasarikNativeNotification.requestPermission = function(cb) {
+    try {
+      if (window.AndroidBridge && window.AndroidBridge.requestNotificationPermission) {
+        window.AndroidBridge.requestNotificationPermission();
+      }
+      var perm = MasarikNativeNotification.permission;
+      if (typeof cb === 'function') cb(perm);
+      return Promise.resolve(perm);
+    } catch (e) {
+      return Promise.resolve('default');
+    }
+  };
+  window.Notification = MasarikNativeNotification;
+})();
+""".trimIndent()
+
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
 fun MainWebViewScreen(
     targetUrl: String,
+    livePushPayload: PushNavigationPayload?,
+    onConsumeLivePush: () -> Unit,
     onFinishActivity: () -> Unit
 ) {
     val context = LocalContext.current
@@ -295,6 +571,36 @@ fun MainWebViewScreen(
     var downloadProgress by remember { mutableFloatStateOf(0f) }
     var fileUploadCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val safeGranted = granted || MasarikNotificationHelper.hasPermission(context)
+        webViewInstance?.post {
+            webViewInstance?.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('masarik-native-permission', { detail: { granted: $safeGranted } }));",
+                null
+            )
+        }
+    }
+
+    val requestPostNotificationsPermission = rememberUpdatedState {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (!MasarikNotificationHelper.hasPermission(context)) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                webViewInstance?.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('masarik-native-permission', { detail: { granted: true } }));",
+                    null
+                )
+            }
+        } else {
+            webViewInstance?.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('masarik-native-permission', { detail: { granted: true } }));",
+                null
+            )
+        }
+    }
+
     val fileChooserLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -306,7 +612,30 @@ fun MainWebViewScreen(
     }
 
     LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         availableUpdate = checkLatestGitHubRelease(installedVersion)
+    }
+
+    LaunchedEffect(livePushPayload, webViewInstance) {
+        val payload = livePushPayload ?: return@LaunchedEffect
+        val wv = webViewInstance ?: return@LaunchedEffect
+        val detailJson = JSONObject().apply {
+            put("role", payload.role)
+            put("action", payload.action)
+            if (payload.phone.isNotBlank()) put("phone", payload.phone)
+        }.toString()
+        wv.post {
+            wv.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('masarik-push-navigate', { detail: $detailJson }));",
+                null
+            )
+        }
+        onConsumeLivePush()
     }
 
     BackHandler {
@@ -346,8 +675,11 @@ fun MainWebViewScreen(
                         userAgentString = "$userAgentString MasarikApp/$installedVersion"
                     }
 
-                    // Register direct JS-to-Android bridge for instant external browser launch
-                    addJavascriptInterface(AndroidBridge(ctx), "AndroidBridge")
+                    // Register JS-to-Android bridge for external URLs & Native OS Notifications
+                    addJavascriptInterface(
+                        AndroidBridge(ctx) { requestPostNotificationsPermission.value.invoke() },
+                        "AndroidBridge"
+                    )
 
                     // Secondary fallback: open external browser for all WebView download events
                     setDownloadListener { url, _, _, _, _ ->
@@ -418,11 +750,13 @@ fun MainWebViewScreen(
                             super.onPageStarted(view, url, favicon)
                             isLoading = true
                             hasError = false
+                            view?.evaluateJavascript(NATIVE_NOTIFICATION_JS_SHIM, null)
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             isLoading = false
+                            view?.evaluateJavascript(NATIVE_NOTIFICATION_JS_SHIM, null)
                         }
 
                         override fun onReceivedError(
@@ -443,6 +777,27 @@ fun MainWebViewScreen(
                             progress = newProgress / 100f
                             if (newProgress >= 100) {
                                 isLoading = false
+                            }
+                        }
+
+                        override fun onPermissionRequest(request: PermissionRequest?) {
+                            val act = ctx as? Activity
+                            if (act != null) {
+                                act.runOnUiThread {
+                                    try {
+                                        request?.grant(request.resources)
+                                    } catch (_: Exception) {
+                                        try {
+                                            request?.deny()
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                }
+                            } else {
+                                try {
+                                    request?.grant(request.resources)
+                                } catch (_: Exception) {
+                                }
                             }
                         }
 
