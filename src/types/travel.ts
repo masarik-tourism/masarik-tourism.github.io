@@ -143,25 +143,63 @@ export interface TrustedDevice {
 }
 
 export interface TravelerSessionMeta {
+  sessionId?: string;
   phone: string;
   mode: 'trusted' | 'temporary';
   deviceId: string;
   startedAt: number;
   expiresAt: number | null;
+  persistInLocalStorage?: boolean;
+  cloudRegistered?: boolean;
 }
 
 export type AccountVerificationStatus = 'pending_verification' | 'verified';
 
-export type PendingLoginRequestStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type PendingLoginRequestStatus =
+  | 'pending'
+  | 'approved'
+  | 'approved_trusted'
+  | 'approved_temporary'
+  | 'rejected'
+  | 'blocked'
+  | 'expired';
 
 export interface PendingLoginRequest {
   requestId: string;
   deviceId: string;
   deviceLabel: string;
   status: PendingLoginRequestStatus;
+  approvalMode?: 'trusted' | 'temporary';
+  temporaryDurationHours?: 1 | 24;
   createdAt: string;
   expiresAt: string;
   respondedAt?: string;
+}
+
+export interface PendingDeviceRequest {
+  requestId: string;
+  phoneId?: string;
+  deviceId: string;
+  deviceName: string;
+  status: 'pending' | 'approved_trusted' | 'approved_temporary' | 'rejected' | 'blocked' | 'expired';
+  approvalMode?: 'trusted' | 'temporary';
+  temporaryDurationHours?: 1 | 24;
+  createdAt: string;
+  expiresAt: string;
+  respondedAt?: string;
+}
+
+export type ActiveSessionMode = 'trusted' | 'temporary';
+
+export interface ActiveSessionRecord {
+  sessionId: string;
+  deviceId: string;
+  deviceName: string;
+  mode: ActiveSessionMode;
+  loggedInAt: string;
+  lastActiveAt: string;
+  expiresAt: string | null;
+  authMethod?: 'pin' | 'otp' | 'approval';
 }
 
 export type DriveEndpointScope = 'all' | 'client_docs' | 'admin_deliverables';
@@ -197,6 +235,9 @@ export interface TravelerProfile {
   pinUpdatedAt?: string;
   trustedDevices?: TrustedDevice[];
   pendingLoginRequests?: PendingLoginRequest[];
+  pendingDevices?: PendingDeviceRequest[];
+  activeSessions?: ActiveSessionRecord[];
+  blockedDevices?: string[];
   verified: boolean;
   accountStatus?: AccountVerificationStatus;
   verifiedAt?: string;

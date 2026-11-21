@@ -39,17 +39,20 @@ import {
   MapPin,
   Building2,
   MessageSquare,
+  Ban,
+  Timer,
 } from 'lucide-react';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
 import { PushPermissionBanner } from './PushPermissionBanner';
 import {
   AccountType,
+  ActiveSessionRecord,
   DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
   PassportAiCheckResult,
-  PendingLoginRequest,
+  PendingDeviceRequest,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
@@ -62,6 +65,7 @@ import {
   buildOrderCodeFromPhone,
   checkClientAccountAndDeviceCloud,
   commitTravelerProfileDraftCloud,
+  completeApprovedNewDeviceLoginCloud,
   compressImageToDataUrl,
   deleteFamilyMemberCloud,
   digitsOnly,
@@ -70,29 +74,37 @@ import {
   getRelationshipLabel,
   getTravelerDisplayNames,
   initiateTravelerOtpLoginCloud,
+  kickActiveSessionCloud,
   loginWithTrustedDevicePinCloud,
   logoutTravelerSession,
   markClientNotificationsReadCloud,
   normalizeArabicDigits,
   normalizePhone,
+  promoteSessionToTrustedCloud,
   requestAccountSecurityOtpCloud,
   requestTrustedDeviceLoginApprovalCloud,
-  respondToLoginApprovalRequestCloud,
+  respondToDeviceApprovalCloud,
   revokeTrustedDeviceCloud,
   saveFamilyMemberCloud,
   setClientPinCloud,
   splitPassportName,
   startTravelerSession,
+  subscribeDeviceApprovalRequestCloud,
+  subscribeDeviceApprovalsByPhoneCloud,
   subscribePendingClientCloud,
   trustCurrentDeviceCloud,
+  unblockDeviceCloud,
+  updateActiveSessionExpiryCloud,
   uploadAndSaveAvatarImmediateCloud,
   uploadBatchFilesToTravelerCloud,
+  upsertActiveSessionCloud,
   verifyAccountSecurityOtpCloud,
   verifyClientPinForNewDeviceCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
 import { playChatNotificationChime } from '../utils/chatStore';
 import {
+  formatRemainingSessionDuration,
   getDeviceFingerprint,
   getRemainingTemporaryMinutes,
   isDeviceInTrustedList,
@@ -209,9 +221,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [isVerifyingNewDevicePin, setIsVerifyingNewDevicePin] = useState(false);
   const [isSwitchingNewDeviceOtp, setIsSwitchingNewDeviceOtp] = useState(false);
 
-  // Logged-in Trusted Device Incoming Remote Login Approval Modal State
+  // Logged-in Trusted Device Incoming Remote Login Approval Modal & Connected Sessions State
   const [respondingLoginReqId, setRespondingLoginReqId] = useState<string | null>(null);
   const [dismissedLoginReqIds, setDismissedLoginReqIds] = useState<string[]>([]);
+  const [cloudDeviceApprovals, setCloudDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
+  const [editingExpirySessionId, setEditingExpirySessionId] = useState<string | null>(null);
+  const [sessionActionBusyId, setSessionActionBusyId] = useState<string | null>(null);
   const lastChimeLoginReqIdRef = useRef<string | null>(null);
 
   // Logged-out Step 2 OTP unlock (with 24h validity countdown & Admin real-time instant activation)
@@ -397,7 +412,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     onSetPendingPostAuthFlow,
   ]);
 
-  // Real-time listener while waiting on "Request Approval from Trusted Device"
+  // Dual-Path Real-Time Listener while waiting on "Request Approval from Trusted Device"
   useEffect(() => {
     if (
       activeTraveler ||
@@ -409,37 +424,114 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const targetPhone = trustedPhone || normalizePhone(loginPhone);
     if (!targetPhone) return;
 
-    return subscribePendingClientCloud(targetPhone, (cloudProfile) => {
-      const list = Array.isArray(cloudProfile.pendingLoginRequests)
-        ? cloudProfile.pendingLoginRequests
-        : [];
-      const matched =
-        (pendingApprovalReqId
-          ? list.find((r) => r.requestId === pendingApprovalReqId)
-          : undefined) ||
-        list.find((r) => r.deviceId === currentDevice.deviceId);
-      if (!matched) return;
+    let handled = false;
+    const processApprovalStatus = (opts: {
+      phone: string;
+      status: string;
+      approvalMode?: 'trusted' | 'temporary';
+      temporaryDurationHours?: 1 | 24;
+    }) => {
+      if (handled) return;
+      if (
+        opts.status === 'approved_trusted' ||
+        opts.status === 'approved_temporary' ||
+        opts.status === 'approved'
+      ) {
+        handled = true;
+        const resolvedMode: 'trusted' | 'temporary' =
+          opts.status === 'approved_temporary' || opts.approvalMode === 'temporary'
+            ? 'temporary'
+            : 'trusted';
+        const resolvedHours: 1 | 24 = opts.temporaryDurationHours === 24 ? 24 : 1;
 
-      if (matched.status === 'approved') {
         setApprovalRequestState('idle');
         setApprovalRequestError('');
         setPendingApprovalReqId(null);
-        onSetPendingPostAuthFlow?.({
-          phone: cloudProfile.phone,
-          stage: 'device_trust_prompt',
-        });
-        setAuthStage('device_trust_prompt');
-      } else if (matched.status === 'rejected') {
+        void completeApprovedNewDeviceLoginCloud(opts.phone, resolvedMode, resolvedHours).then(
+          () => {
+            onSetPendingOtpPhone(null);
+            onSetPendingPostAuthFlow?.(null);
+            setAuthStage('phone_entry');
+            onChangeSubTab('account');
+          }
+        );
+      } else if (opts.status === 'blocked' || opts.status === 'rejected') {
+        handled = true;
         setApprovalRequestState('rejected');
         setPendingApprovalReqId(null);
         setApprovalRequestError(
-          t(
-            'تم رفض محاولة تسجيل الدخول من قبل جهازك الموثوق. يمكنك التحقق برمز الـ PIN أو كود الواتساب.',
-            'Login request was rejected by your trusted device. You may verify with PIN or WhatsApp OTP.'
-          )
+          opts.status === 'blocked'
+            ? t(
+                'تم رفض وحظر هذا الجهاز من قبل جهازك الموثوق. يمكنك فك الحظر من الجهاز الموثوق أو التحقق عبر الواتساب عند رفع الحظر.',
+                'This device was rejected and blocked by your trusted device.'
+              )
+            : t(
+                'تم رفض محاولة تسجيل الدخول من قبل جهازك الموثوق. يمكنك التحقق برمز الـ PIN أو كود الواتساب.',
+                'Login request was rejected by your trusted device. You may verify with PIN or WhatsApp OTP.'
+              )
         );
       }
+    };
+
+    const unsubClient = subscribePendingClientCloud(targetPhone, (cloudProfile) => {
+      if (
+        Array.isArray(cloudProfile.blockedDevices) &&
+        cloudProfile.blockedDevices.includes(currentDevice.deviceId)
+      ) {
+        processApprovalStatus({ phone: cloudProfile.phone, status: 'blocked' });
+        return;
+      }
+
+      const pdList = Array.isArray(cloudProfile.pendingDevices)
+        ? cloudProfile.pendingDevices
+        : [];
+      const matchedPending =
+        (pendingApprovalReqId
+          ? pdList.find((r) => r.requestId === pendingApprovalReqId)
+          : undefined) || pdList.find((r) => r.deviceId === currentDevice.deviceId);
+      if (matchedPending) {
+        processApprovalStatus({
+          phone: cloudProfile.phone,
+          status: matchedPending.status,
+          approvalMode: matchedPending.approvalMode,
+          temporaryDurationHours: matchedPending.temporaryDurationHours,
+        });
+        return;
+      }
+
+      const legacyList = Array.isArray(cloudProfile.pendingLoginRequests)
+        ? cloudProfile.pendingLoginRequests
+        : [];
+      const matchedLegacy =
+        (pendingApprovalReqId
+          ? legacyList.find((r) => r.requestId === pendingApprovalReqId)
+          : undefined) || legacyList.find((r) => r.deviceId === currentDevice.deviceId);
+      if (matchedLegacy) {
+        processApprovalStatus({
+          phone: cloudProfile.phone,
+          status: matchedLegacy.status,
+          approvalMode: matchedLegacy.approvalMode,
+          temporaryDurationHours: matchedLegacy.temporaryDurationHours,
+        });
+      }
     });
+
+    const unsubApprovalDoc = subscribeDeviceApprovalRequestCloud(
+      pendingApprovalReqId,
+      (reqDoc) => {
+        processApprovalStatus({
+          phone: reqDoc.phoneId || targetPhone,
+          status: reqDoc.status,
+          approvalMode: reqDoc.approvalMode,
+          temporaryDurationHours: reqDoc.temporaryDurationHours,
+        });
+      }
+    );
+
+    return () => {
+      unsubClient();
+      unsubApprovalDoc();
+    };
   }, [
     activeTraveler,
     authStage,
@@ -448,15 +540,40 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     trustedPhone,
     loginPhone,
     currentDevice.deviceId,
+    onSetPendingOtpPhone,
     onSetPendingPostAuthFlow,
+    onChangeSubTab,
     t,
   ]);
+
+  // Real-time subscription to deviceApprovals collection for logged-in account
+  useEffect(() => {
+    if (!activeTraveler?.phone) {
+      setCloudDeviceApprovals([]);
+      return;
+    }
+    return subscribeDeviceApprovalsByPhoneCloud(activeTraveler.phone, setCloudDeviceApprovals);
+  }, [activeTraveler?.phone]);
 
   // Real-time audio alert when a new-device approval request arrives on a Trusted logged-in session
   useEffect(() => {
     if (!activeTraveler || sessionMeta?.mode !== 'trusted') return;
     const nowMs = Date.now();
-    const pendingReq = (activeTraveler.pendingLoginRequests || []).find(
+    const pendingPool: PendingDeviceRequest[] = [
+      ...cloudDeviceApprovals,
+      ...(activeTraveler.pendingDevices || []),
+      ...(activeTraveler.pendingLoginRequests || []).map((r) => ({
+        requestId: r.requestId,
+        deviceId: r.deviceId,
+        deviceName: r.deviceLabel,
+        status: (r.status === 'approved'
+          ? 'approved_trusted'
+          : r.status) as PendingDeviceRequest['status'],
+        createdAt: r.createdAt,
+        expiresAt: r.expiresAt,
+      })),
+    ];
+    const pendingReq = pendingPool.find(
       (r) =>
         r.status === 'pending' &&
         r.deviceId !== currentDevice.deviceId &&
@@ -467,7 +584,13 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       lastChimeLoginReqIdRef.current = pendingReq.requestId;
       playChatNotificationChime();
     }
-  }, [activeTraveler, sessionMeta?.mode, currentDevice.deviceId, dismissedLoginReqIds]);
+  }, [
+    activeTraveler,
+    cloudDeviceApprovals,
+    sessionMeta?.mode,
+    currentDevice.deviceId,
+    dismissedLoginReqIds,
+  ]);
 
   // Live 1-second countdown ticker for 24-hour OTP validity window
   useEffect(() => {
@@ -1190,26 +1313,139 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // Trusted Device Handler: Approve or Reject Incoming New-Device Login Request
+  // Trusted Device Handler: Approve (Permanent Trusted or 1h/24h Temporary) or Reject & Block Incoming Request
   const handleRespondLoginApproval = async (
-    requestId: string,
-    decision: 'approved' | 'rejected'
+    req: PendingDeviceRequest,
+    decision: 'approved_trusted' | 'approved_temporary' | 'blocked',
+    temporaryDurationHours: 1 | 24 = 1
   ) => {
     if (!activeTraveler || respondingLoginReqId) return;
-    setRespondingLoginReqId(requestId);
+    setRespondingLoginReqId(req.requestId);
+    setSecurityFeedback(null);
     try {
-      const ok = await respondToLoginApprovalRequestCloud(
-        activeTraveler.phone,
-        requestId,
-        decision
-      );
+      const ok = await respondToDeviceApprovalCloud(activeTraveler.phone, req.requestId, {
+        decision,
+        temporaryDurationHours,
+        fallbackDeviceId: req.deviceId,
+        fallbackDeviceName: req.deviceName,
+      });
       if (ok) {
         setDismissedLoginReqIds((prev) =>
-          prev.includes(requestId) ? prev : [...prev, requestId]
+          prev.includes(req.requestId) ? prev : [...prev, req.requestId]
         );
+        setSecurityFeedback({
+          type: 'success',
+          text:
+            decision === 'approved_trusted'
+              ? t(
+                  `تمت الموافقة وتوثيق الجهاز (${req.deviceName}) بشكل دائم.`,
+                  `Approved and permanently trusted (${req.deviceName}).`
+                )
+              : decision === 'approved_temporary'
+              ? t(
+                  `تمت الموافقة المؤقتة للجهاز (${req.deviceName}) لمدة ${
+                    temporaryDurationHours === 24 ? '24 ساعة' : 'ساعة واحدة'
+                  }.`,
+                  `Granted ${temporaryDurationHours}h temporary access to (${req.deviceName}).`
+                )
+              : t(
+                  `تم رفض الطلب وحظر الجهاز (${req.deviceName}).`,
+                  `Request rejected and device (${req.deviceName}) blocked.`
+                ),
+        });
       }
     } finally {
       setRespondingLoginReqId(null);
+    }
+  };
+
+  // Connected Sessions Management Handlers
+  const handlePromoteSessionToTrusted = async (session: ActiveSessionRecord) => {
+    if (!activeTraveler || sessionActionBusyId) return;
+    setSessionActionBusyId(session.sessionId);
+    setSecurityFeedback(null);
+    try {
+      await promoteSessionToTrustedCloud(activeTraveler.phone, session.sessionId);
+      setSecurityFeedback({
+        type: 'success',
+        text: t(
+          `تم تثبيت (${session.deviceName}) كجهاز موثوق دائم بنجاح.`,
+          `(${session.deviceName}) promoted to a permanent trusted device.`
+        ),
+      });
+    } finally {
+      setSessionActionBusyId(null);
+    }
+  };
+
+  const handleUpdateSessionExpiry = async (
+    session: ActiveSessionRecord,
+    durationHours: 1 | 24 | 168 | 720
+  ) => {
+    if (!activeTraveler || sessionActionBusyId) return;
+    setSessionActionBusyId(session.sessionId);
+    setSecurityFeedback(null);
+    try {
+      await updateActiveSessionExpiryCloud(activeTraveler.phone, session.sessionId, durationHours);
+      setEditingExpirySessionId(null);
+      const labelAr =
+        durationHours === 1
+          ? 'ساعة واحدة'
+          : durationHours === 24
+          ? '24 ساعة'
+          : durationHours === 168
+          ? '7 أيام'
+          : '30 يوماً';
+      const labelEn =
+        durationHours === 1
+          ? '1 hour'
+          : durationHours === 24
+          ? '24 hours'
+          : durationHours === 168
+          ? '7 days'
+          : '30 days';
+      setSecurityFeedback({
+        type: 'success',
+        text: t(
+          `تم ضبط مدة الجلسة للجهاز (${session.deviceName}) إلى ${labelAr}. سيتم تسجيل خروجه تلقائياً عند الانتهاء.`,
+          `Session timeout for (${session.deviceName}) updated to ${labelEn}.`
+        ),
+      });
+    } finally {
+      setSessionActionBusyId(null);
+    }
+  };
+
+  const handleKickActiveSession = async (session: ActiveSessionRecord) => {
+    if (!activeTraveler || sessionActionBusyId) return;
+    setSessionActionBusyId(session.sessionId);
+    setSecurityFeedback(null);
+    try {
+      await kickActiveSessionCloud(activeTraveler.phone, session.sessionId);
+      setSecurityFeedback({
+        type: 'success',
+        text: t(
+          `تم تسجيل خروج وطرد الجهاز (${session.deviceName}) فوراً.`,
+          `(${session.deviceName}) was logged out immediately.`
+        ),
+      });
+    } finally {
+      setSessionActionBusyId(null);
+    }
+  };
+
+  const handleUnblockDevice = async (deviceId: string) => {
+    if (!activeTraveler || sessionActionBusyId) return;
+    setSessionActionBusyId(deviceId);
+    setSecurityFeedback(null);
+    try {
+      await unblockDeviceCloud(activeTraveler.phone, deviceId);
+      setSecurityFeedback({
+        type: 'success',
+        text: t('تم فك حظر الجهاز بنجاح.', 'Device unblocked successfully.'),
+      });
+    } finally {
+      setSessionActionBusyId(null);
     }
   };
 
@@ -1456,7 +1692,17 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const handleChooseTemporarySession = () => {
     const targetPhone = pendingPostAuthFlow?.phone || pendingOtpPhone || trustedPhone;
     if (!targetPhone) return;
-    startTravelerSession(targetPhone, 'temporary');
+    const meta = startTravelerSession(targetPhone, 'temporary', {
+      persistInLocalStorage: false,
+      cloudRegistered: false,
+    });
+    void upsertActiveSessionCloud(targetPhone, {
+      sessionId: meta.sessionId || `sess_${Date.now()}`,
+      mode: 'temporary',
+      expiresAtMs: meta.expiresAt,
+      authMethod: 'otp',
+      persistInLocalStorage: false,
+    });
     onSetPendingOtpPhone(null);
     onSetPendingPostAuthFlow?.(null);
     setAuthStage('phone_entry');
@@ -3749,21 +3995,54 @@ Please advise on the next steps for my application.`
     </div>
   );
 
-  const incomingApprovalRequest: PendingLoginRequest | null =
-    sessionMeta?.mode === 'trusted'
-      ? (activeTraveler.pendingLoginRequests || []).find(
-          (r) =>
-            r.status === 'pending' &&
-            r.deviceId !== currentDevice.deviceId &&
-            Date.parse(r.expiresAt) > Date.now() &&
-            !dismissedLoginReqIds.includes(r.requestId)
-        ) || null
-      : null;
+  // Deduplicate pending approval requests across deviceApprovals collection + pendingDevices + legacy pendingLoginRequests
+  const pendingApprovalRequests: PendingDeviceRequest[] = (() => {
+    const nowMs = Date.now();
+    const byId = new Map<string, PendingDeviceRequest>();
+    const addCandidate = (item: PendingDeviceRequest) => {
+      if (!item || !item.requestId) return;
+      const existing = byId.get(item.requestId);
+      if (!existing || (existing.status === 'pending' && item.status !== 'pending')) {
+        byId.set(item.requestId, item);
+      }
+    };
+    (activeTraveler.pendingDevices || []).forEach(addCandidate);
+    (activeTraveler.pendingLoginRequests || []).forEach((r) =>
+      addCandidate({
+        requestId: r.requestId,
+        phoneId: activeTraveler.phone,
+        deviceId: r.deviceId,
+        deviceName: r.deviceLabel,
+        status: (r.status === 'approved'
+          ? 'approved_trusted'
+          : r.status) as PendingDeviceRequest['status'],
+        approvalMode: r.approvalMode,
+        temporaryDurationHours: r.temporaryDurationHours,
+        createdAt: r.createdAt,
+        expiresAt: r.expiresAt,
+        respondedAt: r.respondedAt,
+      })
+    );
+    cloudDeviceApprovals.forEach(addCandidate);
+
+    return Array.from(byId.values())
+      .filter(
+        (r) =>
+          r.status === 'pending' &&
+          r.deviceId !== currentDevice.deviceId &&
+          Date.parse(r.expiresAt) > nowMs &&
+          !dismissedLoginReqIds.includes(r.requestId)
+      )
+      .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+  })();
+
+  const incomingApprovalRequest: PendingDeviceRequest | null =
+    sessionMeta?.mode === 'trusted' ? pendingApprovalRequests[0] || null : null;
 
   return (
     <div className="min-h-[80vh] bg-[#FAF9F6] pb-24 md:pb-16 pt-5 px-3 sm:px-4" dir={dir}>
       <div className="max-w-5xl mx-auto space-y-5">
-        {/* Instant Security Approval Prompt for Trusted Devices when a New Device tries to log in */}
+        {/* Instant Real-Time Security Approval Prompt on Trusted Devices when a New Device tries to log in */}
         {incomingApprovalRequest && (
           <div className="bg-gradient-to-l from-amber-50 via-white to-amber-50 border-2 border-[#C6A052] rounded-2xl p-4 sm:p-5 shadow-md space-y-3">
             <div className="flex items-start gap-3">
@@ -3772,12 +4051,12 @@ Please advise on the next steps for my application.`
               </div>
               <div className="min-w-0 flex-1">
                 <span className="inline-block px-2.5 py-0.5 rounded-full bg-amber-200/80 text-[#0F2438] text-[10.5px] font-black mb-1">
-                  {t('تنبيه أمان فوري · جهاز جديد', 'Instant Security Alert · New Device')}
+                  {t('تنبيه أمني: محاولة دخول من جهاز جديد 🔐', 'Security Alert: New Device Sign-In Attempt 🔐')}
                 </span>
                 <p className="text-xs sm:text-sm font-black text-[#0F2438] leading-snug">
                   {t(
-                    `محاولة تسجيل دخول جديدة لحسابك من جهاز (${incomingApprovalRequest.deviceLabel}) — هل توافق؟`,
-                    `New login attempt on your account from device (${incomingApprovalRequest.deviceLabel}) — Do you approve?`
+                    `طلب دخول من (${incomingApprovalRequest.deviceName}) — اختر إجراء الأمان المناسب:`,
+                    `Sign-in request from (${incomingApprovalRequest.deviceName}) — choose a security action:`
                   )}
                 </p>
               </div>
@@ -3788,28 +4067,52 @@ Please advise on the next steps for my application.`
                 type="button"
                 disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
                 onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest.requestId, 'approved')
+                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_trusted')
                 }
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
               >
                 {respondingLoginReqId === incomingApprovalRequest.requestId ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <CheckCircle2 className="w-4 h-4" />
                 )}
-                <span>{t('موافقة على الدخول', 'Approve Sign In')}</span>
+                <span>{t('موافقة كجهاز موثوق دائم ✅', 'Approve as Permanent Trusted ✅')}</span>
               </button>
 
               <button
                 type="button"
                 disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
                 onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest.requestId, 'rejected')
+                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_temporary', 1)
                 }
-                className="min-h-[40px] px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                className="min-h-[40px] px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
               >
-                <X className="w-4 h-4" />
-                <span>{t('رفض', 'Reject')}</span>
+                <Clock className="w-4 h-4" />
+                <span>{t('موافقة مؤقتة (ساعة واحدة) ⏳', 'Temporary (1 Hour) ⏳')}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
+                onClick={() =>
+                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_temporary', 24)
+                }
+                className="min-h-[40px] px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+              >
+                <Clock className="w-4 h-4" />
+                <span>{t('موافقة مؤقتة (24 ساعة) ⏳', 'Temporary (24 Hours) ⏳')}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
+                onClick={() =>
+                  void handleRespondLoginApproval(incomingApprovalRequest, 'blocked')
+                }
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Ban className="w-4 h-4" />
+                <span>{t('رفض وحظر ❌', 'Reject & Block ❌')}</span>
               </button>
             </div>
           </div>
@@ -4623,6 +4926,322 @@ Please advise on the next steps for my application.`
                 <span>{securityFeedback.text}</span>
               </div>
             )}
+
+            {/* SECTION 1: REAL-TIME PENDING DEVICE APPROVAL REQUESTS ("طلبات الدخول بانتظار موافقتك") */}
+            <div className="bg-amber-50/70 border border-amber-200 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-amber-600" />
+                  <span>
+                    {t(
+                      `طلبات الدخول بانتظار موافقتك (${pendingApprovalRequests.length})`,
+                      `Pending Login Requests (${pendingApprovalRequests.length})`
+                    )}
+                  </span>
+                </h3>
+                <span className="px-2.5 py-0.5 rounded-full bg-white border border-amber-200 text-[10px] font-black text-amber-900">
+                  {t('مباشر (Real-time)', 'Real-time')}
+                </span>
+              </div>
+
+              {pendingApprovalRequests.length > 0 ? (
+                <div className="space-y-3">
+                  {pendingApprovalRequests.map((req) => {
+                    const reqBusy = respondingLoginReqId === req.requestId;
+                    const reqTime = new Date(req.createdAt).toLocaleString(
+                      lang === 'en' ? 'en-US' : 'ar-EG',
+                      { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+                    );
+                    return (
+                      <div
+                        key={req.requestId}
+                        className="bg-white border-2 border-[#C6A052] rounded-2xl p-3.5 sm:p-4 space-y-3 shadow-xs"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs sm:text-sm font-black text-[#0F2438]" dir="ltr">
+                              {req.deviceName}
+                            </p>
+                            <p className="text-[11px] text-slate-500 mt-0.5">
+                              {t('وقت الطلب:', 'Requested at:')} {reqTime}
+                            </p>
+                          </div>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 text-[10.5px] font-black w-fit">
+                            <Clock className="w-3 h-3" />
+                            {t('بانتظار موافقتك', 'Awaiting Approval')}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={reqBusy}
+                            onClick={() => void handleRespondLoginApproval(req, 'approved_trusted')}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            {reqBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>{t('موافقة كجهاز موثوق دائم ✅', 'Approve as Permanent Trusted ✅')}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={reqBusy}
+                            onClick={() =>
+                              void handleRespondLoginApproval(req, 'approved_temporary', 1)
+                            }
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>{t('موافقة مؤقتة: ساعة ⏳', 'Temporary: 1 Hour ⏳')}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={reqBusy}
+                            onClick={() =>
+                              void handleRespondLoginApproval(req, 'approved_temporary', 24)
+                            }
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>{t('موافقة مؤقتة: 24 ساعة ⏳', 'Temporary: 24 Hours ⏳')}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={reqBusy}
+                            onClick={() => void handleRespondLoginApproval(req, 'blocked')}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                            <span>{t('رفض وحظر ❌', 'Reject & Block ❌')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-600">
+                  {t(
+                    'لا توجد طلبات دخول جديدة بانتظار موافقتك حالياً. عند محاولة فتح الحساب من جهاز جديد ستظهر هنا فوراً مع إشعار تنبيه.',
+                    'No pending login requests right now. New device attempts appear here live with an instant notification.'
+                  )}
+                </p>
+              )}
+            </div>
+
+            {/* SECTION 2: CONNECTED SESSIONS ("الجلسات والأجهزة المتصلة حالياً") */}
+            {(() => {
+              const nowMs = Date.now();
+              const connectedSessions: ActiveSessionRecord[] = [
+                ...(activeTraveler.activeSessions || []),
+              ]
+                .filter((s) => {
+                  if (!s.expiresAt) return true;
+                  const expMs = Date.parse(s.expiresAt);
+                  return !Number.isFinite(expMs) || expMs > nowMs;
+                })
+                .sort((a, b) => {
+                  const aCurr = a.sessionId === sessionMeta?.sessionId ? 1 : 0;
+                  const bCurr = b.sessionId === sessionMeta?.sessionId ? 1 : 0;
+                  if (aCurr !== bCurr) return bCurr - aCurr;
+                  return (Date.parse(b.lastActiveAt) || 0) - (Date.parse(a.lastActiveAt) || 0);
+                });
+
+              return (
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-2">
+                      <Smartphone className="w-4 h-4 text-[#0284C7]" />
+                      <span>
+                        {t(
+                          `الجلسات والأجهزة المتصلة حالياً (${connectedSessions.length})`,
+                          `Currently Connected Devices & Sessions (${connectedSessions.length})`
+                        )}
+                      </span>
+                    </h3>
+                  </div>
+
+                  {connectedSessions.length > 0 ? (
+                    <div className="space-y-2.5">
+                      {connectedSessions.map((sess) => {
+                        const isThisSession =
+                          sess.sessionId === sessionMeta?.sessionId ||
+                          (sess.deviceId === currentDevice.deviceId && !sessionMeta?.sessionId);
+                        const isBusy = sessionActionBusyId === sess.sessionId;
+                        const isEditingExpiry = editingExpirySessionId === sess.sessionId;
+                        const loginTimeStr = new Date(sess.loggedInAt).toLocaleString(
+                          lang === 'en' ? 'en-US' : 'ar-EG',
+                          { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+                        );
+                        const remainingStr = formatRemainingSessionDuration(sess.expiresAt, lang);
+                        const isTrustedMode = sess.mode === 'trusted' && !sess.expiresAt;
+
+                        return (
+                          <div
+                            key={sess.sessionId}
+                            className={`rounded-2xl p-3.5 border space-y-3 ${
+                              isThisSession
+                                ? 'bg-emerald-50/70 border-emerald-200'
+                                : 'bg-white border-slate-200'
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+                              <div className="min-w-0 space-y-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span
+                                    className="text-xs sm:text-sm font-black text-[#0F2438]"
+                                    dir="ltr"
+                                  >
+                                    {sess.deviceName}
+                                  </span>
+                                  {isThisSession && (
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black">
+                                      {t('جلستك الحالية', 'Current Session')}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                                      isTrustedMode
+                                        ? 'bg-[#0F2438] text-[#E5C887]'
+                                        : 'bg-amber-100 text-amber-900 border border-amber-300'
+                                    }`}
+                                  >
+                                    {isTrustedMode
+                                      ? t('موثوق دائم', 'Trusted Permanent')
+                                      : t('مؤقت', 'Temporary')}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-600">
+                                  {t('بداية الجلسة:', 'Signed in:')} {loginTimeStr} ·{' '}
+                                  <span className="font-bold text-[#0F2438]">{remainingStr}</span>
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              {!isTrustedMode && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => void handlePromoteSessionToTrusted(sess)}
+                                  className="min-h-[34px] px-3 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                                >
+                                  {isBusy ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <ShieldCheck className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>
+                                    {t('تثبيت كجهاز موثوق دائم 🛡️', 'Make Permanent Trusted 🛡️')}
+                                  </span>
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() =>
+                                  setEditingExpirySessionId(isEditingExpiry ? null : sess.sessionId)
+                                }
+                                className="min-h-[34px] px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 disabled:opacity-60 text-amber-950 text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <Timer className="w-3.5 h-3.5 text-amber-700" />
+                                <span>
+                                  {t('تحديد/تعديل وقت الانتهاء ⏱️', 'Set Expiration ⏱️')}
+                                </span>
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => void handleKickActiveSession(sess)}
+                                className="min-h-[34px] px-3 py-1.5 rounded-xl bg-white hover:bg-red-50 border border-red-200 disabled:opacity-60 text-red-700 text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                              >
+                                <LogOut className="w-3.5 h-3.5" />
+                                <span>
+                                  {t('تسجيل خروج / طرد الجهاز فوراً 🚪', 'Force Log Out Now 🚪')}
+                                </span>
+                              </button>
+                            </div>
+
+                            {isEditingExpiry && (
+                              <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-2.5 flex flex-wrap items-center gap-2">
+                                <span className="text-[11px] font-black text-amber-950">
+                                  {t('اختر مدة بقاء الجلسة:', 'Expire session after:')}
+                                </span>
+                                {(
+                                  [
+                                    { h: 1 as const, ar: 'ساعة واحدة', en: '1 Hour' },
+                                    { h: 24 as const, ar: '24 ساعة', en: '24 Hours' },
+                                    { h: 168 as const, ar: '7 أيام', en: '7 Days' },
+                                    { h: 720 as const, ar: '30 يوماً', en: '30 Days' },
+                                  ] as const
+                                ).map((opt) => (
+                                  <button
+                                    key={opt.h}
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={() => void handleUpdateSessionExpiry(sess, opt.h)}
+                                    className="px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-[#0F2438] text-[11px] font-black transition cursor-pointer disabled:opacity-50"
+                                  >
+                                    {t(opt.ar, opt.en)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">
+                      {t('لا توجد جلسات نشطة مسجلة حالياً.', 'No active sessions recorded yet.')}
+                    </p>
+                  )}
+
+                  {Array.isArray(activeTraveler.blockedDevices) &&
+                    activeTraveler.blockedDevices.length > 0 && (
+                      <div className="pt-2 border-t border-slate-200 space-y-2">
+                        <p className="text-[11px] font-black text-red-800 flex items-center gap-1.5">
+                          <Ban className="w-3.5 h-3.5" />
+                          <span>
+                            {t(
+                              `الأجهزة المحظورة (${activeTraveler.blockedDevices.length})`,
+                              `Blocked Devices (${activeTraveler.blockedDevices.length})`
+                            )}
+                          </span>
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {activeTraveler.blockedDevices.map((blockedId) => (
+                            <div
+                              key={blockedId}
+                              className="inline-flex items-center gap-2 px-2.5 py-1 rounded-xl bg-red-50 border border-red-200 text-[11px]"
+                            >
+                              <span className="font-mono text-red-900" dir="ltr">
+                                {blockedId.slice(0, 14)}…
+                              </span>
+                              <button
+                                type="button"
+                                disabled={sessionActionBusyId === blockedId}
+                                onClick={() => void handleUnblockDevice(blockedId)}
+                                className="font-black text-[#0284C7] hover:underline cursor-pointer disabled:opacity-50"
+                              >
+                                {t('فك الحظر', 'Unblock')}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
               {/* Block A: Trusted Devices List */}

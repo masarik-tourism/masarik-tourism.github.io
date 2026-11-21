@@ -8,7 +8,8 @@ export type PushNotificationAction =
   | 'client_folder'
   | 'chat'
   | 'documents'
-  | 'orders';
+  | 'orders'
+  | 'account';
 
 export interface PushDeepLinkPayload {
   role: 'admin' | 'client';
@@ -438,6 +439,7 @@ export function subscribeForegroundFcmMessages(
           'chat',
           'documents',
           'orders',
+          'account',
         ];
         const action: PushNotificationAction = validActions.includes(
           data.action as PushNotificationAction

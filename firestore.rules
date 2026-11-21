@@ -64,6 +64,9 @@ service cloud.firestore {
         'pinUpdatedAt',
         'trustedDevices',
         'pendingLoginRequests',
+        'pendingDevices',
+        'activeSessions',
+        'blockedDevices',
         'verified',
         'accountStatus',
         'verifiedAt',
@@ -202,6 +205,69 @@ service cloud.firestore {
               && data.pendingLoginRequests[0].expiresAt.size() <= 64
             )
           )
+        )
+      )
+      && (
+        !('pendingDevices' in data)
+        || (
+          data.pendingDevices is list
+          && data.pendingDevices.size() <= 15
+          && (
+            data.pendingDevices.size() == 0
+            || (
+              data.pendingDevices[0] is map
+              && data.pendingDevices[0].requestId is string
+              && data.pendingDevices[0].requestId.size() >= 6
+              && data.pendingDevices[0].requestId.size() <= 80
+              && data.pendingDevices[0].deviceId is string
+              && data.pendingDevices[0].deviceId.size() >= 8
+              && data.pendingDevices[0].deviceId.size() <= 64
+              && data.pendingDevices[0].deviceName is string
+              && data.pendingDevices[0].deviceName.size() <= 120
+              && data.pendingDevices[0].status is string
+              && data.pendingDevices[0].status in ['pending', 'approved_trusted', 'approved_temporary', 'rejected', 'blocked', 'expired']
+              && data.pendingDevices[0].createdAt is string
+              && data.pendingDevices[0].createdAt.size() <= 64
+              && data.pendingDevices[0].expiresAt is string
+              && data.pendingDevices[0].expiresAt.size() <= 64
+            )
+          )
+        )
+      )
+      && (
+        !('activeSessions' in data)
+        || (
+          data.activeSessions is list
+          && data.activeSessions.size() <= 20
+          && (
+            data.activeSessions.size() == 0
+            || (
+              data.activeSessions[0] is map
+              && data.activeSessions[0].sessionId is string
+              && data.activeSessions[0].sessionId.size() >= 6
+              && data.activeSessions[0].sessionId.size() <= 100
+              && data.activeSessions[0].deviceId is string
+              && data.activeSessions[0].deviceId.size() >= 8
+              && data.activeSessions[0].deviceId.size() <= 64
+              && data.activeSessions[0].deviceName is string
+              && data.activeSessions[0].deviceName.size() <= 120
+              && data.activeSessions[0].mode is string
+              && data.activeSessions[0].mode in ['trusted', 'temporary']
+              && data.activeSessions[0].loggedInAt is string
+              && data.activeSessions[0].loggedInAt.size() <= 64
+              && data.activeSessions[0].lastActiveAt is string
+              && data.activeSessions[0].lastActiveAt.size() <= 64
+              && (!('expiresAt' in data.activeSessions[0]) || data.activeSessions[0].expiresAt == null || (data.activeSessions[0].expiresAt is string && data.activeSessions[0].expiresAt.size() <= 64))
+            )
+          )
+        )
+      )
+      && (
+        !('blockedDevices' in data)
+        || (
+          data.blockedDevices is list
+          && data.blockedDevices.size() <= 25
+          && (data.blockedDevices.size() == 0 || (data.blockedDevices[0] is string && data.blockedDevices[0].size() <= 64))
         )
       )
       && (
@@ -491,6 +557,9 @@ service cloud.firestore {
           'pinUpdatedAt',
           'trustedDevices',
           'pendingLoginRequests',
+          'pendingDevices',
+          'activeSessions',
+          'blockedDevices',
           'verified',
           'accountStatus',
           'verifiedAt',
@@ -621,6 +690,76 @@ service cloud.firestore {
       allow create, update: if settingId == 'notifications'
         && isValidNotificationSettings(incoming());
       allow delete: if false;
+    }
+
+    // Validation Blueprint: DeviceApproval (/deviceApprovals/{requestId})
+    function isValidDeviceApproval(data, requestId) {
+      return data.keys().hasAll([
+        'requestId',
+        'phoneId',
+        'deviceId',
+        'deviceName',
+        'status',
+        'createdAt',
+        'expiresAt'
+      ])
+      && data.keys().hasOnly([
+        'requestId',
+        'phoneId',
+        'deviceId',
+        'deviceName',
+        'status',
+        'approvalMode',
+        'temporaryDurationHours',
+        'createdAt',
+        'expiresAt',
+        'respondedAt'
+      ])
+      && data.requestId is string
+      && data.requestId == requestId
+      && isValidId(data.requestId)
+      && data.requestId.size() >= 6
+      && data.requestId.size() <= 80
+      && isValidPhoneId(data.phoneId)
+      && data.deviceId is string
+      && data.deviceId.size() >= 8
+      && data.deviceId.size() <= 64
+      && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.deviceName is string
+      && data.deviceName.size() >= 1
+      && data.deviceName.size() <= 120
+      && data.status is string
+      && data.status in ['pending', 'approved_trusted', 'approved_temporary', 'rejected', 'blocked', 'expired']
+      && (!('approvalMode' in data) || (data.approvalMode is string && data.approvalMode in ['trusted', 'temporary']))
+      && (!('temporaryDurationHours' in data) || (data.temporaryDurationHours is int && data.temporaryDurationHours >= 1 && data.temporaryDurationHours <= 24))
+      && data.createdAt is string
+      && data.createdAt.size() <= 64
+      && data.expiresAt is string
+      && data.expiresAt.size() <= 64
+      && isOptionalString(data, 'respondedAt', 64);
+    }
+
+    // Cross-Device Login Approval Requests (/deviceApprovals/{requestId})
+    match /deviceApprovals/{requestId} {
+      allow get: if isValidId(requestId);
+      allow list: if isValidPhoneId(resource.data.phoneId);
+      allow create: if isValidId(requestId)
+        && isValidDeviceApproval(incoming(), requestId)
+        && exists(/databases/$(database)/documents/clients/$(incoming().phoneId));
+      allow update: if isValidId(requestId)
+        && isValidDeviceApproval(incoming(), requestId)
+        && incoming().requestId == existing().requestId
+        && incoming().phoneId == existing().phoneId
+        && incoming().deviceId == existing().deviceId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'status',
+          'approvalMode',
+          'temporaryDurationHours',
+          'expiresAt',
+          'respondedAt'
+        ]);
+      allow delete: if isValidId(requestId) && resource != null;
     }
 
     // Validation Blueprint: ChatThread (/chats/{phoneId})

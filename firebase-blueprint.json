@@ -128,6 +128,18 @@
           "type": "array",
           "description": "Bounded list (max 10) of new-device login approval requests sent to the client's previously trusted device."
         },
+        "pendingDevices": {
+          "type": "array",
+          "description": "Bounded list (max 15) of pending new-device login approval requests mirrored on the client document."
+        },
+        "activeSessions": {
+          "type": "array",
+          "description": "Bounded list (max 20) of currently connected device sessions (trusted permanent or temporary with expiresAt)."
+        },
+        "blockedDevices": {
+          "type": "array",
+          "description": "Bounded list (max 25) of deviceIds blocked by the client."
+        },
         "verified": {
           "type": "boolean",
           "description": "Whether the client account has been verified."
@@ -558,6 +570,68 @@
         "adminFcmTokens",
         "updatedAt"
       ]
+    },
+    "DeviceApproval": {
+      "title": "New Device Login Approval Request",
+      "description": "Real-time cross-device login approval record inside /deviceApprovals/{requestId}.",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phoneId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 20,
+          "pattern": "^[0-9]{8,20}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved_trusted", "approved_temporary", "rejected", "blocked", "expired"]
+        },
+        "approvalMode": {
+          "type": "string",
+          "enum": ["trusted", "temporary"]
+        },
+        "temporaryDurationHours": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "expiresAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "respondedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "requestId",
+        "phoneId",
+        "deviceId",
+        "deviceName",
+        "status",
+        "createdAt",
+        "expiresAt"
+      ]
     }
   },
   "firestore": {
@@ -580,6 +654,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/NotificationSettings" },
       "description": "Canonical settings document ('notifications') holding adminFcmTokens for background push delivery."
+    },
+    "/deviceApprovals/{requestId}": {
+      "schema": { "$ref": "#/entities/DeviceApproval" },
+      "description": "Real-time cross-device login approval requests."
     },
     "/chats/{phoneId}": {
       "schema": { "$ref": "#/entities/ChatThread" },

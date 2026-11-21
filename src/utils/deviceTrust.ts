@@ -142,8 +142,8 @@ export function readStoredSessionMeta(): TravelerSessionMeta | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as TravelerSessionMeta;
     if (!parsed || typeof parsed.phone !== 'string') return null;
-    // Security guard: temporary sessions must never survive a browser close
-    if (parsed.mode === 'temporary') {
+    // Security guard: public-browser temporary sessions without explicit persistence must never survive a browser close
+    if (parsed.mode === 'temporary' && parsed.persistInLocalStorage !== true) {
       window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
       return null;
     }
@@ -161,7 +161,7 @@ export function writeStoredSessionMeta(meta: TravelerSessionMeta | null): void {
       window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
       return;
     }
-    if (meta.mode === 'temporary') {
+    if (meta.mode === 'temporary' && meta.persistInLocalStorage !== true) {
       window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
       window.sessionStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
     } else {
@@ -197,8 +197,47 @@ export function consumeSessionExpiredNotice(): boolean {
 }
 
 export function getRemainingTemporaryMinutes(meta: TravelerSessionMeta | null): number | null {
-  if (!meta || meta.mode !== 'temporary' || !meta.expiresAt) return null;
+  if (!meta || !meta.expiresAt) return null;
   const remainingMs = meta.expiresAt - Date.now();
   if (remainingMs <= 0) return 0;
   return Math.max(1, Math.ceil(remainingMs / 60000));
+}
+
+export function formatRemainingSessionDuration(
+  expiresAt: string | number | null | undefined,
+  lang: 'ar' | 'en' = 'ar'
+): string {
+  if (expiresAt === null || expiresAt === undefined || expiresAt === '') {
+    return lang === 'en' ? 'Permanent (Never expires)' : 'دائم (لا ينتهي تلقائياً)';
+  }
+  const expMs = typeof expiresAt === 'number' ? expiresAt : Date.parse(String(expiresAt));
+  if (!Number.isFinite(expMs)) {
+    return lang === 'en' ? 'Active' : 'نشط';
+  }
+  const diffMs = expMs - Date.now();
+  if (diffMs <= 0) {
+    return lang === 'en' ? 'Expired' : 'منتهية الصلاحية';
+  }
+  const totalMin = Math.max(1, Math.ceil(diffMs / 60000));
+  if (totalMin < 60) {
+    return lang === 'en' ? `${totalMin}m remaining` : `متبقي ${totalMin} دقيقة`;
+  }
+  const totalHours = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  if (totalHours < 24) {
+    if (lang === 'en') {
+      return remMin > 0 ? `${totalHours}h ${remMin}m remaining` : `${totalHours}h remaining`;
+    }
+    return remMin > 0
+      ? `متبقي ${totalHours} ساعة و ${remMin} دقيقة`
+      : `متبقي ${totalHours} ساعة`;
+  }
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  if (lang === 'en') {
+    return remHours > 0 ? `${days}d ${remHours}h remaining` : `${days}d remaining`;
+  }
+  return remHours > 0
+    ? `متبقي ${days} يوم و ${remHours} ساعة`
+    : `متبقي ${days} ${days === 1 ? 'يوم' : days === 2 ? 'يومين' : days <= 10 ? 'أيام' : 'يوماً'}`;
 }

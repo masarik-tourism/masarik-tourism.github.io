@@ -29,6 +29,7 @@ import {
   TRAVELERS_UPDATED_EVENT,
   TravelerProfileDraft,
   activateViaMagicLinkCloud,
+  ensureCurrentSessionRegisteredCloud,
   getActivePhone,
   getActiveTraveler,
   getAllTravelers,
@@ -227,9 +228,9 @@ export const App: React.FC = () => {
     };
   }, [lang]);
 
-  // Active 60-minute Temporary Session Auto-Logout Guard (handles live countdown & sleep/wake)
+  // Active Timed Session Auto-Logout Guard (handles 1h/24h/7d/30d live countdown & sleep/wake)
   useEffect(() => {
-    if (!sessionMeta || sessionMeta.mode !== 'temporary' || !sessionMeta.expiresAt) return;
+    if (!sessionMeta || !sessionMeta.expiresAt) return;
 
     const triggerExpiry = () => {
       logoutTravelerSession('expired');
@@ -239,8 +240,8 @@ export const App: React.FC = () => {
       setPendingPostAuthFlow(null);
       setSessionExpiredAlert(
         lang === 'en'
-          ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
-          : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+          ? 'Your timed session has expired for security. Please sign in again.'
+          : 'انتهت مدة الجلسة المحددة حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
       );
       setTravelerSection('account');
     };
@@ -251,22 +252,29 @@ export const App: React.FC = () => {
       return;
     }
 
-    const timeoutId = window.setTimeout(triggerExpiry, msRemaining + 50);
+    // Cap single setTimeout safely under 2^31-1 ms (for 30-day sessions) and poll every 10s
+    const safeTimeoutMs = Math.min(msRemaining + 50, 2_000_000_000);
+    const timeoutId = window.setTimeout(() => {
+      if (sessionMeta.expiresAt && Date.now() >= sessionMeta.expiresAt) {
+        triggerExpiry();
+      }
+    }, safeTimeoutMs);
     const intervalId = window.setInterval(() => {
       if (sessionMeta.expiresAt && Date.now() >= sessionMeta.expiresAt) {
         triggerExpiry();
       }
-    }, 15000);
+    }, 10_000);
 
     return () => {
       window.clearTimeout(timeoutId);
       window.clearInterval(intervalId);
     };
-  }, [sessionMeta, lang]);
+  }, [sessionMeta, lang, updatePendingOtpPhone]);
 
-  // Real-time cloud subscription for currently signed-in traveler
+  // Real-time cloud subscription & session backfill for currently signed-in traveler
   useEffect(() => {
     if (!activeTravelerPhone) return;
+    void ensureCurrentSessionRegisteredCloud(activeTravelerPhone);
     return subscribeActiveTravelerCloud(activeTravelerPhone);
   }, [activeTravelerPhone]);
 
@@ -540,6 +548,8 @@ export const App: React.FC = () => {
           ? 'documents'
           : payload.action === 'orders'
           ? 'orders'
+          : payload.action === 'account'
+          ? 'account'
           : 'chat';
       setTravelerSection(targetSub);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -666,6 +676,7 @@ export const App: React.FC = () => {
             'chat',
             'documents',
             'orders',
+            'account',
           ];
           const safeAction: PushNotificationAction = validActions.includes(
             pushAction as PushNotificationAction
