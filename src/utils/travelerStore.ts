@@ -4417,7 +4417,7 @@ export function computeStorageUsageStats(profiles: TravelerProfile[]): StorageMo
 
 export function previewOldCompletedAttachmentsCleanup(
   profiles: TravelerProfile[],
-  olderThanDays: 60 | 90
+  olderThanDays: 30 | 60 | 90
 ): { eligibleOrdersCount: number; eligibleFilesCount: number; estimatedFreedBytes: number } {
   const cutoffMs = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
   let eligibleOrdersCount = 0;
@@ -4456,11 +4456,11 @@ export function previewOldCompletedAttachmentsCleanup(
 }
 
 /**
- * Deletes Firebase Storage attachments for completed orders older than 60 or 90 days
+ * Deletes Firebase Storage attachments for completed orders older than 30, 60, or 90 days
  * to reclaim free-tier storage quota while keeping 100% of client profiles and order metadata intact.
  */
 export async function cleanupCompletedOrderAttachmentsCloud(
-  olderThanDays: 60 | 90
+  olderThanDays: 30 | 60 | 90
 ): Promise<{ cleanedOrdersCount: number; deletedFilesCount: number; freedBytes: number }> {
   const cutoffMs = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
   const all = getAllTravelers();

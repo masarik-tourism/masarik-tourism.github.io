@@ -314,6 +314,11 @@
           "description": "Optional Firebase Cloud Messaging Web Push VAPID public key.",
           "maxLength": 256
         },
+        "retentionDays": {
+          "type": "number",
+          "description": "Saved attachment retention period in days (30, 60, or 90) for completed orders cleanup.",
+          "enum": [30, 60, 90]
+        },
         "updatedAt": {
           "type": "string",
           "maxLength": 64

@@ -130,10 +130,14 @@ import {
   AnnouncementStyle,
   DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
   DEFAULT_SITE_CONFIG,
+  RetentionDaysOption,
   SiteConfig,
+  fetchSiteConfigFromCloud,
   getSiteConfig,
   resetSiteConfig,
   saveSiteConfig,
+  saveSiteConfigToCloudStrict,
+  useSiteConfig,
 } from '../utils/siteConfigStore';
 import {
   deleteCmsCustomItem,
@@ -268,7 +272,16 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   } | null>(null);
 
   // Storage Quota Monitor & Old Completed Attachments Cleanup
-  const [cleanupAgeDays, setCleanupAgeDays] = useState<60 | 90>(60);
+  const liveSiteConfig = useSiteConfig();
+  const [cleanupAgeDays, setCleanupAgeDays] = useState<RetentionDaysOption>(
+    () => getSiteConfig().retentionDays
+  );
+  const [isSavingRetention, setIsSavingRetention] = useState(false);
+  const [retentionFeedback, setRetentionFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const retentionDirtyRef = useRef(false);
   const [confirmCleanupStep, setConfirmCleanupStep] = useState(false);
   const [isCleaningStorage, setIsCleaningStorage] = useState(false);
   const [cleanupFeedback, setCleanupFeedback] = useState<string | null>(null);
@@ -402,6 +415,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     loadTravelers();
     setSiteDraft(getSiteConfig());
     setSubAdmins(getSubAdmins());
+    void fetchSiteConfigFromCloud().then((fresh) => {
+      setSiteDraft(fresh);
+      if (!retentionDirtyRef.current) {
+        setCleanupAgeDays(fresh.retentionDays);
+      }
+    });
     const onTravelersUpdate = () => loadTravelers();
     const onAuthUpdate = () => setSubAdmins(getSubAdmins());
     window.addEventListener(TRAVELERS_UPDATED_EVENT, onTravelersUpdate);
@@ -411,6 +430,17 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       window.removeEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
     };
   }, []);
+
+  useEffect(() => {
+    setSiteDraft((prev) =>
+      prev.retentionDays === liveSiteConfig.retentionDays
+        ? prev
+        : { ...prev, retentionDays: liveSiteConfig.retentionDays }
+    );
+    if (!retentionDirtyRef.current) {
+      setCleanupAgeDays(liveSiteConfig.retentionDays);
+    }
+  }, [liveSiteConfig.retentionDays]);
 
   // Live Firestore Chat Threads Inbox Subscription & 15s Presence UI Ticker
   useEffect(() => {
@@ -1003,6 +1033,45 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setReplacingDeliverable(null);
     }
     loadTravelers();
+  };
+
+  const handleSaveRetentionDays = async () => {
+    if ((!canManageClients && !isSuperAdmin) || !isEditUnlocked || isSavingRetention) return;
+    setIsSavingRetention(true);
+    setRetentionFeedback(null);
+    try {
+      const res = await saveSiteConfigToCloudStrict({
+        ...siteDraft,
+        retentionDays: cleanupAgeDays,
+      });
+      setSiteDraft(res.config);
+      if (res.ok) {
+        retentionDirtyRef.current = false;
+        setRetentionFeedback({
+          ok: true,
+          text: t('تم حفظ مدة الحذف بنجاح', 'Retention period saved successfully'),
+        });
+        setTimeout(() => setRetentionFeedback(null), 4500);
+      } else {
+        setRetentionFeedback({
+          ok: false,
+          text: t(
+            'تعذر حفظ مدة الحذف في Firestore — يرجى التحقق من نشر قواعد Firestore والاتصال.',
+            'Could not save retention period to Firestore — check rules & connection.'
+          ),
+        });
+      }
+    } catch {
+      setRetentionFeedback({
+        ok: false,
+        text: t(
+          'تعذر حفظ مدة الحذف في Firestore — يرجى التحقق من صلاحيات وقواعد Firestore.',
+          'Could not save retention period to Firestore — verify Firestore rules.'
+        ),
+      });
+    } finally {
+      setIsSavingRetention(false);
+    }
   };
 
   const handleRunStorageCleanup = async () => {
@@ -5381,12 +5450,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 )}
 
                 {/* Smart 1-Click Cleanup Tool (Locked unless isEditUnlocked) */}
-                <fieldset disabled={!isEditUnlocked} className="disabled:opacity-65">
-                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <fieldset disabled={!isEditUnlocked} className="disabled:opacity-65 space-y-3">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
                     <div className="space-y-1">
-                      <span className="text-xs font-black text-[#0F2438] block">
-                        {t('تنظيف مرفقات الطلبات القديمة المكتملة', 'Clean Up Old Completed Order Attachments')}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-black text-[#0F2438]">
+                          {t('تنظيف مرفقات الطلبات القديمة المكتملة', 'Clean Up Old Completed Order Attachments')}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-white border border-slate-200 text-[10.5px] font-bold text-slate-600 tabular-nums">
+                          {t(
+                            `المحفوظ: ${liveSiteConfig.retentionDays} يوم`,
+                            `Saved: ${liveSiteConfig.retentionDays} days`
+                          )}
+                        </span>
+                      </div>
                       <p className="text-[11px] text-slate-600 leading-relaxed tabular-nums">
                         {t(
                           `العناصر المؤهلة (أقدم من ${cleanupAgeDays} يوماً): ${cleanupPreview.eligibleOrdersCount} طلب مكتمل (${cleanupPreview.eligibleFilesCount} ملف · ~${formatStorageSize(cleanupPreview.estimatedFreedBytes)}) — تُحذف المرفقات فقط مع الاحتفاظ الكامل ببيانات وسجلات العملاء.`,
@@ -5395,37 +5472,38 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       </p>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <div className="inline-flex rounded-xl border border-slate-300 bg-white p-0.5 text-[11px] font-black">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCleanupAgeDays(60);
-                            setConfirmCleanupStep(false);
-                          }}
-                          className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition ${
-                            cleanupAgeDays === 60
-                              ? 'bg-[#0F2438] text-[#E5C887]'
-                              : 'text-slate-600 hover:bg-slate-100'
-                          }`}
-                        >
-                          {t('أقدم من 60 يوم', '60+ Days')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setCleanupAgeDays(90);
-                            setConfirmCleanupStep(false);
-                          }}
-                          className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition ${
-                            cleanupAgeDays === 90
-                              ? 'bg-[#0F2438] text-[#E5C887]'
-                              : 'text-slate-600 hover:bg-slate-100'
-                          }`}
-                        >
-                          {t('أقدم من 90 يوم', '90+ Days')}
-                        </button>
+                    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 shrink-0">
+                      <div className="grid grid-cols-3 gap-1 rounded-xl border border-slate-300 bg-white p-1 text-[11px] font-black">
+                        {([30, 60, 90] as RetentionDaysOption[]).map((days) => (
+                          <button
+                            key={days}
+                            type="button"
+                            onClick={() => {
+                              retentionDirtyRef.current = true;
+                              setCleanupAgeDays(days);
+                              setConfirmCleanupStep(false);
+                              setRetentionFeedback(null);
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg cursor-pointer transition text-center whitespace-nowrap tabular-nums ${
+                              cleanupAgeDays === days
+                                ? 'bg-[#0F2438] text-[#E5C887] shadow-xs'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            {t(`${days} يوم`, `${days} Days`)}
+                          </button>
+                        ))}
                       </div>
+
+                      <button
+                        type="button"
+                        disabled={isSavingRetention}
+                        onClick={() => void handleSaveRetentionDays()}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
+                      >
+                        {isSavingRetention && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>{t('حفظ الإعدادات ✅', 'Save Settings ✅')}</span>
+                      </button>
 
                       {confirmCleanupStep ? (
                         <div className="flex items-center gap-1.5">
@@ -5450,7 +5528,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         <button
                           type="button"
                           onClick={() => setConfirmCleanupStep(true)}
-                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span>{t('تنظيف المرفقات القديمة الآن', 'Clean Up Now')}</span>
@@ -5459,6 +5537,23 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     </div>
                   </div>
                 </fieldset>
+
+                {retentionFeedback && (
+                  <div
+                    className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                      retentionFeedback.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-red-50 border-red-200 text-red-900'
+                    }`}
+                  >
+                    {retentionFeedback.ok ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                    )}
+                    <span>{retentionFeedback.text}</span>
+                  </div>
+                )}
 
                 {cleanupFeedback && (
                   <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2">

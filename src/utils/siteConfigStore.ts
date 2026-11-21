@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { doc, getDoc, getDocFromServer, onSnapshot, setDoc } from 'firebase/firestore';
 import { TravelRepository } from '../data/travelData';
 import { OperationType, db, handleFirestoreError } from '../firebase';
 import { DriveEndpointScope, DriveStorageEndpoint } from '../types/travel';
 
 export type AnnouncementStyle = 'gold' | 'red' | 'green';
+export type RetentionDaysOption = 30 | 60 | 90;
 
 export const DEFAULT_PRIMARY_DRIVE_WEBAPP_URL =
   'https://script.google.com/macros/s/AKfycbxk3bwCMH7e6NzZKKZhbMCLBbVZT8BKrR_y5IoE_LyTqL0Gqw4-kc80mzH0J_EbqnSENw/exec';
@@ -22,6 +23,7 @@ export interface SiteConfig {
   primaryDriveWebAppUrl: string;
   additionalDriveWebApps: DriveStorageEndpoint[];
   fcmVapidKey?: string;
+  retentionDays: RetentionDaysOption;
 }
 
 const SITE_CONFIG_STORAGE_KEY = 'masarik_site_config_v1';
@@ -41,7 +43,15 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   primaryDriveWebAppUrl: DEFAULT_PRIMARY_DRIVE_WEBAPP_URL,
   additionalDriveWebApps: [],
   fcmVapidKey: '',
+  retentionDays: 60,
 };
+
+export function sanitizeRetentionDays(rawVal: unknown): RetentionDaysOption {
+  const num = Number(rawVal);
+  if (num === 30) return 30;
+  if (num === 90) return 90;
+  return 60;
+}
 
 function sanitizeHttpsUrl(rawUrl: unknown, fallback = ''): string {
   const trimmed = String(rawUrl || '').trim();
@@ -102,6 +112,7 @@ function sanitizeSiteConfigPayload(cfg: SiteConfig) {
     ),
     additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(cfg.additionalDriveWebApps),
     ...(cfg.fcmVapidKey ? { fcmVapidKey: String(cfg.fcmVapidKey).trim().slice(0, 256) } : {}),
+    retentionDays: sanitizeRetentionDays(cfg.retentionDays),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -158,6 +169,7 @@ export function subscribeSiteConfigCloud(): () => void {
         ),
         additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(data.additionalDriveWebApps),
         fcmVapidKey: data.fcmVapidKey ? String(data.fcmVapidKey).trim().slice(0, 256) : '',
+        retentionDays: sanitizeRetentionDays(data.retentionDays),
       };
       writeSiteConfigLocalOnly(merged);
     },
@@ -169,6 +181,62 @@ export function subscribeSiteConfigCloud(): () => void {
       console.warn('Site config cloud listener warning:', msg);
     }
   );
+}
+
+export async function fetchSiteConfigFromCloud(): Promise<SiteConfig> {
+  const ref = doc(db, 'site_config', 'general');
+  try {
+    let snap;
+    try {
+      snap = await getDocFromServer(ref);
+    } catch {
+      snap = await getDoc(ref);
+    }
+    if (!snap.exists()) return getSiteConfig();
+    const data = snap.data() as Partial<SiteConfig>;
+    const current = getSiteConfig();
+    const merged: SiteConfig = {
+      ...current,
+      announcementEnabled:
+        typeof data.announcementEnabled === 'boolean'
+          ? data.announcementEnabled
+          : current.announcementEnabled,
+      announcementTextAr: data.announcementTextAr ?? current.announcementTextAr,
+      announcementTextEn: data.announcementTextEn ?? current.announcementTextEn,
+      announcementStyle:
+        data.announcementStyle === 'red' || data.announcementStyle === 'green'
+          ? data.announcementStyle
+          : data.announcementStyle === 'gold'
+          ? 'gold'
+          : current.announcementStyle,
+      phoneNumber: data.phoneNumber ?? current.phoneNumber,
+      workingHoursAr: data.workingHoursAr ?? current.workingHoursAr,
+      workingHoursEn: data.workingHoursEn ?? current.workingHoursEn,
+      heroHighlightAr: data.heroHighlightAr ?? current.heroHighlightAr,
+      heroHighlightEn: data.heroHighlightEn ?? current.heroHighlightEn,
+      primaryDriveWebAppUrl: sanitizeHttpsUrl(
+        data.primaryDriveWebAppUrl,
+        current.primaryDriveWebAppUrl || DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
+      ),
+      additionalDriveWebApps:
+        data.additionalDriveWebApps !== undefined
+          ? sanitizeAdditionalDriveEndpoints(data.additionalDriveWebApps)
+          : current.additionalDriveWebApps,
+      fcmVapidKey: data.fcmVapidKey ? String(data.fcmVapidKey).trim().slice(0, 256) : current.fcmVapidKey,
+      retentionDays:
+        data.retentionDays !== undefined
+          ? sanitizeRetentionDays(data.retentionDays)
+          : current.retentionDays,
+    };
+    writeSiteConfigLocalOnly(merged);
+    return merged;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, SITE_GENERAL_DOC_PATH);
+    }
+    return getSiteConfig();
+  }
 }
 
 export function getSiteConfig(): SiteConfig {
@@ -185,6 +253,7 @@ export function getSiteConfig(): SiteConfig {
         DEFAULT_PRIMARY_DRIVE_WEBAPP_URL
       ),
       additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(parsed.additionalDriveWebApps),
+      retentionDays: sanitizeRetentionDays(parsed.retentionDays),
     };
   } catch {
     return DEFAULT_SITE_CONFIG;
@@ -195,10 +264,37 @@ export function saveSiteConfig(partial: Partial<SiteConfig>): SiteConfig {
   const next: SiteConfig = {
     ...getSiteConfig(),
     ...partial,
+    ...(partial.retentionDays !== undefined
+      ? { retentionDays: sanitizeRetentionDays(partial.retentionDays) }
+      : {}),
   };
   writeSiteConfigLocalOnly(next);
   void syncSiteConfigToCloud(next);
   return next;
+}
+
+export async function saveSiteConfigToCloudStrict(
+  partial: Partial<SiteConfig>
+): Promise<{ ok: boolean; config: SiteConfig; error?: string }> {
+  const next: SiteConfig = {
+    ...getSiteConfig(),
+    ...partial,
+    ...(partial.retentionDays !== undefined
+      ? { retentionDays: sanitizeRetentionDays(partial.retentionDays) }
+      : {}),
+  };
+  writeSiteConfigLocalOnly(next);
+  const payload = sanitizeSiteConfigPayload(next);
+  try {
+    await setDoc(doc(db, 'site_config', 'general'), payload);
+    return { ok: true, config: next };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, SITE_GENERAL_DOC_PATH);
+    }
+    return { ok: false, config: next, error: msg };
+  }
 }
 
 export function resetSiteConfig(): SiteConfig {

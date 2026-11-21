@@ -416,6 +416,7 @@ service cloud.firestore {
         'primaryDriveWebAppUrl',
         'additionalDriveWebApps',
         'fcmVapidKey',
+        'retentionDays',
         'updatedAt'
       ])
       && data.announcementEnabled is bool
@@ -455,6 +456,7 @@ service cloud.firestore {
         )
       )
       && isOptionalString(data, 'fcmVapidKey', 256)
+      && (!('retentionDays' in data) || (data.retentionDays is int && data.retentionDays in [30, 60, 90]))
       && isOptionalString(data, 'updatedAt', 64);
     }
 
