@@ -54,6 +54,10 @@ async function fetchGeminiKeyFromFirestore(): Promise<string> {
   }
 }
 
+const GEMINI_PRIMARY_MODEL = 'gemini-3.8-flash';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
+const GEMINI_MODEL_CANDIDATES = [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL] as const;
+
 async function resolveGeminiClient(): Promise<{ ai: GoogleGenAI | null; source: 'firestore' | 'env' | 'none' }> {
   const firestoreKey = await fetchGeminiKeyFromFirestore();
   const envKey = String(process.env.GEMINI_API_KEY || '').trim();
@@ -72,6 +76,26 @@ async function resolveGeminiClient(): Promise<{ ai: GoogleGenAI | null; source: 
     }),
     source: firestoreKey ? 'firestore' : 'env',
   };
+}
+
+async function generateContentWithModelFallback(
+  ai: GoogleGenAI,
+  request: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>
+) {
+  let lastError: unknown;
+  for (const model of GEMINI_MODEL_CANDIDATES) {
+    try {
+      return await ai.models.generateContent({
+        ...request,
+        model,
+      });
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Failed to generate content with Gemini models.');
 }
 
 app.post('/api/passport-check', async (req, res) => {
@@ -193,8 +217,7 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
 
 5. اكتب ملخصاً عربياً واضحاً في summaryAr، وقائمة المتطلبات في missingRequirements، وملاحظة الثقة في confidenceNote.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+    const response = await generateContentWithModelFallback(ai, {
       contents: {
         parts: [
           {
@@ -348,8 +371,7 @@ Return JSON:
 - issueAr: concise Arabic warning telling the user what is wrong and to re-upload a clearer photo if isClear is false (empty string if clear).
 - issueEn: concise English warning if isClear is false (empty string if clear).`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+    const response = await generateContentWithModelFallback(ai, {
       contents: {
         parts: [
           { inlineData: { mimeType, data: cleanBase64 } },

@@ -1530,8 +1530,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           ok: true,
           text: trimmedKey
             ? t(
-                'تم حفظ المفتاح وتفعيل الذكاء الاصطناعي (gemini-2.5-flash) في قاعدة البيانات بنجاح ✨',
-                'Gemini API Key saved & AI (gemini-2.5-flash) enabled in Firestore ✨'
+                'تم حفظ المفتاح وتفعيل الذكاء الاصطناعي (gemini-3.8-flash) في قاعدة البيانات بنجاح ✨',
+                'Gemini API Key saved & AI (gemini-3.8-flash) enabled in Firestore ✨'
               )
             : t('تم مسح مفتاح الذكاء الاصطناعي من الإعدادات.', 'Gemini API Key cleared from settings.'),
         });
@@ -5834,8 +5834,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         </h4>
                         <p className="text-[11px] text-slate-500">
                           {t(
-                            'يُحفظ هذا المفتاح بشكل دائم في قاعدة البيانات (Firestore) لقراءة جوازات السفر وفحص جودة المستندات بـ gemini-2.5-flash تلقائياً عبر الموقع وتطبيق الأندرويد.',
-                            'Permanently stored in Firestore (site_config/general) so Smart Passport Reader & clarity checks (gemini-2.5-flash) stay active across Web, GitHub Pages, and Android.'
+                            'يُحفظ هذا المفتاح بشكل دائم في قاعدة البيانات (Firestore) لقراءة جوازات السفر وفحص جودة المستندات بـ gemini-3.8-flash تلقائياً عبر الموقع وتطبيق الأندرويد.',
+                            'Permanently stored in Firestore (site_config/general) so Smart Passport Reader & clarity checks (gemini-3.8-flash) stay active across Web, GitHub Pages, and Android.'
                           )}
                         </p>
                       </div>

@@ -7,7 +7,9 @@ import {
 import { evaluatePassportValidity } from './passportValidity';
 import { fetchSiteConfigFromCloud, getSiteConfig } from './siteConfigStore';
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_PRIMARY_MODEL = 'gemini-3.8-flash';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
+const GEMINI_MODEL_CANDIDATES = [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL] as const;
 
 export interface GeminiPassportCallResponse {
   ok: boolean;
@@ -113,6 +115,38 @@ async function resolveFirestoreGeminiKey(): Promise<string> {
   }
 }
 
+async function postGeminiWithModelFallback<T>(
+  apiKey: string,
+  payload: Record<string, unknown>
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (const model of GEMINI_MODEL_CANDIDATES) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(
+      apiKey
+    )}`;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        lastError = new Error(errText || `Gemini API HTTP ${res.status}`);
+        continue;
+      }
+
+      return (await res.json()) as T;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(`Gemini API call failed for ${model}`);
+    }
+  }
+
+  throw lastError || new Error('Gemini API request failed.');
+}
+
 async function callGeminiDirectPassportScan(
   apiKey: string,
   params: {
@@ -203,104 +237,89 @@ Analyze the attached file carefully (image or PDF):
 
 5. حدد validityStatus و summaryAr و missingRequirements و confidenceNote.`;
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
-    apiKey
-  )}`;
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [
-          {
-            text: isEn
-              ? 'Return strictly valid JSON matching the schema. Convert all parsed dates to YYYY-MM-DD. Never guess unreadable numbers or dates.'
-              : 'أرجع النتيجة بصيغة JSON مطابقة للمخطط فقط، وحوّل التواريخ إلى YYYY-MM-DD، ولا تخمّن أرقاماً أو تواريخ غير مقروءة.',
-          },
-        ],
-      },
-      contents: [
+  const data = await postGeminiWithModelFallback<{
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  }>(apiKey, {
+    systemInstruction: {
+      parts: [
         {
-          parts: [
-            { inlineData: { mimeType: safeMimeType, data: cleanBase64 } },
-            { text: promptText },
-          ],
+          text: isEn
+            ? 'Return strictly valid JSON matching the schema. Convert all parsed dates to YYYY-MM-DD. Never guess unreadable numbers or dates.'
+            : 'أرجع النتيجة بصيغة JSON مطابقة للمخطط فقط، وحوّل التواريخ إلى YYYY-MM-DD، ولا تخمّن أرقاماً أو تواريخ غير مقروءة.',
         },
       ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'OBJECT',
-          properties: {
-            detectedDocumentKind: { type: 'STRING' },
-            documentType: { type: 'STRING' },
-            fullName: { type: 'STRING' },
-            passportFullNameEn: { type: 'STRING' },
-            passportFullNameAr: { type: 'STRING' },
-            passportNumber: { type: 'STRING' },
-            nationality: { type: 'STRING' },
-            birthDate: { type: 'STRING' },
-            issueDate: { type: 'STRING' },
-            expiryDate: { type: 'STRING' },
-            visaDocumentNumber: { type: 'STRING' },
-            saudiSponsorId: { type: 'STRING' },
-            applicantNameAr: { type: 'STRING' },
-            applicantNameEn: { type: 'STRING' },
-            documentPassportNumber: { type: 'STRING' },
-            portOfEntry: { type: 'STRING' },
-            hasSixMonthsValidity: { type: 'BOOLEAN' },
-            remainingDays: { type: 'INTEGER' },
-            validityStatus: { type: 'STRING' },
-            summaryAr: { type: 'STRING' },
-            missingRequirements: { type: 'ARRAY', items: { type: 'STRING' } },
-            confidenceNote: { type: 'STRING' },
-            isReadable: { type: 'BOOLEAN' },
-            clarityStatus: { type: 'STRING' },
-            clarityIssueAr: { type: 'STRING' },
-            clarityIssueEn: { type: 'STRING' },
-          },
-          required: [
-            'detectedDocumentKind',
-            'documentType',
-            'fullName',
-            'passportFullNameEn',
-            'passportFullNameAr',
-            'passportNumber',
-            'nationality',
-            'birthDate',
-            'issueDate',
-            'expiryDate',
-            'visaDocumentNumber',
-            'saudiSponsorId',
-            'applicantNameAr',
-            'applicantNameEn',
-            'documentPassportNumber',
-            'portOfEntry',
-            'hasSixMonthsValidity',
-            'remainingDays',
-            'validityStatus',
-            'summaryAr',
-            'missingRequirements',
-            'confidenceNote',
-            'isReadable',
-            'clarityStatus',
-            'clarityIssueAr',
-            'clarityIssueEn',
-          ],
-        },
+    },
+    contents: [
+      {
+        parts: [
+          { inlineData: { mimeType: safeMimeType, data: cleanBase64 } },
+          { text: promptText },
+        ],
       },
-    }),
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          detectedDocumentKind: { type: 'STRING' },
+          documentType: { type: 'STRING' },
+          fullName: { type: 'STRING' },
+          passportFullNameEn: { type: 'STRING' },
+          passportFullNameAr: { type: 'STRING' },
+          passportNumber: { type: 'STRING' },
+          nationality: { type: 'STRING' },
+          birthDate: { type: 'STRING' },
+          issueDate: { type: 'STRING' },
+          expiryDate: { type: 'STRING' },
+          visaDocumentNumber: { type: 'STRING' },
+          saudiSponsorId: { type: 'STRING' },
+          applicantNameAr: { type: 'STRING' },
+          applicantNameEn: { type: 'STRING' },
+          documentPassportNumber: { type: 'STRING' },
+          portOfEntry: { type: 'STRING' },
+          hasSixMonthsValidity: { type: 'BOOLEAN' },
+          remainingDays: { type: 'INTEGER' },
+          validityStatus: { type: 'STRING' },
+          summaryAr: { type: 'STRING' },
+          missingRequirements: { type: 'ARRAY', items: { type: 'STRING' } },
+          confidenceNote: { type: 'STRING' },
+          isReadable: { type: 'BOOLEAN' },
+          clarityStatus: { type: 'STRING' },
+          clarityIssueAr: { type: 'STRING' },
+          clarityIssueEn: { type: 'STRING' },
+        },
+        required: [
+          'detectedDocumentKind',
+          'documentType',
+          'fullName',
+          'passportFullNameEn',
+          'passportFullNameAr',
+          'passportNumber',
+          'nationality',
+          'birthDate',
+          'issueDate',
+          'expiryDate',
+          'visaDocumentNumber',
+          'saudiSponsorId',
+          'applicantNameAr',
+          'applicantNameEn',
+          'documentPassportNumber',
+          'portOfEntry',
+          'hasSixMonthsValidity',
+          'remainingDays',
+          'validityStatus',
+          'summaryAr',
+          'missingRequirements',
+          'confidenceNote',
+          'isReadable',
+          'clarityStatus',
+          'clarityIssueAr',
+          'clarityIssueEn',
+        ],
+      },
+    },
   });
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    throw new Error(errText || `Gemini API HTTP ${res.status}`);
-  }
-
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
   const rawJsonText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
   const parsed = JSON.parse(rawJsonText) as PassportAiCheckResult;
   return normalizePassportAiResult(parsed);
@@ -327,52 +346,38 @@ Return JSON: isClear (boolean), clarityStatus ("clear" | "blurry" | "cropped" | 
 Determine if text, numbers, barcodes, or details are legible, or if the photo is severely blurry, cropped, glare-obscured, or illegible.
 Return JSON: isClear (boolean), clarityStatus ("clear" | "blurry" | "cropped" | "unclear"), issueAr (concise Arabic warning if isClear is false else ""), issueEn (concise English warning if isClear is false else "").`;
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
-    apiKey
-  )}`;
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [
-          {
-            text: 'Return strictly valid JSON evaluating image clarity accurately without false alarms on decent phone scans.',
-          },
-        ],
-      },
-      contents: [
+  const data = await postGeminiWithModelFallback<{
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  }>(apiKey, {
+    systemInstruction: {
+      parts: [
         {
-          parts: [
-            { inlineData: { mimeType: params.mimeType || 'image/jpeg', data: cleanBase64 } },
-            { text: promptText },
-          ],
+          text: 'Return strictly valid JSON evaluating image clarity accurately without false alarms on decent phone scans.',
         },
       ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'OBJECT',
-          properties: {
-            isClear: { type: 'BOOLEAN' },
-            clarityStatus: { type: 'STRING' },
-            issueAr: { type: 'STRING' },
-            issueEn: { type: 'STRING' },
-          },
-          required: ['isClear', 'clarityStatus', 'issueAr', 'issueEn'],
-        },
+    },
+    contents: [
+      {
+        parts: [
+          { inlineData: { mimeType: params.mimeType || 'image/jpeg', data: cleanBase64 } },
+          { text: promptText },
+        ],
       },
-    }),
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          isClear: { type: 'BOOLEAN' },
+          clarityStatus: { type: 'STRING' },
+          issueAr: { type: 'STRING' },
+          issueEn: { type: 'STRING' },
+        },
+        required: ['isClear', 'clarityStatus', 'issueAr', 'issueEn'],
+      },
+    },
   });
-
-  if (!res.ok) {
-    throw new Error(`Gemini API HTTP ${res.status}`);
-  }
-
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
   const rawJsonText = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
   const parsed = JSON.parse(rawJsonText) as DocumentClarityCheckResult;
   return {
@@ -389,7 +394,7 @@ Return JSON: isClear (boolean), clarityStatus ("clear" | "blurry" | "cropped" | 
 }
 
 /**
- * Unified Smart Passport Reader (gemini-2.5-flash):
+ * Unified Smart Passport & Document Reader (gemini-3.8-flash primary -> gemini-3.5-flash-lite fallback):
  * 1) Tries full-stack backend (/api/passport-check) which resolves Firestore site_config/general.geminiApiKey -> process.env.GEMINI_API_KEY.
  * 2) When running statically (GitHub Pages / Android WebView APK) or if backend is absent, falls back to direct Gemini REST call using the Firestore site_config/general.geminiApiKey.
  */
@@ -474,7 +479,7 @@ export async function analyzePassportWithGemini(params: {
 }
 
 /**
- * Inspects any uploaded document or personal photo for blur, cropping, glare, or illegibility using gemini-2.5-flash.
+ * Inspects any uploaded document or personal photo for blur, cropping, glare, or illegibility using gemini-3.8-flash (with gemini-3.5-flash-lite fallback).
  */
 export async function checkDocumentClarityWithGemini(params: {
   imageBase64: string;
