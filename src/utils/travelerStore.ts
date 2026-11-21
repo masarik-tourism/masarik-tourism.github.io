@@ -63,6 +63,13 @@ import { computeRevokeTrustedDeviceState } from './deviceApprovalHelpers';
 import { dispatchRemotePushNotification } from './fcmPushService';
 import { getSiteConfig } from './siteConfigStore';
 import { getCmsState } from './cmsStore';
+import {
+  OFFICIAL_COMPANY_WHATSAPP_NUMBER,
+  buildClientOtpRequestMessage,
+  buildClientOtpRequestUrl,
+  isClientAccountVerified,
+  resolveOtpCompanyWhatsAppNumber,
+} from './whatsappHelpers';
 
 const TRAVELERS_STORAGE_KEY = 'masarik_travelers_v1';
 const ACTIVE_PHONE_STORAGE_KEY = 'masarik_active_phone_v1';
@@ -72,7 +79,7 @@ const ADMIN_PIN_HASH_STORAGE_KEY = 'masarik_admin_pin_hash_v1';
 const DEFAULT_ADMIN_PIN = '202200';
 
 export const OFFICIAL_SITE_BASE_URL = 'https://masarik-tourism.github.io/';
-export const COMPANY_WHATSAPP_NUMBER = '201128440008';
+export const COMPANY_WHATSAPP_NUMBER = OFFICIAL_COMPANY_WHATSAPP_NUMBER;
 export const OTP_ACTIVATION_WHATSAPP_NUMBER = COMPANY_WHATSAPP_NUMBER;
 export const OTP_VALIDITY_MS = 24 * 60 * 60 * 1000;
 
@@ -370,18 +377,26 @@ ${magicLink}`;
 ${magicLink}`;
 }
 
-// Anti-Spoofing & Zero-Leak Request: NEVER include OTP or user inputs in client WhatsApp request
-export function buildClientWhatsAppRequestMessage(lang: 'ar' | 'en' = 'ar'): string {
-  if (lang === 'en') {
-    return 'Masarik Activation Code';
+// Client WhatsApp OTP Request: routes to official company WhatsApp (...0008) with prefilled phone request
+export function buildClientWhatsAppRequestMessage(
+  clientPhoneOrLang?: string,
+  langArg: 'ar' | 'en' = 'ar'
+): string {
+  if (clientPhoneOrLang === 'ar' || clientPhoneOrLang === 'en') {
+    return buildClientOtpRequestMessage('', clientPhoneOrLang);
   }
-  return 'كود تفعيل مسارك';
+  return buildClientOtpRequestMessage(clientPhoneOrLang, langArg);
 }
 
-export function buildClientOtpWhatsAppUrl(lang: 'ar' | 'en' = 'ar'): string {
-  return `https://wa.me/${OTP_ACTIVATION_WHATSAPP_NUMBER}?text=${encodeURIComponent(
-    buildClientWhatsAppRequestMessage(lang)
-  )}`;
+export function buildClientOtpWhatsAppUrl(
+  clientPhoneOrLang?: string,
+  langArg: 'ar' | 'en' = 'ar'
+): string {
+  const companyPhone = resolveOtpCompanyWhatsAppNumber(getSiteConfig().phoneNumber);
+  if (clientPhoneOrLang === 'ar' || clientPhoneOrLang === 'en') {
+    return buildClientOtpRequestUrl('', clientPhoneOrLang, companyPhone);
+  }
+  return buildClientOtpRequestUrl(clientPhoneOrLang, langArg, companyPhone);
 }
 
 export function getAllTravelers(): Record<string, TravelerProfile> {
@@ -684,8 +699,8 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     ...(profile.adminBypassOtpAt
       ? { adminBypassOtpAt: String(profile.adminBypassOtpAt).slice(0, 64) }
       : {}),
-    verified: Boolean(profile.verified),
-    accountStatus: profile.verified ? 'verified' : 'pending_verification',
+    verified: isClientAccountVerified(profile),
+    accountStatus: isClientAccountVerified(profile) ? 'verified' : 'pending_verification',
     createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
     updatedAt: new Date().toISOString(),
     orderStatus: safeStatus,
@@ -1436,7 +1451,7 @@ export function getActiveTraveler(): TravelerProfile | null {
   if (!activePhone) return null;
   const all = getAllTravelers();
   const profile = all[activePhone];
-  if (!profile || !profile.verified || profile.accountStatus === 'pending_verification') {
+  if (!isClientAccountVerified(profile)) {
     return null;
   }
   return profile;
@@ -1467,6 +1482,10 @@ export function startTravelerSession(
 ): TravelerSessionMeta {
   const phone = normalizePhone(rawPhone);
   const { deviceId } = getDeviceFingerprint();
+  const existingProfile = getAllTravelers()[phone];
+  if (existingProfile && !isClientAccountVerified(existingProfile)) {
+    throw new Error('Cannot start dashboard session before OTP or Admin verification.');
+  }
   const now = Date.now();
   const persistInLocalStorage = options?.persistInLocalStorage ?? mode === 'trusted';
   const expiresAt =
@@ -2533,7 +2552,7 @@ export async function completeApprovedNewDeviceLoginCloud(
   } catch {
     // Offline fallback
   }
-  if (!target) return null;
+  if (!target || !isClientAccountVerified(target)) return null;
 
   const { deviceId, label } = getDeviceFingerprint();
   const nowMs = Date.now();
@@ -3331,7 +3350,7 @@ export async function trustCurrentDeviceCloud(
     }
   }
 
-  if (!existing) return null;
+  if (!existing || !isClientAccountVerified(existing)) return null;
 
   const { deviceId, label } = getDeviceFingerprint();
   const nowIso = new Date().toISOString();
@@ -3672,6 +3691,7 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
   const existing = all[phone];
 
   if (existing) {
+    const isVerified = isClientAccountVerified(existing);
     const updated: TravelerProfile = {
       ...existing,
       phone,
@@ -3680,6 +3700,12 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
       lastName: split.lastName || existing.lastName,
       name: cleanName || existing.name,
       otp: generateSixDigitOtp(),
+      otpGeneratedAt: new Date().toISOString(),
+      otpExpiresAt: new Date(Date.now() + OTP_VALIDITY_MS).toISOString(),
+      otpConsumed: false,
+      verified: isVerified,
+      accountStatus: isVerified ? 'verified' : 'pending_verification',
+      ...(!isVerified ? { activatedByAdmin: false } : {}),
     };
     all[phone] = updated;
     saveAllTravelersLocalOnly(all);
@@ -3687,6 +3713,7 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     return updated;
   }
 
+  const nowIso = new Date().toISOString();
   const created: TravelerProfile = {
     phone,
     phoneNormalized: phone,
@@ -3694,9 +3721,13 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     lastName: split.lastName,
     name: cleanName,
     otp: generateSixDigitOtp(),
+    otpGeneratedAt: nowIso,
+    otpExpiresAt: new Date(Date.now() + OTP_VALIDITY_MS).toISOString(),
+    otpConsumed: false,
+    activatedByAdmin: false,
     verified: false,
     accountStatus: 'pending_verification',
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso,
     orderStatus: 'تم استلام الطلب',
     documents: [],
   };

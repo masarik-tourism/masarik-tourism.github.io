@@ -3009,7 +3009,7 @@ Please advise on the next steps for my application.`
 
                   <div className="space-y-2.5">
                     <a
-                      href={buildClientOtpWhatsAppUrl(lang)}
+                      href={buildClientOtpWhatsAppUrl(activeAuthPhone, lang)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="w-full min-h-[48px] py-3 px-4 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
@@ -3017,8 +3017,8 @@ Please advise on the next steps for my application.`
                       <WhatsAppIcon className="w-4.5 h-4.5 shrink-0" variant="white" />
                       <span>
                         {t(
-                          'طلب الكود عبر واتساب (201128440008)',
-                          'Request Code via WhatsApp (201128440008)'
+                          'طلب كود تفعيل (OTP) عبر الواتساب (201128440008)',
+                          'Request Activation Code (OTP) via WhatsApp (201128440008)'
                         )}
                       </span>
                     </a>
@@ -5285,7 +5285,7 @@ Please advise on the next steps for my application.`
                         )}
                       </p>
                       <a
-                        href={buildClientOtpWhatsAppUrl(lang)}
+                        href={buildClientOtpWhatsAppUrl(activeTraveler.phone, lang)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
@@ -5293,8 +5293,8 @@ Please advise on the next steps for my application.`
                         <WhatsAppIcon className="w-4 h-4 shrink-0" variant="white" />
                         <span>
                           {t(
-                            'اطلب كود التفعيل عبر واتساب (201128440008)',
-                            'Request Activation Code via WhatsApp (201128440008)'
+                            'طلب كود تفعيل (OTP) عبر الواتساب (201128440008)',
+                            'Request Activation Code (OTP) via WhatsApp (201128440008)'
                           )}
                         </span>
                       </a>

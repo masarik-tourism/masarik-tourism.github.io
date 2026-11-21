@@ -139,7 +139,7 @@ import {
   useCmsState,
 } from '../utils/cmsStore';
 import { translateOrderStatus } from '../data/travelData';
-import { openWhatsApp } from '../utils/communication';
+import { buildWhatsAppSendUrl, openWhatsApp } from '../utils/communication';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
@@ -691,7 +691,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     const displayName = getTravelerDisplayNames(client).fullDisplayName;
     const msg = buildAdminForwardActivationMessage(displayName, client.phone, client.otp, lang);
     const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
-    openWhatsApp(`https://wa.me/${phoneDigits}?text=${encodeURIComponent(msg)}`);
+    openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
   };
 
   const handleDirectWhatsAppChat = (client: TravelerProfile) => {
@@ -701,7 +701,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       lang === 'en'
         ? `Hello ${displayName}, Masarik Tourism team is reaching out regarding your file.`
         : `السلام عليكم ${displayName}، معكم فريق مسارك للإنجاز السياحي بخصوص ملفكم.`;
-    openWhatsApp(`https://wa.me/${phoneDigits}?text=${encodeURIComponent(hello)}`);
+    openWhatsApp(buildWhatsAppSendUrl(phoneDigits, hello));
   };
 
   const handleAdminInstantActivate = async (client: TravelerProfile) => {
@@ -710,15 +710,10 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     loadTravelers();
   };
 
+  // Sending OTP via WhatsApp must NOT mark the account verified before the client submits the OTP
+  // or an Admin explicitly presses "تفعيل الحساب فوراً (بدون OTP)".
   const handleOneClickVerifyAndSendOtp = (client: TravelerProfile) => {
     if (!canActivateOtp) return;
-    if (!client.verified) {
-      updateTravelerProfileDetails(client.phone, {
-        verified: true,
-        verifiedAt: new Date().toISOString(),
-      });
-      loadTravelers();
-    }
     handleSendActivationWhatsApp(client);
   };
 
@@ -2007,18 +2002,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                 </span>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border ${
-                                    client.verified
+                                    client.verified && client.accountStatus !== 'pending_verification'
                                       ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                                       : 'bg-amber-50 border-amber-200 text-amber-800'
                                   }`}
                                 >
-                                  {client.verified ? (
+                                  {client.verified && client.accountStatus !== 'pending_verification' ? (
                                     <>
                                       <CheckCircle2 className="w-3 h-3" />
                                       <span>{t('موثق', 'Verified')}</span>
                                     </>
                                   ) : (
-                                    <span>{t('بانتظار التفعيل', 'Unverified')}</span>
+                                    <span>{t('غير مفعل / بانتظار التفعيل', 'Unverified / Pending')}</span>
                                   )}
                                 </span>
                               </div>
@@ -3884,7 +3879,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         <div
                           key={client.phone}
                           className={`rounded-2xl border p-4 space-y-3 ${
-                            client.verified
+                            client.verified && client.accountStatus !== 'pending_verification'
                               ? 'bg-slate-50 border-slate-200'
                               : 'bg-amber-50/70 border-amber-200'
                           }`}
@@ -3901,18 +3896,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
                             <span
                               className={`px-2 py-0.5 rounded-full text-[10.5px] font-black border shrink-0 ${
-                                client.verified
+                                client.verified && client.accountStatus !== 'pending_verification'
                                   ? 'bg-emerald-100 text-emerald-900 border-emerald-200'
                                   : otpValid
                                   ? 'bg-sky-100 text-sky-900 border-sky-200'
                                   : 'bg-red-100 text-red-800 border-red-200'
                               }`}
                             >
-                              {client.verified
+                              {client.verified && client.accountStatus !== 'pending_verification'
                                 ? t('موثق ✓', 'Verified ✓')
                                 : otpValid
-                                ? t('OTP صالح 24 ساعة', '24h Active OTP')
-                                : t('OTP منتهي', 'Expired OTP')}
+                                ? t('غير مفعل · OTP 24 ساعة', 'Unverified · 24h OTP')
+                                : t('غير مفعل · OTP منتهي', 'Unverified · Expired OTP')}
                             </span>
                           </div>
 

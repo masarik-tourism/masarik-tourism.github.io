@@ -22,6 +22,7 @@ import {
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import {
   CUSTOMER_SERVICE_WHATSAPP_NUMBER,
+  buildWhatsAppSendUrl,
   openWhatsApp,
 } from '../utils/communication';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -234,7 +235,7 @@ export const PaymentScreen: React.FC<PaymentScreenProps> = ({ onNavigateToContac
               : '\n• صورة الإيصال: مرفقة بالمحادثة الآن.'
           }`;
 
-    const waUrl = `https://wa.me/${CUSTOMER_SERVICE_WHATSAPP_NUMBER}?text=${encodeURIComponent(msg)}`;
+    const waUrl = buildWhatsAppSendUrl(CUSTOMER_SERVICE_WHATSAPP_NUMBER, msg);
     setLastWhatsappConfirmUrl(waUrl);
     openWhatsApp(msg);
   };

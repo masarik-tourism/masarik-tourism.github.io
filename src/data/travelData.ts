@@ -15,7 +15,7 @@ export const TravelRepository = {
   TAGLINE: 'منصتك لخدمات التأشيرات وتخليص الإجراءات وحجز الطيران والفنادق',
   PHONE_NUMBER: '01128440008',
   PHONE_DIAL: '+201128440008',
-  WHATSAPP_URL: 'https://wa.me/201128440008',
+  WHATSAPP_URL: 'https://api.whatsapp.com/send?phone=201128440008',
   OFFICIAL_EMAIL: 'masarik.tourism@gmail.com',
   FACEBOOK_URL: 'https://facebook.com/masarik.tourism',
   FACEBOOK_USERNAME: 'masarik.tourism',
