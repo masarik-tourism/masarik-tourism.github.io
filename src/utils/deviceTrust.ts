@@ -5,8 +5,10 @@ const DEVICE_SECRET_STORAGE_KEY = 'masarik_device_secret_v1';
 const DEVICE_ID_CACHE_KEY = 'masarik_device_fp_v1';
 const SESSION_META_STORAGE_KEY = 'masarik_session_meta_v1';
 const SESSION_EXPIRED_FLAG_KEY = 'masarik_session_expired_notice_v1';
+const SAVED_CLIENT_PHONE_STORAGE_KEY = 'masarik_saved_client_phone_v1';
 
-export const TEMPORARY_SESSION_DURATION_MS = 60 * 60 * 1000; // Exactly 60 minutes
+export const TEMPORARY_SESSION_DURATION_MS = 60 * 60 * 1000; // Legacy constant kept for compatibility
+export const INACTIVITY_LOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12-hour inactivity auto-lock
 
 function generateSecureHex(bytesLen = 16): string {
   if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
@@ -124,8 +126,52 @@ export function isDeviceInTrustedList(
   return devices.some((d) => d && d.deviceId === targetId);
 }
 
+export function getSavedClientPhone(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    const val = window.localStorage.getItem(SAVED_CLIENT_PHONE_STORAGE_KEY) || '';
+    return /^[0-9]{8,20}$/.test(val.trim()) ? val.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+export function setSavedClientPhone(phone: string | null | undefined): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const clean = (phone || '').replace(/\D/g, '');
+    if (/^[0-9]{8,20}$/.test(clean)) {
+      window.localStorage.setItem(SAVED_CLIENT_PHONE_STORAGE_KEY, clean);
+    } else {
+      window.localStorage.removeItem(SAVED_CLIENT_PHONE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage error
+  }
+}
+
+export function clearSavedClientPhone(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(SAVED_CLIENT_PHONE_STORAGE_KEY);
+  } catch {
+    // Ignore storage error
+  }
+}
+
 export function readStoredSessionMeta(): TravelerSessionMeta | null {
   if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(SESSION_META_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as TravelerSessionMeta;
+      if (parsed && typeof parsed.phone === 'string') {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore localStorage error
+  }
   try {
     const tempRaw = window.sessionStorage.getItem(SESSION_META_STORAGE_KEY);
     if (tempRaw) {
@@ -137,20 +183,7 @@ export function readStoredSessionMeta(): TravelerSessionMeta | null {
   } catch {
     // Ignore sessionStorage error
   }
-  try {
-    const raw = window.localStorage.getItem(SESSION_META_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as TravelerSessionMeta;
-    if (!parsed || typeof parsed.phone !== 'string') return null;
-    // Security guard: public-browser temporary sessions without explicit persistence must never survive a browser close
-    if (parsed.mode === 'temporary' && parsed.persistInLocalStorage !== true) {
-      window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 export function writeStoredSessionMeta(meta: TravelerSessionMeta | null): void {
@@ -161,16 +194,25 @@ export function writeStoredSessionMeta(meta: TravelerSessionMeta | null): void {
       window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
       return;
     }
-    if (meta.mode === 'temporary' && meta.persistInLocalStorage !== true) {
-      window.localStorage.removeItem(SESSION_META_STORAGE_KEY);
-      window.sessionStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
-    } else {
-      window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
-      window.localStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
-    }
+    window.sessionStorage.removeItem(SESSION_META_STORAGE_KEY);
+    window.localStorage.setItem(SESSION_META_STORAGE_KEY, JSON.stringify(meta));
   } catch {
     // Ignore storage write error
   }
+}
+
+export function touchStoredSessionActivity(): TravelerSessionMeta | null {
+  const current = readStoredSessionMeta();
+  if (!current) return null;
+  const now = Date.now();
+  const next: TravelerSessionMeta = {
+    ...current,
+    lastActivityAt: now,
+    expiresAt: now + INACTIVITY_LOCK_DURATION_MS,
+    persistInLocalStorage: true,
+  };
+  writeStoredSessionMeta(next);
+  return next;
 }
 
 export function markSessionExpiredNotice(): void {

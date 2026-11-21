@@ -284,13 +284,16 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                       type="button"
                       disabled={activatingPhone === client.phone}
                       onClick={() => void handleInstantActivate(client)}
-                      className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                      className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 disabled:opacity-60 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
                     >
                       <CheckCircle2 className="w-4 h-4 shrink-0" />
                       <span>
                         {activatingPhone === client.phone
                           ? t('جاري التفعيل...', 'Activating...')
-                          : t('تفعيل الحساب فوراً (بدون OTP)', 'Activate Account Instantly (No OTP)')}
+                          : t(
+                              'تفعيل وتأكيد الحساب فوراً (بدون كود) ✅',
+                              'Activate & Verify Account Instantly (No Code) ✅'
+                            )}
                       </span>
                     </button>
                   )}

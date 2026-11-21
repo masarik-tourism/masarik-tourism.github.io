@@ -317,18 +317,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     text: string;
   } | null>(null);
   const [hasAdminFcmToken, setHasAdminFcmToken] = useState(false);
-  const bellPopoverRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!showBellPopover) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (bellPopoverRef.current && !bellPopoverRef.current.contains(e.target as Node)) {
-        setShowBellPopover(false);
-      }
-    };
-    window.addEventListener('mousedown', handleClickOutside);
-    return () => window.removeEventListener('mousedown', handleClickOutside);
-  }, [showBellPopover]);
 
   useEffect(() => {
     let active = true;
@@ -1738,44 +1726,56 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           </div>
 
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
-            {/* Notifications Bell with Green Indicator & Floating Popover */}
-            <div className="relative" ref={bellPopoverRef}>
-              <button
-                type="button"
-                onClick={() => setShowBellPopover((v) => !v)}
-                className="relative w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 flex items-center justify-center transition cursor-pointer active:scale-95"
-                title={t('إعدادات إشعارات الهاتف والتنبيهات', 'Phone Notifications Settings')}
-                aria-label={t('إشعارات الإدارة', 'Admin Notifications')}
-              >
-                <Bell className="w-4 h-4" />
-                {(bellPermission === 'granted' || hasAdminFcmToken) && (
-                  <span className="absolute top-1.5 end-1.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#0F2438]" />
-                )}
-              </button>
+            {/* Notifications Bell with Green Indicator & Centered Floating Modal */}
+            <button
+              type="button"
+              onClick={() => setShowBellPopover((v) => !v)}
+              className="relative w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 flex items-center justify-center transition cursor-pointer active:scale-95"
+              title={t('إعدادات إشعارات الهاتف والتنبيهات', 'Phone Notifications Settings')}
+              aria-label={t('إشعارات الإدارة', 'Admin Notifications')}
+            >
+              <Bell className="w-4 h-4" />
+              {(bellPermission === 'granted' || hasAdminFcmToken) && (
+                <span className="absolute top-1.5 end-1.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#0F2438]" />
+              )}
+            </button>
 
-              {/* Compact Floating Notifications Card */}
-              {showBellPopover && (
-                <div className="absolute top-full mt-2 end-0 z-50 w-72 sm:w-80 rounded-2xl bg-[#0F2438] text-white border border-[#C6A052]/50 shadow-2xl p-4 space-y-3 backdrop-blur-md animate-in fade-in zoom-in-95">
-                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+            {showBellPopover && (
+              <div
+                className="fixed inset-0 flex items-center justify-center z-50 bg-[#0A1926]/65 backdrop-blur-xs p-4"
+                onClick={() => setShowBellPopover(false)}
+                dir={dir}
+              >
+                <div
+                  className="w-full max-w-sm rounded-3xl bg-[#0F2438] text-white border-2 border-[#C6A052]/70 shadow-2xl p-5 space-y-3.5 animate-in fade-in zoom-in-95"
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={t('إشعارات الهاتف الفورية', 'Instant Push Notifications')}
+                >
+                  <div className="flex items-center justify-between border-b border-white/10 pb-3">
                     <div className="flex items-center gap-2">
-                      <Bell className="w-4 h-4 text-[#E5C887]" />
-                      <span className="text-xs font-black text-white">
+                      <div className="w-8 h-8 rounded-xl bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#E5C887] flex items-center justify-center">
+                        <Bell className="w-4 h-4" />
+                      </div>
+                      <span className="text-sm font-black text-white">
                         {t('إشعارات الهاتف الفورية', 'Instant Push Notifications')}
                       </span>
                     </div>
                     <button
                       type="button"
                       onClick={() => setShowBellPopover(false)}
-                      className="w-6 h-6 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                      className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white flex items-center justify-center transition cursor-pointer"
+                      aria-label={t('إغلاق', 'Close')}
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                     </button>
                   </div>
 
-                  <div className="text-[11px] text-slate-300 space-y-1">
-                    <div className="flex items-center gap-1.5 font-bold">
+                  <div className="bg-white/5 border border-white/10 rounded-2xl p-3 text-xs text-slate-200 space-y-1">
+                    <div className="flex items-center gap-2 font-bold">
                       <span
-                        className={`w-2 h-2 rounded-full ${
+                        className={`w-2.5 h-2.5 rounded-full shrink-0 ${
                           bellPermission === 'granted' || hasAdminFcmToken
                             ? 'bg-emerald-400'
                             : 'bg-amber-400'
@@ -1787,46 +1787,48 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           : t('الإشعارات غير مفعّلة حالياً', 'Notifications not enabled yet')}
                       </span>
                     </div>
-                    <p className="text-slate-400 text-[10.5px]">
+                    <p className="text-slate-300 text-[11px] leading-relaxed">
                       {t('تنبيهات فورية في شريط الهاتف لأي طلب أو رسالة جديدة.', 'Top-bar phone alerts for any new request or chat.')}
                     </p>
                   </div>
 
-                  <div className="space-y-2 pt-1">
+                  <div className="space-y-2.5 pt-1">
                     <button
                       type="button"
                       disabled={isActivatingBellPush}
                       onClick={() => void handleEnableAdminBellPush()}
-                      className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer hover:brightness-105 active:scale-95 disabled:opacity-60"
+                      className="w-full min-h-[42px] px-3 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer hover:brightness-105 active:scale-95 disabled:opacity-60"
                     >
                       {isActivatingBellPush ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <Loader2 className="w-4 h-4 animate-spin" />
                       ) : (
-                        <Smartphone className="w-3.5 h-3.5" />
+                        <Smartphone className="w-4 h-4" />
                       )}
-                      <span>{t('تفعيل إشعارات الهاتف', 'Enable Phone Alerts')}</span>
+                      <span>{t('تفعيل إشعارات الهاتف 🔔', 'Enable Phone Alerts 🔔')}</span>
                     </button>
 
                     <button
                       type="button"
                       disabled={isTestingBellPush}
                       onClick={() => void handleTestAdminBellPush()}
-                      className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer active:scale-95 disabled:opacity-60"
+                      className="w-full min-h-[42px] px-3 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer active:scale-95 disabled:opacity-60"
                     >
                       {isTestingBellPush ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <Loader2 className="w-4 h-4 animate-spin" />
                       ) : (
-                        <Volume2 className="w-3.5 h-3.5" />
+                        <Volume2 className="w-4 h-4" />
                       )}
-                      <span>{t('اختبار الإشعار والصوت', 'Test Alert & Chime')}</span>
+                      <span>{t('اختبار الإشعار والصوت 🔊', 'Test Alert & Chime 🔊')}</span>
                     </button>
                   </div>
 
                   {bellFeedback && (
                     <div
-                      className={`p-2 rounded-lg text-[10.5px] font-bold text-center border ${
+                      className={`p-2.5 rounded-xl text-[11px] font-bold text-center border ${
                         bellFeedback.type === 'success'
                           ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                          : bellFeedback.type === 'info'
+                          ? 'bg-sky-500/20 border-sky-400/50 text-sky-100'
                           : 'bg-red-500/20 border-red-400/50 text-red-200'
                       }`}
                     >
@@ -1834,8 +1836,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     </div>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Button 1: Full Admin Dashboard (Primary Gold Highlight) */}
             <button
@@ -4245,11 +4247,14 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             <button
                               type="button"
                               onClick={() => void handleAdminInstantActivate(client)}
-                              className="w-full min-h-[40px] px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer"
+                              className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
                             >
                               <CheckCircle2 className="w-4 h-4 shrink-0" />
                               <span>
-                                {t('تفعيل الحساب فوراً (بدون OTP)', 'Activate Account Instantly (No OTP)')}
+                                {t(
+                                  'تفعيل وتأكيد الحساب فوراً (بدون كود) ✅',
+                                  'Activate & Verify Account Instantly (No Code) ✅'
+                                )}
                               </span>
                             </button>
                           )}

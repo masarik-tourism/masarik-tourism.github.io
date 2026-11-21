@@ -29,7 +29,6 @@ import {
   TRAVELERS_UPDATED_EVENT,
   TravelerProfileDraft,
   activateViaMagicLinkCloud,
-  ensureCurrentSessionRegisteredCloud,
   getActivePhone,
   getActiveTraveler,
   getAllTravelers,
@@ -37,12 +36,11 @@ import {
   getTravelerDisplayNames,
   getTravelerSessionMeta,
   logoutTravelerSession,
-  respondToDeviceApprovalCloud,
   saveClientFcmTokenCloud,
   setPendingVerificationPhone,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
-  subscribeDeviceApprovalsByPhoneCloud,
+  touchTravelerSessionActivity,
   updateUserPresenceCloud,
 } from './utils/travelerStore';
 import {
@@ -62,13 +60,7 @@ import {
   subscribeForegroundFcmMessages,
   waitForNativeAndroidFcmToken,
 } from './utils/fcmPushService';
-import {
-  consumeSessionExpiredNotice,
-  getDeviceFingerprint,
-  isDeviceInTrustedList,
-} from './utils/deviceTrust';
-import { collectPendingApprovalRequests } from './utils/deviceApprovalHelpers';
-import { GlobalDeviceApprovalModal } from './components/GlobalDeviceApprovalModal';
+import { consumeSessionExpiredNotice } from './utils/deviceTrust';
 import { QuickOtpModal } from './components/QuickOtpModal';
 import {
   PendingOtpSnapshotEntry,
@@ -79,7 +71,6 @@ import {
 import { isClientAccountVerified } from './utils/whatsappHelpers';
 import {
   ChatThreadSummary,
-  PendingDeviceRequest,
   TravelerProfile,
   TravelerSessionMeta,
 } from './types/travel';
@@ -190,12 +181,6 @@ export const App: React.FC = () => {
   const pendingAdminPushRef = useRef<PushDeepLinkPayload | null>(null);
   const adminOtpSnapRef = useRef<Map<string, PendingOtpSnapshotEntry>>(new Map());
   const adminOtpHydratedRef = useRef(false);
-  const [globalDeviceApprovals, setGlobalDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
-  const [dismissedGlobalReqIds, setDismissedGlobalReqIds] = useState<string[]>([]);
-  const [respondingGlobalReqId, setRespondingGlobalReqId] = useState<string | null>(null);
-  const [globalApprovalError, setGlobalApprovalError] = useState<string | null>(null);
-  const lastGlobalChimeReqIdRef = useRef<string | null>(null);
-  const currentDeviceId = getDeviceFingerprint().deviceId;
 
   // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
   useEffect(() => {
@@ -213,13 +198,13 @@ export const App: React.FC = () => {
   const adminTapCountRef = useRef<number>(0);
   const adminTapTimerRef = useRef<number | null>(null);
 
-  // Notify if an earlier temporary 1-hour session had expired before page load
+  // Notify if an earlier 12-hour inactivity session expired before page load
   useEffect(() => {
     if (!activeTravelerPhone && consumeSessionExpiredNotice()) {
       setSessionExpiredAlert(
         lang === 'en'
-          ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
-          : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+          ? 'Your session locked automatically after 12 hours of inactivity for security. Enter your 6-digit PIN to sign back in.'
+          : 'تم قفل الجلسة تلقائياً بعد مرور 12 ساعة دون نشاط حرصاً على أمان حسابك. أدخل الرقم السري (PIN) للدخول الفوري.'
       );
     }
   }, [lang, activeTravelerPhone]);
@@ -240,8 +225,8 @@ export const App: React.FC = () => {
       if (!nextPhone && consumeSessionExpiredNotice()) {
         setSessionExpiredAlert(
           lang === 'en'
-            ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
-            : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+            ? 'Your session locked automatically after 12 hours of inactivity for security. Enter your 6-digit PIN to sign back in.'
+            : 'تم قفل الجلسة تلقائياً بعد مرور 12 ساعة دون نشاط حرصاً على أمان حسابك. أدخل الرقم السري (PIN) للدخول الفوري.'
         );
       }
 
@@ -264,19 +249,11 @@ export const App: React.FC = () => {
     };
   }, [lang]);
 
-  // Active Timed Session Auto-Logout Guard (handles 1h/24h/7d/30d live countdown & sleep/wake)
+  // 12-Hour Inactivity Auto-Lock Guard & User Activity Tracker
   useEffect(() => {
-    if (
-      !sessionMeta ||
-      sessionMeta.mode === 'trusted' ||
-      typeof sessionMeta.expiresAt !== 'number' ||
-      !Number.isFinite(sessionMeta.expiresAt)
-    ) {
-      return;
-    }
+    if (!activeTravelerPhone) return;
 
-    const triggerExpiry = () => {
-      if (sessionMeta.mode === 'trusted') return;
+    const triggerInactivityLock = () => {
       logoutTravelerSession('expired');
       consumeSessionExpiredNotice();
       setTravelerDraft(buildDraftFromTraveler(null, lang));
@@ -284,139 +261,68 @@ export const App: React.FC = () => {
       setPendingPostAuthFlow(null);
       setSessionExpiredAlert(
         lang === 'en'
-          ? 'Your timed session has expired for security. Please sign in again.'
-          : 'انتهت مدة الجلسة المحددة حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
+          ? 'Your session locked automatically after 12 hours of inactivity for security. Enter your 6-digit PIN to sign back in.'
+          : 'تم قفل الجلسة تلقائياً بعد مرور 12 ساعة دون نشاط حرصاً على أمان حسابك. أدخل الرقم السري (PIN) للدخول الفوري.'
       );
       setTravelerSection('account');
     };
 
-    const msRemaining = sessionMeta.expiresAt - Date.now();
-    if (msRemaining <= 0) {
-      triggerExpiry();
-      return;
-    }
+    const checkInactivityExpiry = (): boolean => {
+      const latestMeta = getTravelerSessionMeta();
+      if (!latestMeta) {
+        triggerInactivityLock();
+        return true;
+      }
+      return false;
+    };
 
-    // Cap single setTimeout safely under 2^31-1 ms (for 30-day sessions) and poll every 10s
-    const safeTimeoutMs = Math.min(msRemaining + 50, 2_000_000_000);
-    const timeoutId = window.setTimeout(() => {
-      if (
-        sessionMeta.mode !== 'trusted' &&
-        typeof sessionMeta.expiresAt === 'number' &&
-        Number.isFinite(sessionMeta.expiresAt) &&
-        Date.now() >= sessionMeta.expiresAt
-      ) {
-        triggerExpiry();
+    const handleUserActivity = () => {
+      if (document.visibilityState === 'hidden') return;
+      const alive = touchTravelerSessionActivity(15_000);
+      if (!alive) {
+        triggerInactivityLock();
       }
-    }, safeTimeoutMs);
+    };
+
+    const handleVisibilityCheck = () => {
+      if (document.visibilityState === 'visible') {
+        if (!checkInactivityExpiry()) {
+          touchTravelerSessionActivity(15_000);
+        }
+      }
+    };
+
+    // Initial verification on mount / wake
+    if (checkInactivityExpiry()) return;
+
+    const activityEvents: Array<keyof WindowEventMap> = [
+      'pointerdown',
+      'keydown',
+      'touchstart',
+    ];
+    activityEvents.forEach((evtName) => {
+      window.addEventListener(evtName, handleUserActivity, { passive: true });
+    });
+    document.addEventListener('visibilitychange', handleVisibilityCheck);
+
     const intervalId = window.setInterval(() => {
-      if (
-        sessionMeta.mode !== 'trusted' &&
-        typeof sessionMeta.expiresAt === 'number' &&
-        Number.isFinite(sessionMeta.expiresAt) &&
-        Date.now() >= sessionMeta.expiresAt
-      ) {
-        triggerExpiry();
-      }
-    }, 10_000);
+      void checkInactivityExpiry();
+    }, 15_000);
 
     return () => {
-      window.clearTimeout(timeoutId);
+      activityEvents.forEach((evtName) => {
+        window.removeEventListener(evtName, handleUserActivity);
+      });
+      document.removeEventListener('visibilitychange', handleVisibilityCheck);
       window.clearInterval(intervalId);
     };
-  }, [sessionMeta, lang, updatePendingOtpPhone]);
+  }, [activeTravelerPhone, lang, updatePendingOtpPhone]);
 
-  // Real-time cloud subscription & session backfill for currently signed-in traveler
+  // Real-time cloud subscription for currently signed-in traveler
   useEffect(() => {
-    if (!activeTravelerPhone) {
-      setGlobalDeviceApprovals([]);
-      setGlobalApprovalError(null);
-      return;
-    }
-    void ensureCurrentSessionRegisteredCloud(activeTravelerPhone);
-    const unsubClient = subscribeActiveTravelerCloud(activeTravelerPhone);
-    const unsubApprovals = subscribeDeviceApprovalsByPhoneCloud(
-      activeTravelerPhone,
-      setGlobalDeviceApprovals
-    );
-    return () => {
-      unsubClient();
-      unsubApprovals();
-    };
+    if (!activeTravelerPhone) return;
+    return subscribeActiveTravelerCloud(activeTravelerPhone);
   }, [activeTravelerPhone]);
-
-  const canApproveGlobally = Boolean(
-    activeTraveler &&
-      (sessionMeta?.mode === 'trusted' ||
-        isDeviceInTrustedList(activeTraveler.trustedDevices, currentDeviceId))
-  );
-
-  const globalIncomingApprovalRequest: PendingDeviceRequest | null = (() => {
-    if (!activeTraveler || !canApproveGlobally) return null;
-    const pending = collectPendingApprovalRequests({
-      phone: activeTraveler.phone,
-      pendingDevices: activeTraveler.pendingDevices,
-      pendingLoginRequests: activeTraveler.pendingLoginRequests,
-      cloudDeviceApprovals: globalDeviceApprovals,
-      currentDeviceId,
-      dismissedRequestIds: dismissedGlobalReqIds,
-    });
-    return pending[0] || null;
-  })();
-
-  // Play real-time sound alert the instant a new device approval request arrives on any tab
-  useEffect(() => {
-    if (!globalIncomingApprovalRequest) return;
-    if (lastGlobalChimeReqIdRef.current !== globalIncomingApprovalRequest.requestId) {
-      lastGlobalChimeReqIdRef.current = globalIncomingApprovalRequest.requestId;
-      playChatNotificationChime(true);
-    }
-  }, [globalIncomingApprovalRequest]);
-
-  const handleGlobalApprovalRespond = useCallback(
-    async (
-      req: PendingDeviceRequest,
-      decision: 'approved_trusted' | 'approved_temporary' | 'rejected',
-      temporaryDurationHours: 1 | 24 = 1
-    ) => {
-      if (!activeTraveler || respondingGlobalReqId) return;
-      setRespondingGlobalReqId(req.requestId);
-      setGlobalApprovalError(null);
-      try {
-        const ok = await respondToDeviceApprovalCloud(activeTraveler.phone, req.requestId, {
-          decision,
-          temporaryDurationHours,
-          fallbackDeviceId: req.deviceId,
-          fallbackDeviceName: req.deviceName,
-        });
-        if (ok) {
-          setDismissedGlobalReqIds((prev) =>
-            prev.includes(req.requestId) ? prev : [...prev, req.requestId]
-          );
-        } else {
-          setGlobalApprovalError(
-            t(
-              'تعذر حفظ الاستجابة. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.',
-              'Could not save your response. Check connection and try again.'
-            )
-          );
-        }
-      } catch (err) {
-        setGlobalApprovalError(
-          err instanceof Error
-            ? err.message
-            : t('حدث خطأ أثناء معالجة الطلب.', 'Failed to process approval request.')
-        );
-      } finally {
-        setRespondingGlobalReqId(null);
-      }
-    },
-    [activeTraveler, respondingGlobalReqId, t]
-  );
-
-  const handleGlobalApprovalDismiss = useCallback((requestId: string) => {
-    setGlobalApprovalError(null);
-    setDismissedGlobalReqIds((prev) => (prev.includes(requestId) ? prev : [...prev, requestId]));
-  }, []);
 
   // 30-second Live Online/Offline Heartbeat + page exit & visibility presence updater
   useEffect(() => {
@@ -921,22 +827,17 @@ export const App: React.FC = () => {
 
           const res = await activateViaMagicLinkCloud(activatePhone, otp, nameParam);
           if (res.ok && res.profile) {
-            if (res.needsPinSetup || !res.isDeviceTrusted) {
+            if (res.needsPinSetup) {
               updatePendingOtpPhone(res.profile.phone);
               setPendingPostAuthFlow({
                 phone: res.profile.phone,
-                stage: res.needsPinSetup ? 'pin_setup' : 'device_trust_prompt',
+                stage: 'pin_setup',
               });
               setMagicLinkFeedback(
-                res.needsPinSetup
-                  ? t(
-                      `تم التحقق من رقمك (${res.profile.name}) عبر واتساب! يرجى الآن إنشاء رمز PIN شخصي من 6 أرقام لتأمين حسابك.`,
-                      `WhatsApp verified for (${res.profile.name})! Please create a personal 6-digit PIN to secure your account.`
-                    )
-                  : t(
-                      `تم التحقق من رقمك (${res.profile.name}) عبر واتساب! يرجى اختيار حفظ هذا الجهاز كجهاز موثوق أو المتابعة كجلسة مؤقتة.`,
-                      `WhatsApp verified for (${res.profile.name})! Please choose whether to trust this device or use a 1-hour temporary session.`
-                    )
+                t(
+                  `تم التحقق من رقمك (${res.profile.name}) عبر واتساب! يرجى الآن تعيين رقم سري (PIN) من 6 أرقام لتأمين دخولك السريع.`,
+                  `WhatsApp verified for (${res.profile.name})! Please create a 6-digit PIN for quick access.`
+                )
               );
             } else {
               updatePendingOtpPhone(null);
@@ -1365,23 +1266,6 @@ export const App: React.FC = () => {
           setAdminRequestedTab({ tab: 'messages_otp', nonce: Date.now() });
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
-      />
-
-      {/* Global Centered Floating Device Approval Modal (works across all site/app tabs) */}
-      <GlobalDeviceApprovalModal
-        request={globalIncomingApprovalRequest}
-        accountLabel={
-          activeTraveler ? getTravelerDisplayNames(activeTraveler).fullDisplayName : undefined
-        }
-        isBusy={
-          Boolean(globalIncomingApprovalRequest) &&
-          respondingGlobalReqId === globalIncomingApprovalRequest?.requestId
-        }
-        errorText={globalApprovalError}
-        onRespond={(req, decision, hours) =>
-          void handleGlobalApprovalRespond(req, decision, hours)
-        }
-        onDismiss={handleGlobalApprovalDismiss}
       />
 
       {/* Offline Mode Alert */}

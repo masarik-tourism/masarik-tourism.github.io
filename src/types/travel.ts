@@ -148,6 +148,7 @@ export interface TravelerSessionMeta {
   mode: 'trusted' | 'temporary';
   deviceId: string;
   startedAt: number;
+  lastActivityAt?: number;
   expiresAt: number | null;
   persistInLocalStorage?: boolean;
   cloudRegistered?: boolean;

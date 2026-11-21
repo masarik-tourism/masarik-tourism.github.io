@@ -40,11 +40,13 @@ import {
 } from '../data/travelData';
 import { OperationType, db, handleFirestoreError, sha256Hex } from '../firebase';
 import {
-  TEMPORARY_SESSION_DURATION_MS,
+  INACTIVITY_LOCK_DURATION_MS,
   getDeviceFingerprint,
   isDeviceInTrustedList,
   markSessionExpiredNotice,
   readStoredSessionMeta,
+  setSavedClientPhone,
+  touchStoredSessionActivity,
   writeStoredSessionMeta,
 } from './deviceTrust';
 import {
@@ -1329,37 +1331,27 @@ export function getTravelerSessionMeta(): TravelerSessionMeta | null {
   const meta = readStoredSessionMeta();
   if (!meta) return null;
 
-  const isSessionOnlyTemp = meta.mode === 'temporary' && meta.persistInLocalStorage !== true;
   let activePhone: string | null = null;
   try {
-    activePhone = isSessionOnlyTemp
-      ? window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY)
-      : window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+    activePhone =
+      window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY) ||
+      window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
   } catch {
     activePhone = null;
   }
 
   if (!activePhone || meta.phone !== activePhone) return null;
 
-  const all = getAllTravelers();
-  const isTrusted = isDeviceInTrustedList(all[meta.phone]?.trustedDevices, meta.deviceId);
+  const now = Date.now();
+  const isExpiredByTime =
+    (typeof meta.expiresAt === 'number' &&
+      Number.isFinite(meta.expiresAt) &&
+      now >= meta.expiresAt) ||
+    (typeof meta.lastActivityAt === 'number' &&
+      Number.isFinite(meta.lastActivityAt) &&
+      now - meta.lastActivityAt >= INACTIVITY_LOCK_DURATION_MS);
 
-  if (isTrusted) {
-    if (meta.mode !== 'trusted' || meta.expiresAt !== null) {
-      meta.mode = 'trusted';
-      meta.expiresAt = null;
-      meta.persistInLocalStorage = true;
-      writeStoredSessionMeta(meta);
-    }
-    return meta;
-  }
-
-  // Only expire if expiresAt is a valid finite number and device is NOT trusted
-  if (
-    typeof meta.expiresAt === 'number' &&
-    Number.isFinite(meta.expiresAt) &&
-    Date.now() >= meta.expiresAt
-  ) {
+  if (isExpiredByTime) {
     try {
       window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
@@ -1377,74 +1369,74 @@ export function getTravelerSessionMeta(): TravelerSessionMeta | null {
 export function getActivePhone(): string | null {
   if (typeof window === 'undefined') return null;
   const meta = readStoredSessionMeta();
-  const all = getAllTravelers();
-  const { deviceId } = getDeviceFingerprint();
 
   try {
-    const tempPhone = window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
-    if (tempPhone) {
-      const isTrusted = isDeviceInTrustedList(all[tempPhone]?.trustedDevices, deviceId);
-      if (
-        !isTrusted &&
-        meta &&
-        meta.phone === tempPhone &&
-        typeof meta.expiresAt === 'number' &&
-        Number.isFinite(meta.expiresAt) &&
-        Date.now() >= meta.expiresAt
-      ) {
-        window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
-        writeStoredSessionMeta(null);
-        markSessionExpiredNotice();
-        return null;
-      }
-      return tempPhone;
-    }
+    const activePhone =
+      window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY) ||
+      window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+    if (!activePhone) return null;
 
-    const persistentPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
-    if (!persistentPhone) return null;
-
-    const isTrusted = isDeviceInTrustedList(all[persistentPhone]?.trustedDevices, deviceId);
-
-    // If device is in trusted devices for this phone, auto-heal session to trusted permanent!
-    if (isTrusted) {
-      if (
-        !meta ||
-        meta.phone !== persistentPhone ||
-        meta.mode !== 'trusted' ||
-        meta.expiresAt !== null
-      ) {
-        const healedMeta = startTravelerSession(persistentPhone, 'trusted', {
-          persistInLocalStorage: true,
-          cloudRegistered: false,
-        });
-        writeStoredSessionMeta(healedMeta);
-      }
-      return persistentPhone;
-    }
-
-    if (
-      !meta ||
-      meta.phone !== persistentPhone ||
-      (meta.mode === 'temporary' && meta.persistInLocalStorage !== true)
-    ) {
+    if (!meta || meta.phone !== activePhone) {
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+      window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       return null;
     }
 
-    if (
-      typeof meta.expiresAt === 'number' &&
-      Number.isFinite(meta.expiresAt) &&
-      Date.now() >= meta.expiresAt
-    ) {
+    const now = Date.now();
+    const isExpiredByTime =
+      (typeof meta.expiresAt === 'number' &&
+        Number.isFinite(meta.expiresAt) &&
+        now >= meta.expiresAt) ||
+      (typeof meta.lastActivityAt === 'number' &&
+        Number.isFinite(meta.lastActivityAt) &&
+        now - meta.lastActivityAt >= INACTIVITY_LOCK_DURATION_MS);
+
+    if (isExpiredByTime) {
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+      window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       writeStoredSessionMeta(null);
       markSessionExpiredNotice();
       return null;
     }
-    return persistentPhone;
+    return activePhone;
   } catch {
     return null;
   }
+}
+
+export function touchTravelerSessionActivity(minThrottleMs = 15_000): boolean {
+  if (typeof window === 'undefined') return false;
+  const meta = readStoredSessionMeta();
+  if (!meta) return false;
+  let activePhone: string | null = null;
+  try {
+    activePhone =
+      window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY) ||
+      window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
+  } catch {
+    activePhone = null;
+  }
+  if (!activePhone || meta.phone !== activePhone) return false;
+
+  const now = Date.now();
+  const isExpiredByTime =
+    (typeof meta.expiresAt === 'number' &&
+      Number.isFinite(meta.expiresAt) &&
+      now >= meta.expiresAt) ||
+    (typeof meta.lastActivityAt === 'number' &&
+      Number.isFinite(meta.lastActivityAt) &&
+      now - meta.lastActivityAt >= INACTIVITY_LOCK_DURATION_MS);
+  if (isExpiredByTime) {
+    return false;
+  }
+
+  if (
+    typeof meta.lastActivityAt !== 'number' ||
+    now - meta.lastActivityAt >= minThrottleMs
+  ) {
+    touchStoredSessionActivity();
+  }
+  return true;
 }
 
 export function getActiveTraveler(): TravelerProfile | null {
@@ -1473,7 +1465,7 @@ export function setActiveTravelerPhone(phone: string | null): void {
 
 export function startTravelerSession(
   rawPhone: string,
-  mode: 'trusted' | 'temporary',
+  mode: 'trusted' | 'temporary' = 'trusted',
   options?: {
     sessionId?: string;
     customExpiresAtMs?: number | null;
@@ -1488,13 +1480,11 @@ export function startTravelerSession(
     throw new Error('Cannot start dashboard session before OTP or Admin verification.');
   }
   const now = Date.now();
-  const persistInLocalStorage = options?.persistInLocalStorage ?? mode === 'trusted';
+  const persistInLocalStorage = options?.persistInLocalStorage ?? true;
   const expiresAt =
-    options?.customExpiresAtMs !== undefined
+    options?.customExpiresAtMs !== undefined && options.customExpiresAtMs !== null
       ? options.customExpiresAtMs
-      : mode === 'temporary'
-      ? now + TEMPORARY_SESSION_DURATION_MS
-      : null;
+      : now + INACTIVITY_LOCK_DURATION_MS;
   const sessionId =
     options?.sessionId ||
     `sess_${deviceId.slice(0, 12)}_${now}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1505,20 +1495,16 @@ export function startTravelerSession(
     mode,
     deviceId,
     startedAt: now,
+    lastActivityAt: now,
     expiresAt,
     persistInLocalStorage,
     cloudRegistered: Boolean(options?.cloudRegistered),
   };
   if (typeof window !== 'undefined') {
     try {
-      if (mode === 'temporary' && !persistInLocalStorage) {
-        // Temporary browser-only sessions live inside sessionStorage so closing browser auto-expires immediately
-        window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
-        window.sessionStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
-      } else {
-        window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
-        window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
-      }
+      window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+      window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
+      setSavedClientPhone(phone);
     } catch {
       // Ignore
     }
@@ -1764,8 +1750,8 @@ export async function checkClientAccountAndDeviceCloud(rawPhone: string): Promis
 }
 
 /**
- * Verifies a 6-digit PIN strictly on an ALREADY-TRUSTED device and opens trusted session.
- * Untrusted devices must use verifyClientPinForNewDeviceCloud -> mandatory privacy device choice!
+ * Verifies the client's 6-digit personal PIN on any device once their account is activated,
+ * opening a 12-hour session and saving the client's phone permanently in localStorage.
  */
 export async function loginWithTrustedDevicePinCloud(
   rawPhone: string,
@@ -1775,6 +1761,7 @@ export async function loginWithTrustedDevicePinCloud(
   ok: boolean;
   error?: string;
   fallbackToOtp?: boolean;
+  needsPinSetup?: boolean;
   profile?: TravelerProfile;
 }> {
   const phone = normalizePhone(rawPhone);
@@ -1801,14 +1788,26 @@ export async function loginWithTrustedDevicePinCloud(
     };
   }
 
-  if (!check.isTrustedDevice || !check.hasPin || !check.profile.pinHash) {
+  if (!isClientAccountVerified(check.profile)) {
     return {
       ok: false,
       fallbackToOtp: true,
       error:
         lang === 'en'
-          ? 'This device is not yet trusted. Please complete New Device Verification first.'
-          : 'هذا الجهاز غير موثوق بعد. يرجى إكمال التحقق من الجهاز الجديد أولاً.',
+          ? 'Account is pending verification. Please complete OTP or Admin activation first.'
+          : 'الحساب بانتظار التفعيل. يرجى إكمال التفعيل بكود الواتساب أو من الإدارة أولاً.',
+    };
+  }
+
+  if (!check.hasPin || !check.profile.pinHash) {
+    return {
+      ok: false,
+      needsPinSetup: true,
+      profile: check.profile,
+      error:
+        lang === 'en'
+          ? 'No personal PIN set yet. Please create your 6-digit PIN.'
+          : 'لم يتم تعيين رمز PIN بعد. يرجى إنشاء رمز PIN شخصي من 6 أرقام.',
     };
   }
 
@@ -1819,61 +1818,31 @@ export async function loginWithTrustedDevicePinCloud(
       error:
         lang === 'en'
           ? 'Incorrect 6-digit PIN. Please try again or use Forgot PIN.'
-          : 'رمز الـ PIN غير صحيح. يرجى المحاولة مرة أخرى أو استخدام خيار نسيت رمز الـ PIN.',
-    };
-  }
-
-  if (
-    Array.isArray(check.profile.blockedDevices) &&
-    check.profile.blockedDevices.includes(check.currentDeviceId)
-  ) {
-    return {
-      ok: false,
-      error:
-        lang === 'en'
-          ? 'This device has been blocked from accessing this account.'
-          : 'تم حظر هذا الجهاز من الوصول إلى الحساب.',
+          : 'الرقم السري (PIN) غير صحيح. يرجى المحاولة مرة أخرى أو استخدام خيار نسيت الرقم السري.',
     };
   }
 
   const nowIso = new Date().toISOString();
-  const currentList = check.profile.trustedDevices || [];
-  const updatedDevices: TrustedDevice[] = currentList.map((d) =>
-    d.deviceId === check.currentDeviceId
-      ? { ...d, label: check.currentDeviceLabel, lastUsedAt: nowIso }
-      : d
-  );
-
-  const meta = startTravelerSession(check.phone, 'trusted', {
+  setSavedClientPhone(check.phone);
+  startTravelerSession(check.phone, 'trusted', {
     persistInLocalStorage: true,
-    cloudRegistered: false,
+    cloudRegistered: true,
   });
-  const sessionRecord: ActiveSessionRecord = {
-    sessionId: meta.sessionId || `sess_${Date.now()}`,
-    deviceId: check.currentDeviceId,
-    deviceName: check.currentDeviceLabel,
-    mode: 'trusted',
-    loggedInAt: nowIso,
-    lastActiveAt: nowIso,
-    expiresAt: null,
-    authMethod: 'pin',
-  };
-  const nextSessions = buildNextActiveSessionsList(check.profile.activeSessions, sessionRecord);
 
   const updated: TravelerProfile = {
     ...check.profile,
     isOnline: true,
     lastSeenAt: nowIso,
-    trustedDevices: updatedDevices,
-    activeSessions: nextSessions,
+    updatedAt: nowIso,
   };
   const all = getAllTravelers();
   all[check.phone] = updated;
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(updated);
-  markCurrentSessionCloudRegistered();
   return { ok: true, profile: updated };
 }
+
+export const loginWithClientPinCloud = loginWithTrustedDevicePinCloud;
 
 /**
  * Option 2 on New Device Verification Screen:
@@ -3329,16 +3298,16 @@ export async function verifyLoginOtpCloud(
 
   all[phone] = verifiedProfile;
   saveAllTravelersLocalOnly(all);
+  setSavedClientPhone(phone);
   await syncTravelerToCloud(verifiedProfile);
 
   const hasPin = Boolean(verifiedProfile.pinHash && /^[a-f0-9]{64}$/.test(verifiedProfile.pinHash));
-  const trusted = isDeviceInTrustedList(verifiedProfile.trustedDevices);
 
   return {
     ok: true,
     profile: verifiedProfile,
     needsPinSetup: !hasPin,
-    isDeviceTrusted: trusted,
+    isDeviceTrusted: true,
   };
 }
 
@@ -3379,6 +3348,38 @@ export async function setClientPinCloud(
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(updated);
   return updated;
+}
+
+/**
+ * Completes onboarding / PIN recovery: persists the 6-digit PIN hash, permanently stores
+ * the client's phone in localStorage, and unlocks a 12-hour active session immediately.
+ */
+export async function completePinSetupSessionCloud(
+  rawPhone: string,
+  newPin: string
+): Promise<TravelerProfile | null> {
+  const updated = await setClientPinCloud(rawPhone, newPin);
+  if (!updated) return null;
+
+  const phone = updated.phone;
+  const nowIso = new Date().toISOString();
+  setSavedClientPhone(phone);
+  startTravelerSession(phone, 'trusted', {
+    persistInLocalStorage: true,
+    cloudRegistered: true,
+  });
+
+  const onlineUpdated: TravelerProfile = {
+    ...updated,
+    isOnline: true,
+    lastSeenAt: nowIso,
+    updatedAt: nowIso,
+  };
+  const all = getAllTravelers();
+  all[phone] = onlineUpdated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(onlineUpdated);
+  return onlineUpdated;
 }
 
 export async function trustCurrentDeviceCloud(
@@ -3993,40 +3994,25 @@ export async function activateViaMagicLinkCloud(
         };
 
         const hasPin = Boolean(updated.pinHash && /^[a-f0-9]{64}$/.test(updated.pinHash));
-        const { deviceId, label } = getDeviceFingerprint();
-        const trusted = isDeviceInTrustedList(updated.trustedDevices, deviceId);
+        setSavedClientPhone(phone);
 
-        if (hasPin && trusted) {
+        if (hasPin) {
           const nowIso = new Date().toISOString();
-          updated.trustedDevices = (updated.trustedDevices || []).map((d) =>
-            d.deviceId === deviceId ? { ...d, label, lastUsedAt: nowIso } : d
-          );
-          const meta = startTravelerSession(phone, 'trusted', {
+          startTravelerSession(phone, 'trusted', {
             persistInLocalStorage: true,
-            cloudRegistered: false,
+            cloudRegistered: true,
           });
-          const sessionRecord: ActiveSessionRecord = {
-            sessionId: meta.sessionId || `sess_${Date.now()}`,
-            deviceId,
-            deviceName: label,
-            mode: 'trusted',
-            loggedInAt: nowIso,
-            lastActiveAt: nowIso,
-            expiresAt: null,
-            authMethod: 'otp',
-          };
           updated.isOnline = true;
           updated.lastSeenAt = nowIso;
-          updated.activeSessions = buildNextActiveSessionsList(updated.activeSessions, sessionRecord);
+          updated.updatedAt = nowIso;
           const all = getAllTravelers();
           all[phone] = updated;
           saveAllTravelersLocalOnly(all);
           await syncTravelerToCloud(updated);
-          markCurrentSessionCloudRegistered(meta.sessionId);
           return { ok: true, profile: updated, needsPinSetup: false, isDeviceTrusted: true };
         }
 
-        // Clear any pre-existing local active session so PIN Setup / Device Trust prompt renders cleanly
+        // Verified first-time user without PIN -> hold active session until they finish creating their 6-digit PIN
         setActiveTravelerPhone(null);
         const all = getAllTravelers();
         all[phone] = updated;
@@ -4035,8 +4021,8 @@ export async function activateViaMagicLinkCloud(
         return {
           ok: true,
           profile: updated,
-          needsPinSetup: !hasPin,
-          isDeviceTrusted: trusted,
+          needsPinSetup: true,
+          isDeviceTrusted: true,
         };
       }
     }
@@ -4054,28 +4040,20 @@ export async function activateViaMagicLinkCloud(
   const hasPin = Boolean(
     localRes.profile.pinHash && /^[a-f0-9]{64}$/.test(localRes.profile.pinHash)
   );
-  const trusted = isDeviceInTrustedList(localRes.profile.trustedDevices);
-  if (!hasPin || !trusted) {
-    // Undo direct session unlock from legacy offline helper so PIN & Trust prompt always execute
+  setSavedClientPhone(localRes.profile.phone);
+  if (!hasPin) {
     setActiveTravelerPhone(null);
   } else {
-    const meta = startTravelerSession(localRes.profile.phone, 'trusted', {
+    startTravelerSession(localRes.profile.phone, 'trusted', {
       persistInLocalStorage: true,
-      cloudRegistered: false,
-    });
-    void upsertActiveSessionCloud(localRes.profile.phone, {
-      sessionId: meta.sessionId || `sess_${Date.now()}`,
-      mode: 'trusted',
-      expiresAtMs: null,
-      authMethod: 'otp',
-      persistInLocalStorage: true,
+      cloudRegistered: true,
     });
   }
   return {
     ok: true,
     profile: localRes.profile,
     needsPinSetup: !hasPin,
-    isDeviceTrusted: trusted,
+    isDeviceTrusted: true,
   };
 }
 
