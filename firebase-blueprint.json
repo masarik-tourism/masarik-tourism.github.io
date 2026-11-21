@@ -199,6 +199,26 @@
           "description": "Full name matching the passport MRZ/data page.",
           "maxLength": 200
         },
+        "passportFullNameEn": {
+          "type": "string",
+          "description": "English full name as printed on passport (AI OCR or manual).",
+          "maxLength": 200
+        },
+        "passportFullNameAr": {
+          "type": "string",
+          "description": "Arabic full name as printed on passport if available.",
+          "maxLength": 200
+        },
+        "birthDate": {
+          "type": "string",
+          "description": "Traveler date of birth (YYYY-MM-DD).",
+          "maxLength": 32
+        },
+        "passportIssueDate": {
+          "type": "string",
+          "description": "Passport issue date (YYYY-MM-DD).",
+          "maxLength": 32
+        },
         "passportExpiryDate": {
           "type": "string",
           "description": "Passport expiry date (YYYY-MM-DD).",
@@ -208,6 +228,36 @@
           "type": "string",
           "description": "Traveler nationality.",
           "maxLength": 100
+        },
+        "visaDocumentNumber": {
+          "type": "string",
+          "description": "Extracted Saudi visa or visit invitation document number.",
+          "maxLength": 64
+        },
+        "saudiSponsorId": {
+          "type": "string",
+          "description": "Extracted Saudi host/sponsor National ID, Iqama ID, or Establishment number.",
+          "maxLength": 64
+        },
+        "applicantNameAr": {
+          "type": "string",
+          "description": "Extracted applicant Arabic name from visa/visit document.",
+          "maxLength": 200
+        },
+        "applicantNameEn": {
+          "type": "string",
+          "description": "Extracted applicant English name from visa/visit document.",
+          "maxLength": 200
+        },
+        "documentPassportNumber": {
+          "type": "string",
+          "description": "Passport number printed on the visa/visit document.",
+          "maxLength": 40
+        },
+        "portOfEntry": {
+          "type": "string",
+          "description": "Extracted arrival/consulate port of entry (e.g. Cairo, Alexandria).",
+          "maxLength": 160
         },
         "documents": {
           "type": "array",
@@ -318,6 +368,11 @@
           "type": "number",
           "description": "Saved attachment retention period in days (30, 60, or 90) for completed orders cleanup.",
           "enum": [30, 60, 90]
+        },
+        "geminiApiKey": {
+          "type": "string",
+          "description": "Persistent Gemini API key saved by the General Manager for Smart Passport Reader and document clarity checks across web and mobile builds.",
+          "maxLength": 256
         },
         "updatedAt": {
           "type": "string",

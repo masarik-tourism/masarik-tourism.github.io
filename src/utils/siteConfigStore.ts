@@ -24,6 +24,7 @@ export interface SiteConfig {
   additionalDriveWebApps: DriveStorageEndpoint[];
   fcmVapidKey?: string;
   retentionDays: RetentionDaysOption;
+  geminiApiKey?: string;
 }
 
 const SITE_CONFIG_STORAGE_KEY = 'masarik_site_config_v1';
@@ -44,6 +45,7 @@ export const DEFAULT_SITE_CONFIG: SiteConfig = {
   additionalDriveWebApps: [],
   fcmVapidKey: '',
   retentionDays: 60,
+  geminiApiKey: '',
 };
 
 export function sanitizeRetentionDays(rawVal: unknown): RetentionDaysOption {
@@ -113,6 +115,7 @@ function sanitizeSiteConfigPayload(cfg: SiteConfig) {
     additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(cfg.additionalDriveWebApps),
     ...(cfg.fcmVapidKey ? { fcmVapidKey: String(cfg.fcmVapidKey).trim().slice(0, 256) } : {}),
     retentionDays: sanitizeRetentionDays(cfg.retentionDays),
+    geminiApiKey: String(cfg.geminiApiKey || '').trim().slice(0, 256),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -170,6 +173,7 @@ export function subscribeSiteConfigCloud(): () => void {
         additionalDriveWebApps: sanitizeAdditionalDriveEndpoints(data.additionalDriveWebApps),
         fcmVapidKey: data.fcmVapidKey ? String(data.fcmVapidKey).trim().slice(0, 256) : '',
         retentionDays: sanitizeRetentionDays(data.retentionDays),
+        geminiApiKey: data.geminiApiKey ? String(data.geminiApiKey).trim().slice(0, 256) : '',
       };
       writeSiteConfigLocalOnly(merged);
     },
@@ -227,6 +231,10 @@ export async function fetchSiteConfigFromCloud(): Promise<SiteConfig> {
         data.retentionDays !== undefined
           ? sanitizeRetentionDays(data.retentionDays)
           : current.retentionDays,
+      geminiApiKey:
+        data.geminiApiKey !== undefined
+          ? String(data.geminiApiKey || '').trim().slice(0, 256)
+          : current.geminiApiKey || '',
     };
     writeSiteConfigLocalOnly(merged);
     return merged;

@@ -1,36 +1,87 @@
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { GoogleGenAI, Type } from '@google/genai';
+import { evaluatePassportValidity } from './src/utils/passportValidity';
 
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
 
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '25mb' }));
 
-function getGeminiClient() {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return null;
+interface FirebaseAppletConfigJson {
+  projectId?: string;
+  firestoreDatabaseId?: string;
+}
+
+let cachedAppletConfig: FirebaseAppletConfigJson | null = null;
+function getFirebaseAppletConfig(): FirebaseAppletConfigJson {
+  if (cachedAppletConfig) return cachedAppletConfig;
+  try {
+    const raw = fs.readFileSync(path.resolve(process.cwd(), 'firebase-applet-config.json'), 'utf8');
+    cachedAppletConfig = JSON.parse(raw) as FirebaseAppletConfigJson;
+  } catch {
+    cachedAppletConfig = {};
   }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
+  return cachedAppletConfig;
+}
+
+let cachedFirestoreGeminiKey: { key: string; fetchedAt: number } | null = null;
+
+async function fetchGeminiKeyFromFirestore(): Promise<string> {
+  if (cachedFirestoreGeminiKey && Date.now() - cachedFirestoreGeminiKey.fetchedAt < 10_000) {
+    return cachedFirestoreGeminiKey.key;
+  }
+  try {
+    const cfg = getFirebaseAppletConfig();
+    if (!cfg.projectId) return '';
+    const dbId = cfg.firestoreDatabaseId || '(default)';
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      cfg.projectId
+    )}/databases/${encodeURIComponent(dbId)}/documents/site_config/general`;
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) return '';
+    const json = (await res.json()) as {
+      fields?: { geminiApiKey?: { stringValue?: string } };
+    };
+    const key = String(json?.fields?.geminiApiKey?.stringValue || '').trim();
+    cachedFirestoreGeminiKey = { key, fetchedAt: Date.now() };
+    return key;
+  } catch {
+    return '';
+  }
+}
+
+async function resolveGeminiClient(): Promise<{ ai: GoogleGenAI | null; source: 'firestore' | 'env' | 'none' }> {
+  const firestoreKey = await fetchGeminiKeyFromFirestore();
+  const envKey = String(process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = firestoreKey || envKey;
+  if (!apiKey) {
+    return { ai: null, source: 'none' };
+  }
+  return {
+    ai: new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
-    },
-  });
+    }),
+    source: firestoreKey ? 'firestore' : 'env',
+  };
 }
 
 app.post('/api/passport-check', async (req, res) => {
   try {
-    const ai = getGeminiClient();
+    const { ai } = await resolveGeminiClient();
     if (!ai) {
-      res.status(500).json({
+      res.status(400).json({
+        noKeyConfigured: true,
         error:
-          'مفتاح Gemini API غير مهيأ على الخادم. يرجى التحقق من Settings > Secrets لإضافة GEMINI_API_KEY.',
+          'مفتاح Gemini API غير مهيأ بعد. يرجى إضافته من لوحة الإدارة (الإعدادات العامة) أو عبر GEMINI_API_KEY.',
       });
       return;
     }
@@ -44,7 +95,11 @@ app.post('/api/passport-check', async (req, res) => {
 
     const isEn = body.lang === 'en';
     const rawBase64 = (body.imageBase64 || '').trim();
-    const mimeType = (body.mimeType || 'image/jpeg').trim();
+    const incomingMime = (body.mimeType || 'image/jpeg').trim().toLowerCase();
+    const mimeType =
+      incomingMime === 'application/pdf' || incomingMime.startsWith('image/')
+        ? incomingMime
+        : 'image/jpeg';
     const visaType = (
       body.visaType || (isEn ? 'Saudi Visa / Tasheer' : 'تأشيرة السعودية / تساهيل')
     ).trim();
@@ -52,8 +107,8 @@ app.post('/api/passport-check', async (req, res) => {
     if (!rawBase64) {
       res.status(400).json({
         error: isEn
-          ? 'Please attach a photo of the passport or document first.'
-          : 'يرجى إرفاق صورة الجواز أو المستند أولاً.',
+          ? 'Please attach a photo or PDF of the passport or visa document first.'
+          : 'يرجى إرفاق صورة أو ملف PDF للجواز أو مستند التأشيرة أولاً.',
       });
       return;
     }
@@ -62,45 +117,84 @@ app.post('/api/passport-check', async (req, res) => {
     const todayIso = new Date().toISOString().slice(0, 10);
 
     const promptText = isEn
-      ? `You are a passport and visa document verification specialist at "Masarik Tourism LLC" (مسارك للإنجاز السياحي).
+      ? `You are an expert travel document, passport, and Saudi Visa / MOFA Visit Invitation analyst at "Masarik Tourism LLC".
 Today's date is: ${todayIso}.
-Requested visa/service type: ${visaType}.
+Requested visa/service context: ${visaType}.
 
-Inspect the attached image carefully and extract:
-1. documentType (e.g., Passport, Visa, Work Contract, Certificate).
-2. fullName as shown on the document (or MRZ line if present).
-3. passportNumber (if visible).
-4. nationality.
-5. birthDate (YYYY-MM-DD if clearly legible, otherwise empty string).
-6. expiryDate (YYYY-MM-DD if clearly legible, otherwise empty string).
-7. Calculate remainingDays from today (${todayIso}) to expiryDate, and check the mandatory 6-month (180+ days) validity rule.
-8. Set validityStatus:
-   - "valid_6m" if remainingDays >= 180.
-   - "warning_under_6m" if still valid (> 0 days) but under 180 days.
-   - "expired" if expired.
-   - "unclear" if expiry date is unreadable or image is unclear/not a passport.
-9. Write a clear, professional English summary in summaryAr (yes, keep JSON key name summaryAr for schema compatibility) and list required/missing documents in missingRequirements for (${visaType}) such as white-background photos, bank statement, VFS Tasheer appointment, Enjaz fee & medical insurance, Chamber of Commerce/MOFA attestation, or passport renewal if under 6 months.`
-      : `أنت خبير فحص جوازات السفر ومستندات التأشيرات في شركة "مسارك للإنجاز السياحي".
+Analyze the attached file carefully (it can be an image OR a multi/single-page PDF):
+1. File clarity & readability:
+   - isReadable: true if key text/numbers are legible, else false.
+   - clarityStatus: "clear" | "blurry" | "cropped" | "unclear".
+   - clarityIssueAr / clarityIssueEn: empty string "" if clear, otherwise concise instructions to upload a clearer scan.
+
+2. Automatically classify the document type:
+   - detectedDocumentKind:
+     * "passport" if the file is a passport bio-data / MRZ page.
+     * "saudi_visa" if the file is a Saudi Visa, MOFA Visit Invitation (مستند تأشيرة / زيارة عائلية أو شخصية / مستند دعوة وزارة الخارجية), Enjaz slip, or Tasheer visa document.
+     * "other" for other travel documents.
+   - documentType: descriptive label in the requested language (e.g., "Passport", "Saudi Visit Visa Document", "Enjaz Application").
+
+3. If it is a PASSPORT (or contains passport details), extract accurately (using MRZ when present):
+   - passportFullNameEn / fullName: English/Latin full name exactly as printed on passport.
+   - passportFullNameAr: Arabic full name if printed on passport (else "").
+   - passportNumber: uppercase passport number with no spaces (else "").
+   - nationality: nationality (else "").
+   - birthDate: YYYY-MM-DD (else "").
+   - issueDate: YYYY-MM-DD (else "").
+   - expiryDate: YYYY-MM-DD (else "").
+   Calculate remainingDays from ${todayIso} to expiryDate and validate the 6-month (180+ days) rule.
+   Set validityStatus: "valid_6m" | "warning_under_6m" | "expired" | "unclear".
+
+4. If it is a SAUDI VISA / VISIT INVITATION DOCUMENT (or contains visa fields), extract accurately:
+   - visaDocumentNumber: Document / Visa / Request Number (رقم المستند / رقم طلب الزيارة أو التأشيرة).
+   - saudiSponsorId: Saudi Sponsor / Host Iqama ID, National ID, or Establishment/Border Number (رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي).
+   - applicantNameAr: Applicant full name in Arabic (اسم صاحب الطلب / المطلوب بالزيارة بالعربية).
+   - applicantNameEn: Applicant full name in English if printed (else "").
+   - documentPassportNumber: Passport number printed on the visa/visit document (uppercase, no spaces, else "").
+   - portOfEntry: Arrival / Consulate / Embarkation port (جهة القدوم مثل القاهرة / الإسكندرية / الرياض, else "").
+   (Leave passport-specific fields empty "" if not present on the visa document, and visa fields empty "" if scanning a passport).
+
+5. Write a clear Arabic summary in summaryAr, missing/next requirements in missingRequirements, and confidenceNote.`
+      : `أنت خبير تحليل جوازات السفر ومستندات التأشيرات والزيارات السعودية في شركة "مسارك للإنجاز السياحي".
 تاريخ اليوم الحالي هو: ${todayIso}.
-نوع المعاملة / التأشيرة المطلوبة من العميل: ${visaType}.
+سياق المعاملة / الخدمة: ${visaType}.
 
-قم بفحص الصورة المرفقة بدقة واستخرج البيانات التالية:
-1. نوع المستند (جواز سفر، تأشيرة، عقد عمل، شهادة، إلخ).
-2. الاسم الكامل كما يظهر في المستند (أو سطر MRZ إن وجد).
-3. رقم الجواز (إن وجد).
-4. الجنسية.
-5. تاريخ الميلاد (بصيغة YYYY-MM-DD إن كان ظاهراً بوضوح، وإلا نص فارغ).
-6. تاريخ انتهاء صلاحية الجواز (بصيغة YYYY-MM-DD إن كان ظاهراً بوضوح، وإلا نص فارغ).
-7. احسب عدد الأيام المتبقية من تاريخ اليوم (${todayIso}) حتى تاريخ الانتهاء، وتحقق من قاعدة الصلاحية الإلزامية (6 أشهر = 180 يوماً على الأقل).
-8. حدد حالة الصلاحية:
-   - "valid_6m" إذا كانت الصلاحية 180 يوماً فأكثر.
-   - "warning_under_6m" إذا كان سارياً ولكن أقل من 180 يوماً.
-   - "expired" إذا كان منتهياً.
-   - "unclear" إذا لم يكن تاريخ الانتهاء واضحاً أو كانت الصورة غير واضحة أو ليست جواز سفر.
-9. اكتب ملخصاً عربياً واضحاً ومهنياً لحالة المستند، واذكر قائمة بالمتطلبات الناقصة أو اللازمة لنوع المعاملة (${visaType}) مثل: صور شخصية بخلفية بيضاء، كشف حساب بنكي، حجز موعد تساهيل VFS، سداد منصة إنجاز والتأمين الطبي، تصديق الغرفة التجارية/الخارجية، أو تجديد الجواز إذا كانت الصلاحية أقل من 6 أشهر.`;
+قم بفحص الملف المرفق بدقة (قد يكون صورة أو ملف PDF):
+1. وضوح وقابلية قراءة الملف:
+   - isReadable: true إذا كانت النصوص والأرقام مقروءة، وإلا false.
+   - clarityStatus: "clear" إذا كان واضحاً، أو "blurry" (ضبابي)، أو "cropped" (مقصوص)، أو "unclear" (غير واضح).
+   - clarityIssueAr / clarityIssueEn: نص فارغ "" إذا كان واضحاً، وإلا تنبيه واضح لإعادة رفع نسخة أوضح.
+
+2. التعرّف التلقائي على نوع الملف المرفوع:
+   - detectedDocumentKind:
+     * "passport" إذا كان الملف جواز سفر.
+     * "saudi_visa" إذا كان الملف مستند تأشيرة أو زيارة عائلية/شخصية صادرة من وزارة الخارجية السعودية أو مستند إنجاز/تساهيل.
+     * "other" لأي مستند آخر.
+   - documentType: وصف واضح لنوع المستند بالعربية (مثال: جواز سفر، مستند تأشيرة زيارة سعودية، إشعار إنجاز).
+
+3. عند قراءة جواز السفر، استخرج بدقة بالغة (ومن سطر MRZ إن وجد):
+   - passportFullNameEn و fullName: الاسم الكامل بالإنجليزية كما في الجواز (أو "" إن لم يكن جوازاً).
+   - passportFullNameAr: الاسم الكامل بالعربية إن كان مطبوعاً في الجواز (أو "").
+   - passportNumber: رقم الجواز بأحرف كبيرة بدون مسافات (أو "").
+   - nationality: الجنسية.
+   - birthDate: تاريخ الميلاد بصيغة ميلادية YYYY-MM-DD (أو "").
+   - issueDate: تاريخ الإصدار بصيغة ميلادية YYYY-MM-DD (أو "").
+   - expiryDate: تاريخ الانتهاء بصيغة ميلادية YYYY-MM-DD (أو "").
+   واحسب الأيام المتبقية من ${todayIso} وحدد hasSixMonthsValidity و validityStatus ("valid_6m" | "warning_under_6m" | "expired" | "unclear").
+
+4. عند قراءة مستند تأشيرة / زيارة سعودية، استخرج بدقة:
+   - visaDocumentNumber: رقم المستند (رقم مستند التأشيرة أو طلب الزيارة).
+   - saudiSponsorId: رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي (أو رقم المنشأة).
+   - applicantNameAr: اسم صاحب الطلب / المطلوب بالزيارة باللغة العربية.
+   - applicantNameEn: اسم صاحب الطلب بالإنجليزية إن وجد في المستند.
+   - documentPassportNumber: رقم الجواز المدوّن داخل المستند (أحرف كبيرة بدون مسافات).
+   - portOfEntry: جهة القدوم / القنصلية / مدينة الوصول (مثل: القاهرة، الإسكندرية، السويس، إلخ).
+   (اترك الحقول غير الموجودة في المستند فارغة "").
+
+5. اكتب ملخصاً عربياً واضحاً في summaryAr، وقائمة المتطلبات في missingRequirements، وملاحظة الثقة في confidenceNote.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: 'gemini-2.5-flash',
       contents: {
         parts: [
           {
@@ -114,18 +208,28 @@ Inspect the attached image carefully and extract:
       },
       config: {
         systemInstruction: isEn
-          ? 'Return strictly valid JSON matching the schema in clear professional English. Never guess unreadable numbers.'
-          : 'أرجع النتيجة بصيغة JSON مطابقة للمخطط فقط وباللغة العربية الفصحى الواضحة للعميل المصري/العربي، ولا تخمّن أرقاماً غير مقروءة.',
+          ? 'Return strictly valid JSON matching the schema. Convert all parsed dates cleanly to YYYY-MM-DD. Never guess unreadable IDs, passport numbers, or dates.'
+          : 'أرجع النتيجة بصيغة JSON مطابقة للمخطط فقط، وحوّل التواريخ المقروءة إلى YYYY-MM-DD، ولا تخمّن أرقاماً أو تواريخ غير مقروءة.',
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            detectedDocumentKind: { type: Type.STRING },
             documentType: { type: Type.STRING },
             fullName: { type: Type.STRING },
+            passportFullNameEn: { type: Type.STRING },
+            passportFullNameAr: { type: Type.STRING },
             passportNumber: { type: Type.STRING },
             nationality: { type: Type.STRING },
             birthDate: { type: Type.STRING },
+            issueDate: { type: Type.STRING },
             expiryDate: { type: Type.STRING },
+            visaDocumentNumber: { type: Type.STRING },
+            saudiSponsorId: { type: Type.STRING },
+            applicantNameAr: { type: Type.STRING },
+            applicantNameEn: { type: Type.STRING },
+            documentPassportNumber: { type: Type.STRING },
+            portOfEntry: { type: Type.STRING },
             hasSixMonthsValidity: { type: Type.BOOLEAN },
             remainingDays: { type: Type.INTEGER },
             validityStatus: { type: Type.STRING },
@@ -135,21 +239,135 @@ Inspect the attached image carefully and extract:
               items: { type: Type.STRING },
             },
             confidenceNote: { type: Type.STRING },
+            isReadable: { type: Type.BOOLEAN },
+            clarityStatus: { type: Type.STRING },
+            clarityIssueAr: { type: Type.STRING },
+            clarityIssueEn: { type: Type.STRING },
           },
           required: [
+            'detectedDocumentKind',
             'documentType',
             'fullName',
+            'passportFullNameEn',
+            'passportFullNameAr',
             'passportNumber',
             'nationality',
             'birthDate',
+            'issueDate',
             'expiryDate',
+            'visaDocumentNumber',
+            'saudiSponsorId',
+            'applicantNameAr',
+            'applicantNameEn',
+            'documentPassportNumber',
+            'portOfEntry',
             'hasSixMonthsValidity',
             'remainingDays',
             'validityStatus',
             'summaryAr',
             'missingRequirements',
             'confidenceNote',
+            'isReadable',
+            'clarityStatus',
+            'clarityIssueAr',
+            'clarityIssueEn',
           ],
+        },
+      },
+    });
+
+    const rawText = (response.text ?? '{}').trim();
+    const parsed = JSON.parse(rawText) as Record<string, unknown>;
+    const evalResult = evaluatePassportValidity(String(parsed.expiryDate || ''));
+    if (evalResult.isValidFormat && evalResult.remainingDays !== null) {
+      parsed.remainingDays = evalResult.remainingDays;
+      parsed.hasSixMonthsValidity = !evalResult.isUnderSixMonths;
+      parsed.validityStatus = evalResult.isExpired
+        ? 'expired'
+        : evalResult.isUnderSixMonths
+        ? 'warning_under_6m'
+        : 'valid_6m';
+    } else if (parsed.detectedDocumentKind === 'saudi_visa') {
+      parsed.validityStatus = 'unclear';
+      parsed.hasSixMonthsValidity = true;
+    }
+    res.json({ result: parsed });
+  } catch (err: unknown) {
+    const errorObj = err as { status?: number; message?: string };
+    const status = typeof errorObj?.status === 'number' ? errorObj.status : 500;
+    const message =
+      errorObj?.message || 'حدث خطأ أثناء فحص المستند عبر خدمة الذكاء الاصطناعي.';
+    res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
+  }
+});
+
+app.post('/api/document-clarity-check', async (req, res) => {
+  try {
+    const { ai } = await resolveGeminiClient();
+    if (!ai) {
+      res.status(400).json({
+        noKeyConfigured: true,
+        error: 'Gemini API key is not configured.',
+      });
+      return;
+    }
+
+    const body = req.body as {
+      imageBase64?: string;
+      mimeType?: string;
+      docCategory?: string;
+      lang?: 'ar' | 'en';
+    };
+
+    const rawBase64 = (body.imageBase64 || '').trim();
+    const mimeType = (body.mimeType || 'image/jpeg').trim();
+    const docCategory = (body.docCategory || 'document').trim();
+    if (!rawBase64 || !mimeType.startsWith('image/')) {
+      res.json({
+        result: { isClear: true, clarityStatus: 'clear', issueAr: '', issueEn: '' },
+      });
+      return;
+    }
+
+    const cleanBase64 = rawBase64.includes(',') ? rawBase64.split(',')[1] : rawBase64;
+    const isPersonalPhoto = docCategory === 'avatar' || docCategory === 'photo';
+
+    const promptText = isPersonalPhoto
+      ? `Inspect this uploaded personal portrait/ID photo for travel/visa submission:
+Determine if the face is clearly visible and in focus (not severely blurred, severely cropped/cut-off, extremely dark, or not containing a clear face).
+Return JSON:
+- isClear: true if acceptable/usable, false if blurry, cut-off, unreadable, or unusable for a travel profile/visa photo.
+- clarityStatus: "clear" | "blurry" | "cropped" | "unclear".
+- issueAr: concise Arabic warning telling the user to retake a clearer photo if isClear is false (empty string if clear).
+- issueEn: concise English warning if isClear is false (empty string if clear).`
+      : `Inspect this uploaded travel document (${docCategory}) image for clarity before submission:
+Determine if text, numbers, barcodes, or details are reasonably readable, or if the photo is severely blurry, cropped at important edges, obscured by heavy glare, or too dark/illegible.
+Return JSON:
+- isClear: true if readable and usable, false if blurry, cropped, glare-obscured, or unreadable.
+- clarityStatus: "clear" | "blurry" | "cropped" | "unclear".
+- issueAr: concise Arabic warning telling the user what is wrong and to re-upload a clearer photo if isClear is false (empty string if clear).
+- issueEn: concise English warning if isClear is false (empty string if clear).`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          { inlineData: { mimeType, data: cleanBase64 } },
+          { text: promptText },
+        ],
+      },
+      config: {
+        systemInstruction: 'Return strictly valid JSON evaluating image clarity accurately without false alarms on decent phone scans.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            isClear: { type: Type.BOOLEAN },
+            clarityStatus: { type: Type.STRING },
+            issueAr: { type: Type.STRING },
+            issueEn: { type: Type.STRING },
+          },
+          required: ['isClear', 'clarityStatus', 'issueAr', 'issueEn'],
         },
       },
     });
@@ -160,9 +378,9 @@ Inspect the attached image carefully and extract:
   } catch (err: unknown) {
     const errorObj = err as { status?: number; message?: string };
     const status = typeof errorObj?.status === 'number' ? errorObj.status : 500;
-    const message =
-      errorObj?.message || 'حدث خطأ أثناء فحص المستند عبر خدمة الذكاء الاصطناعي.';
-    res.status(status >= 400 && status < 600 ? status : 500).json({ error: message });
+    res.status(status >= 400 && status < 600 ? status : 500).json({
+      error: errorObj?.message || 'Clarity inspection error',
+    });
   }
 });
 

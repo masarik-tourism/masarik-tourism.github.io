@@ -12,11 +12,14 @@ import {
   Loader2,
   ShieldCheck,
   Sparkles,
+  FileText,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { PassportAiCheckResult } from '../types/travel';
 import {
-  compressImageToDataUrl,
   getActiveTraveler,
+  readFileAsAiDataUrl,
   splitPassportName,
   updateTravelerProfileDetails,
   uploadAndAddDocumentToTraveler,
@@ -24,6 +27,8 @@ import {
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
+import { analyzePassportWithGemini } from '../utils/geminiPassportService';
+import { evaluatePassportValidity } from '../utils/passportValidity';
 
 interface TravelerToolsSectionProps {
   onOpenTravelerProfile: () => void;
@@ -173,6 +178,19 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
   const [staticFallbackNote, setStaticFallbackNote] = useState<string>('');
   const [aiResult, setAiResult] = useState<PassportAiCheckResult | null>(null);
   const [savedToWalletFeedback, setSavedToWalletFeedback] = useState<string>('');
+  const [copiedAiKey, setCopiedAiKey] = useState<string | null>(null);
+
+  const handleCopyValue = async (key: string, value: string) => {
+    const clean = (value || '').trim();
+    if (!clean) return;
+    try {
+      await navigator.clipboard.writeText(clean);
+      setCopiedAiKey(key);
+      setTimeout(() => setCopiedAiKey((prev) => (prev === key ? null : prev)), 2000);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
 
   const selectedVisaObj =
     VISA_TYPES_LIST.find((v) => v.id === selectedVisaId) || VISA_TYPES_LIST[0];
@@ -214,15 +232,19 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     setSavedToWalletFeedback('');
 
     try {
-      const compressed = await compressImageToDataUrl(file, 1200, 0.78);
-      setPreviewDataUrl(compressed.dataUrl);
+      const payload = await readFileAsAiDataUrl(file, 1200, 0.78);
+      setPreviewDataUrl(payload.dataUrl);
       setCompressedPayload({
-        ...compressed,
-        fileName: file.name || 'passport-document.jpg',
+        dataUrl: payload.dataUrl,
+        base64: payload.base64,
+        mimeType: payload.mimeType,
+        fileName: payload.fileName,
       });
     } catch (err) {
       setScanError(
-        err instanceof Error ? err.message : t('تعذر قراءة الصورة.', 'Could not read image.')
+        err instanceof Error
+          ? err.message
+          : t('تعذر قراءة الملف المختار.', 'Could not read selected file.')
       );
     }
   };
@@ -230,7 +252,10 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
   const handleRunAiScan = async () => {
     if (!compressedPayload) {
       setScanError(
-        t('يرجى رفع صورة جواز السفر أو المستند أولاً.', 'Please upload a passport or document photo first.')
+        t(
+          'يرجى رفع صورة أو ملف PDF للجواز أو المستند أولاً.',
+          'Please upload a passport or document image/PDF first.'
+        )
       );
       return;
     }
@@ -242,70 +267,97 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     setSavedToWalletFeedback('');
 
     try {
-      const response = await fetch('/api/passport-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: compressedPayload.base64,
-          mimeType: compressedPayload.mimeType,
-          visaType: selectedVisaLabel,
-          lang,
-        }),
+      const scanRes = await analyzePassportWithGemini({
+        imageBase64: compressedPayload.base64,
+        mimeType: compressedPayload.mimeType,
+        visaType: selectedVisaLabel,
+        lang,
       });
 
-      const contentType = response.headers.get('content-type') || '';
-      if (response.status === 404 || !contentType.includes('application/json')) {
-        setStaticFallbackNote(
-          t(
-            'خدمة الفحص الآلي بالذكاء الاصطناعي تعمل عبر الخادم الذكي للمنصة، بينما يمكنك حفظ الصورة مباشرة في محفظة المسافر أو التحقق من تاريخ الانتهاء وقائمة المتطلبات الجاهزة أدناه.',
-            'AI Passport Check requires the live backend server; meanwhile, you can save your image directly to your Traveler Wallet or review the visa checklist below.'
-          )
-        );
+      if (!scanRes.ok || !scanRes.result) {
+        if (scanRes.noKeyConfigured) {
+          setStaticFallbackNote(
+            scanRes.error ||
+              t(
+                'خدمة الفحص بالذكاء الاصطناعي تحتاج لإضافة مفتاح Gemini API في إعدادات لوحة الإدارة أولاً.',
+                'AI Passport Check requires configuring the Gemini API Key in Admin Settings first.'
+              )
+          );
+        } else {
+          setScanError(
+            scanRes.error ||
+              t(
+                'تعذر إتمام الفحص الآن. يرجى المحاولة مرة أخرى.',
+                'Could not complete the scan right now. Please try again.'
+              )
+          );
+        }
         setIsScanning(false);
         return;
       }
 
-      const data = (await response.json()) as {
-        result?: PassportAiCheckResult;
-        error?: string;
-      };
-
-      if (!response.ok || !data.result) {
-        setScanError(
-          data.error ||
-            t(
-              'تعذر إتمام الفحص الآن. يرجى المحاولة مرة أخرى.',
-              'Could not complete the scan right now. Please try again.'
-            )
-        );
-        setIsScanning(false);
-        return;
+      const extracted = scanRes.result;
+      setAiResult(extracted);
+      if (extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)) {
+        setPassportExpiry(extracted.expiryDate);
       }
 
-      setAiResult(data.result);
-      if (data.result.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(data.result.expiryDate)) {
-        setPassportExpiry(data.result.expiryDate);
-      }
-
-      // Automatically sync extracted passport number & details to active traveler profile
+      // Automatically sync extracted passport OR Saudi visa fields to active traveler profile
       const active = getActiveTraveler();
       if (active) {
         const autoUpdates: Record<string, string> = {};
-        if (data.result.passportNumber && data.result.passportNumber.trim()) {
-          autoUpdates.passportNumber = data.result.passportNumber.trim().toUpperCase();
+        const nameEn = (extracted.passportFullNameEn || extracted.fullName || '').trim();
+        const nameAr = (extracted.passportFullNameAr || '').trim();
+
+        if (extracted.detectedDocumentKind !== 'saudi_visa') {
+          if (extracted.passportNumber && extracted.passportNumber.trim()) {
+            autoUpdates.passportNumber = extracted.passportNumber.trim().toUpperCase();
+          }
+          if (nameEn) {
+            autoUpdates.passportFullName = nameEn;
+            autoUpdates.passportFullNameEn = nameEn;
+            const split = splitPassportName(nameEn);
+            if (split.firstName) autoUpdates.firstName = split.firstName;
+            if (split.lastName) autoUpdates.lastName = split.lastName;
+          }
+          if (nameAr) {
+            autoUpdates.passportFullNameAr = nameAr;
+          }
+          if (extracted.birthDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.birthDate)) {
+            autoUpdates.birthDate = extracted.birthDate;
+          }
+          if (extracted.issueDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.issueDate)) {
+            autoUpdates.passportIssueDate = extracted.issueDate;
+          }
+          if (extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)) {
+            autoUpdates.passportExpiryDate = extracted.expiryDate;
+          }
+          if (extracted.nationality && extracted.nationality.trim()) {
+            autoUpdates.nationality = extracted.nationality.trim();
+          }
         }
-        if (data.result.fullName && data.result.fullName.trim()) {
-          autoUpdates.passportFullName = data.result.fullName.trim();
-          const split = splitPassportName(data.result.fullName);
-          if (split.firstName) autoUpdates.firstName = split.firstName;
-          if (split.lastName) autoUpdates.lastName = split.lastName;
+
+        if (extracted.visaDocumentNumber?.trim()) {
+          autoUpdates.visaDocumentNumber = extracted.visaDocumentNumber.trim();
         }
-        if (data.result.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(data.result.expiryDate)) {
-          autoUpdates.passportExpiryDate = data.result.expiryDate;
+        if (extracted.saudiSponsorId?.trim()) {
+          autoUpdates.saudiSponsorId = extracted.saudiSponsorId.trim();
         }
-        if (data.result.nationality && data.result.nationality.trim()) {
-          autoUpdates.nationality = data.result.nationality.trim();
+        if (extracted.applicantNameAr?.trim()) {
+          autoUpdates.applicantNameAr = extracted.applicantNameAr.trim();
         }
+        if (extracted.applicantNameEn?.trim()) {
+          autoUpdates.applicantNameEn = extracted.applicantNameEn.trim();
+        }
+        if (extracted.documentPassportNumber?.trim()) {
+          autoUpdates.documentPassportNumber = extracted.documentPassportNumber
+            .trim()
+            .toUpperCase();
+        }
+        if (extracted.portOfEntry?.trim()) {
+          autoUpdates.portOfEntry = extracted.portOfEntry.trim();
+        }
+
         if (Object.keys(autoUpdates).length > 0) {
           updateTravelerProfileDetails(active.phone, autoUpdates);
         }
@@ -313,8 +365,8 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     } catch {
       setStaticFallbackNote(
         t(
-          'تعذر الاتصال بخادم الفحص الذكي حالياً. يمكنك استخدام حاسبة الصلاحية وقائمة المتطلبات المعتمدة أدناه أو إرسال الصورة مباشرة عبر واتساب للمراجعة الفورية.',
-          'Unable to reach the AI verification server right now. You can use the Validity Calculator and checklist below, or send your document directly on WhatsApp.'
+          'تعذر الاتصال بخدمة الفحص الذكي حالياً. يمكنك استخدام حاسبة الصلاحية وقائمة المتطلبات المعتمدة أدناه أو إرسال الملف مباشرة عبر واتساب للمراجعة الفورية.',
+          'Unable to reach the AI verification service right now. You can use the Validity Calculator and checklist below, or send your document directly on WhatsApp.'
         )
       );
     } finally {
@@ -330,14 +382,35 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     }
 
     if (aiResult) {
-      const split = aiResult.fullName ? splitPassportName(aiResult.fullName) : null;
+      const nameEn = (aiResult.passportFullNameEn || aiResult.fullName || '').trim();
+      const split = nameEn ? splitPassportName(nameEn) : null;
+      const isVisa = aiResult.detectedDocumentKind === 'saudi_visa';
       updateTravelerProfileDetails(active.phone, {
-        ...(split?.firstName ? { firstName: split.firstName } : {}),
-        ...(split?.lastName ? { lastName: split.lastName } : {}),
-        passportFullName: aiResult.fullName || active.passportFullName,
-        passportNumber: aiResult.passportNumber || active.passportNumber,
-        passportExpiryDate: aiResult.expiryDate || active.passportExpiryDate,
-        nationality: aiResult.nationality || active.nationality,
+        ...(!isVisa && split?.firstName ? { firstName: split.firstName } : {}),
+        ...(!isVisa && split?.lastName ? { lastName: split.lastName } : {}),
+        ...(!isVisa && nameEn
+          ? { passportFullName: nameEn, passportFullNameEn: nameEn }
+          : {}),
+        ...(aiResult.passportFullNameAr?.trim()
+          ? { passportFullNameAr: aiResult.passportFullNameAr.trim() }
+          : {}),
+        ...(!isVisa && aiResult.passportNumber
+          ? { passportNumber: aiResult.passportNumber }
+          : {}),
+        ...(aiResult.birthDate ? { birthDate: aiResult.birthDate } : {}),
+        ...(aiResult.issueDate ? { passportIssueDate: aiResult.issueDate } : {}),
+        ...(aiResult.expiryDate ? { passportExpiryDate: aiResult.expiryDate } : {}),
+        ...(aiResult.nationality ? { nationality: aiResult.nationality } : {}),
+        ...(aiResult.visaDocumentNumber
+          ? { visaDocumentNumber: aiResult.visaDocumentNumber }
+          : {}),
+        ...(aiResult.saudiSponsorId ? { saudiSponsorId: aiResult.saudiSponsorId } : {}),
+        ...(aiResult.applicantNameAr ? { applicantNameAr: aiResult.applicantNameAr } : {}),
+        ...(aiResult.applicantNameEn ? { applicantNameEn: aiResult.applicantNameEn } : {}),
+        ...(aiResult.documentPassportNumber
+          ? { documentPassportNumber: aiResult.documentPassportNumber }
+          : {}),
+        ...(aiResult.portOfEntry ? { portOfEntry: aiResult.portOfEntry } : {}),
         preferredVisaType: selectedVisaLabel,
       });
     }
@@ -345,7 +418,7 @@ export const TravelerToolsSection: React.FC<TravelerToolsSectionProps> = ({
     if (compressedPayload) {
       await uploadAndAddDocumentToTraveler(active.phone, {
         label: aiResult?.documentType || `${t('مستند', 'Document')} ${selectedVisaLabel}`,
-        docType: 'passport',
+        docType: aiResult?.detectedDocumentKind === 'saudi_visa' ? 'visa' : 'passport',
         fileName: compressedPayload.fileName,
         dataUrl: compressedPayload.dataUrl,
       });
@@ -711,7 +784,7 @@ I would like to proceed with reviewing my documents and completing the applicati
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/*,application/pdf"
                   onChange={handleFileSelected}
                   className="hidden"
                 />
@@ -722,25 +795,40 @@ I would like to proceed with reviewing my documents and completing the applicati
                   className="w-full border-2 border-dashed border-slate-300 hover:border-[#0284C7] bg-white rounded-2xl p-5 flex flex-col items-center justify-center gap-2 text-center transition cursor-pointer"
                 >
                   {previewDataUrl ? (
-                    <img
-                      src={previewDataUrl}
-                      alt={t('معاينة الجواز أو المستند', 'Passport or Document Preview')}
-                      loading="lazy"
-                      decoding="async"
-                      className="max-h-44 rounded-xl object-contain border border-slate-200"
-                    />
+                    compressedPayload?.mimeType === 'application/pdf' ? (
+                      <div className="flex flex-col items-center gap-2 py-3">
+                        <div className="w-14 h-14 rounded-2xl bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center">
+                          <FileText className="w-7 h-7" />
+                          <span className="text-[10px] font-black">PDF</span>
+                        </div>
+                        <span className="text-xs font-black text-[#0F2438] max-w-[240px] truncate">
+                          {compressedPayload.fileName}
+                        </span>
+                      </div>
+                    ) : (
+                      <img
+                        src={previewDataUrl}
+                        alt={t('معاينة الجواز أو المستند', 'Passport or Document Preview')}
+                        loading="lazy"
+                        decoding="async"
+                        className="max-h-44 rounded-xl object-contain border border-slate-200"
+                      />
+                    )
                   ) : (
                     <>
                       <div className="w-11 h-11 rounded-full bg-[#0284C7]/10 text-[#0284C7] flex items-center justify-center">
                         <Upload className="w-5 h-5" />
                       </div>
                       <span className="text-xs sm:text-sm font-bold text-[#0F2438]">
-                        {t('اضغط لرفع صورة الجواز أو المستند', 'Tap to Upload Passport or Document Photo')}
+                        {t(
+                          'اضغط لرفع صورة أو ملف PDF (جواز سفر أو تأشيرة)',
+                          'Tap to Upload Image or PDF (Passport or Visa)'
+                        )}
                       </span>
                       <span className="text-[11px] text-slate-500">
                         {t(
-                          'يتم ضغط الصورة ومعالجتها بأمان لاستخراج الاسم ورقم الجواز وتاريخ الانتهاء',
-                          'Safely extracts name, passport number, and expiry date'
+                          'يدعم الصور وملفات PDF ويميّز تلقائياً بين جواز السفر ومستند التأشيرة السعودية',
+                          'Supports images & PDFs and auto-detects Passports vs. Saudi Visa documents'
                         )}
                       </span>
                     </>
@@ -774,7 +862,7 @@ I would like to proceed with reviewing my documents and completing the applicati
                     onClick={() => fileInputRef.current?.click()}
                     className="min-h-[44px] px-3.5 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-xs font-bold text-[#0F2438] rounded-xl cursor-pointer whitespace-nowrap"
                   >
-                    {t('تغيير الصورة', 'Change Photo')}
+                    {t('تغيير الملف', 'Change File')}
                   </button>
                 )}
               </div>
@@ -793,9 +881,14 @@ I would like to proceed with reviewing my documents and completing the applicati
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3">
                     <div>
-                      <span className="text-[11px] font-bold text-[#0284C7] block">
-                        {t('نتيجة الفحص بالذكاء الاصطناعي', 'AI Pre-Check Result')}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2 mb-0.5">
+                        <span className="text-[11px] font-bold text-[#0284C7]">
+                          {t('نتيجة الفحص بالذكاء الاصطناعي', 'AI Pre-Check Result')}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                          {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                        </span>
+                      </div>
                       <h3 className="text-base font-black text-[#0F2438]">
                         {aiResult.documentType || t('مستند مسافر', 'Traveler Document')}
                       </h3>
@@ -805,15 +898,23 @@ I would like to proceed with reviewing my documents and completing the applicati
                       className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border ${
                         aiResult.hasSixMonthsValidity
                           ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                          : aiResult.validityStatus === 'expired'
-                          ? 'bg-red-50 border-red-200 text-red-800'
+                          : aiResult.validityStatus === 'expired' ||
+                            aiResult.validityStatus === 'warning_under_6m'
+                          ? 'bg-red-50 border-red-300 text-red-800'
                           : 'bg-amber-50 border-amber-200 text-amber-800'
                       }`}
                     >
                       {aiResult.hasSixMonthsValidity ? (
                         <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                       ) : (
-                        <AlertTriangle className="w-4 h-4 text-amber-600" />
+                        <AlertTriangle
+                          className={`w-4 h-4 ${
+                            aiResult.validityStatus === 'expired' ||
+                            aiResult.validityStatus === 'warning_under_6m'
+                              ? 'text-red-600'
+                              : 'text-amber-600'
+                          }`}
+                        />
                       )}
                       <span>
                         {aiResult.hasSixMonthsValidity
@@ -823,46 +924,254 @@ I would like to proceed with reviewing my documents and completing the applicati
                             )
                           : aiResult.validityStatus === 'expired'
                           ? t('الجواز منتهي الصلاحية', 'Passport Expired')
-                          : t('يحتاج مراجعة أو صلاحية أقل من 6 أشهر', 'Needs Review / Under 6 Months')}
+                          : t('صلاحية أقل من 6 أشهر', 'Under 6 Months Validity')}
                       </span>
                     </div>
                   </div>
 
+                  {/* Clarity Alert Banner if Blurry / Cropped / Unreadable */}
+                  {(aiResult.isReadable === false ||
+                    (aiResult.clarityStatus && aiResult.clarityStatus !== 'clear')) && (
+                    <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 text-xs font-bold text-amber-950 flex items-start gap-2.5">
+                      <AlertTriangle className="w-4.5 h-4.5 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <span className="font-black block">
+                          {t(
+                            'تنبيه جودة الصورة: يرجى إعادة تصوير المستند بوضوح',
+                            'Image Clarity Alert: Please retake a clearer photo'
+                          )}
+                        </span>
+                        <p className="text-[11px] font-semibold text-amber-900">
+                          {t(
+                            aiResult.clarityIssueAr || aiResult.clarityIssueEn || '',
+                            aiResult.clarityIssueEn || aiResult.clarityIssueAr || ''
+                          ) ||
+                            t(
+                              'الصورة المرفقة تبدو غير واضحة أو مقصوصة الأطراف. يرجى التقاط صورة أوضح في إضاءة جيدة.',
+                              'The uploaded photo appears blurry, cropped, or obscured. Please capture a clearer photo.'
+                            )}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Prominent Red 6-Month Validity Rule Warning Banner */}
+                  {(() => {
+                    const validityEval = evaluatePassportValidity(aiResult.expiryDate);
+                    const isUnder6Months =
+                      validityEval.isUnderSixMonths ||
+                      aiResult.validityStatus === 'expired' ||
+                      aiResult.validityStatus === 'warning_under_6m';
+                    if (!isUnder6Months) return null;
+                    return (
+                      <div className="p-3.5 rounded-xl bg-red-50 border-2 border-red-300 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5">
+                        <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                        <div>
+                          <span>
+                            {t(
+                              'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                              'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                            )}
+                          </span>
+                          {validityEval.remainingDays !== null && (
+                            <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                              {validityEval.remainingDays <= 0
+                                ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
+                                : t(
+                                    `المتبقي في الجواز: ${validityEval.remainingDays} يوماً فقط.`,
+                                    `Remaining validity: only ${validityEval.remainingDays} days.`
+                                  )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Extracted Fields Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                    <div className="bg-white border border-slate-200 rounded-xl p-3">
-                      <span className="text-[11px] text-slate-400 block">
-                        {t('الاسم المستخرج', 'Extracted Full Name')}
-                      </span>
-                      <span className="font-bold text-[#0F2438]">
-                        {aiResult.fullName || t('غير واضح بالصورة', 'Not clearly visible')}
-                      </span>
+                  {aiResult.detectedDocumentKind === 'saudi_visa' ||
+                  aiResult.visaDocumentNumber ||
+                  aiResult.saudiSponsorId ||
+                  aiResult.portOfEntry ? (
+                    <div className="space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-black text-[#0F2438]">
+                          {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-black text-emerald-800">
+                          {t('مستند تأشيرة / زيارة سعودية', 'Saudi Visa / Visit Doc')}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('رقم المستند', 'Document Number')}
+                            </span>
+                            <span className="font-bold text-[#0F2438] tabular-nums">
+                              {aiResult.visaDocumentNumber || t('غير موجود', 'N/A')}
+                            </span>
+                          </div>
+                          {aiResult.visaDocumentNumber && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyValue('visaDoc', aiResult.visaDocumentNumber || '')}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'visaDoc' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedAiKey === 'visaDoc' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('رقم الكفيل / الإقامة أو الهوية', 'Saudi Sponsor / Iqama ID')}
+                            </span>
+                            <span className="font-bold text-[#0F2438] tabular-nums">
+                              {aiResult.saudiSponsorId || t('غير موجود', 'N/A')}
+                            </span>
+                          </div>
+                          {aiResult.saudiSponsorId && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyValue('sponsorId', aiResult.saudiSponsorId || '')}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'sponsorId' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedAiKey === 'sponsorId' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3">
+                          <span className="text-[11px] text-slate-400 block">
+                            {t('اسم صاحب الطلب (عربي)', 'Applicant Name (AR)')}
+                          </span>
+                          <span className="font-bold text-[#0F2438]">
+                            {aiResult.applicantNameAr || t('غير موجود', 'N/A')}
+                          </span>
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3">
+                          <span className="text-[11px] text-slate-400 block">
+                            {t('اسم صاحب الطلب (إنجليزي)', 'Applicant Name (EN)')}
+                          </span>
+                          <span className="font-bold text-[#0F2438]">
+                            {aiResult.applicantNameEn || t('غير موجود', 'N/A')}
+                          </span>
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('رقم الجواز المدوّن في المستند', 'Passport No. on Document')}
+                            </span>
+                            <span className="font-bold text-[#0F2438] tabular-nums">
+                              {aiResult.documentPassportNumber || aiResult.passportNumber || t('غير موجود', 'N/A')}
+                            </span>
+                          </div>
+                          {(aiResult.documentPassportNumber || aiResult.passportNumber) && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleCopyValue(
+                                  'docPassport',
+                                  aiResult.documentPassportNumber || aiResult.passportNumber || ''
+                                )
+                              }
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'docPassport' ? (
+                                <Check className="w-3 h-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-3 h-3" />
+                              )}
+                              <span>{copiedAiKey === 'docPassport' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3">
+                          <span className="text-[11px] text-slate-400 block">
+                            {t('جهة القدوم', 'Port of Entry')}
+                          </span>
+                          <span className="font-bold text-[#0F2438]">
+                            {aiResult.portOfEntry || t('غير محدد', 'Unspecified')}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums">
-                      <span className="text-[11px] text-slate-400 block">
-                        {t('رقم الجواز / الوثيقة', 'Passport / Document No.')}
-                      </span>
-                      <span className="font-bold text-[#0F2438]">
-                        {aiResult.passportNumber || t('غير واضح بالصورة', 'Not clearly visible')}
-                      </span>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                      <div className="bg-white border border-slate-200 rounded-xl p-3">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('الاسم الكامل (إنجليزي)', 'Full Name (EN)')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.passportFullNameEn ||
+                            aiResult.fullName ||
+                            t('غير واضح بالملف', 'Not clearly visible')}
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('الاسم الكامل (عربي)', 'Full Name (AR)')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.passportFullNameAr || t('غير مطبوع / غير متوفر', 'Not printed')}
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums flex items-center justify-between gap-2">
+                        <div>
+                          <span className="text-[11px] text-slate-400 block">
+                            {t('رقم الجواز / الوثيقة', 'Passport / Document No.')}
+                          </span>
+                          <span className="font-bold text-[#0F2438]">
+                            {aiResult.passportNumber || t('غير واضح بالملف', 'Not clearly visible')}
+                          </span>
+                        </div>
+                        {aiResult.passportNumber && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyValue('passNo', aiResult.passportNumber)}
+                            className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedAiKey === 'passNo' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                            <span>{copiedAiKey === 'passNo' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('الجنسية', 'Nationality')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.nationality || t('غير محددة', 'Unspecified')}
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('تاريخ الميلاد', 'Birth Date')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.birthDate || t('غير مقروء', 'Unreadable')}
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('تاريخ الإصدار', 'Issue Date')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.issueDate || t('غير مقروء', 'Unreadable')}
+                        </span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums sm:col-span-2">
+                        <span className="text-[11px] text-slate-400 block">
+                          {t('تاريخ الانتهاء', 'Expiry Date')}
+                        </span>
+                        <span className="font-bold text-[#0F2438]">
+                          {aiResult.expiryDate || t('غير مقروء', 'Unreadable')}
+                        </span>
+                      </div>
                     </div>
-                    <div className="bg-white border border-slate-200 rounded-xl p-3">
-                      <span className="text-[11px] text-slate-400 block">
-                        {t('الجنسية', 'Nationality')}
-                      </span>
-                      <span className="font-bold text-[#0F2438]">
-                        {aiResult.nationality || t('غير محددة', 'Unspecified')}
-                      </span>
-                    </div>
-                    <div className="bg-white border border-slate-200 rounded-xl p-3 tabular-nums">
-                      <span className="text-[11px] text-slate-400 block">
-                        {t('تاريخ الانتهاء', 'Expiry Date')}
-                      </span>
-                      <span className="font-bold text-[#0F2438]">
-                        {aiResult.expiryDate || t('غير مقروء', 'Unreadable')}
-                      </span>
-                    </div>
-                  </div>
+                  )}
 
                   <div className="bg-white border border-slate-200 rounded-xl p-3.5 text-xs text-slate-700 leading-relaxed">
                     <span className="font-bold text-[#0F2438] block mb-1">

@@ -77,8 +77,18 @@ service cloud.firestore {
         'preferredVisaType',
         'passportNumber',
         'passportFullName',
+        'passportFullNameEn',
+        'passportFullNameAr',
+        'birthDate',
+        'passportIssueDate',
         'passportExpiryDate',
         'nationality',
+        'visaDocumentNumber',
+        'saudiSponsorId',
+        'applicantNameAr',
+        'applicantNameEn',
+        'documentPassportNumber',
+        'portOfEntry',
         'documents',
         'familyMembers',
         'issuedDocuments',
@@ -138,8 +148,18 @@ service cloud.firestore {
       && isOptionalString(data, 'preferredVisaType', 200)
       && isOptionalString(data, 'passportNumber', 40)
       && isOptionalString(data, 'passportFullName', 200)
+      && isOptionalString(data, 'passportFullNameEn', 200)
+      && isOptionalString(data, 'passportFullNameAr', 200)
+      && isOptionalString(data, 'birthDate', 32)
+      && isOptionalString(data, 'passportIssueDate', 32)
       && isOptionalString(data, 'passportExpiryDate', 32)
       && isOptionalString(data, 'nationality', 100)
+      && isOptionalString(data, 'visaDocumentNumber', 64)
+      && isOptionalString(data, 'saudiSponsorId', 64)
+      && isOptionalString(data, 'applicantNameAr', 200)
+      && isOptionalString(data, 'applicantNameEn', 200)
+      && isOptionalString(data, 'documentPassportNumber', 40)
+      && isOptionalString(data, 'portOfEntry', 160)
       && data.documents is list
       && data.documents.size() <= 30
       && (
@@ -417,6 +437,7 @@ service cloud.firestore {
         'additionalDriveWebApps',
         'fcmVapidKey',
         'retentionDays',
+        'geminiApiKey',
         'updatedAt'
       ])
       && data.announcementEnabled is bool
@@ -457,6 +478,7 @@ service cloud.firestore {
       )
       && isOptionalString(data, 'fcmVapidKey', 256)
       && (!('retentionDays' in data) || (data.retentionDays is int && data.retentionDays in [30, 60, 90]))
+      && isOptionalString(data, 'geminiApiKey', 256)
       && isOptionalString(data, 'updatedAt', 64);
     }
 
@@ -571,8 +593,18 @@ service cloud.firestore {
           'preferredVisaType',
           'passportNumber',
           'passportFullName',
+          'passportFullNameEn',
+          'passportFullNameAr',
+          'birthDate',
+          'passportIssueDate',
           'passportExpiryDate',
           'nationality',
+          'visaDocumentNumber',
+          'saudiSponsorId',
+          'applicantNameAr',
+          'applicantNameEn',
+          'documentPassportNumber',
+          'portOfEntry',
           'documents',
           'familyMembers',
           'issuedDocuments',

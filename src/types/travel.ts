@@ -122,7 +122,11 @@ export interface FamilyMember {
   firstName: string;
   lastName: string;
   passportFullName?: string;
+  passportFullNameEn?: string;
+  passportFullNameAr?: string;
   passportNumber: string;
+  birthDate?: string;
+  passportIssueDate?: string;
   passportExpiryDate?: string;
   nationality?: string;
   passportPhotoUrl: string;
@@ -251,8 +255,18 @@ export interface TravelerProfile {
   preferredVisaType?: string;
   passportNumber?: string;
   passportFullName?: string;
+  passportFullNameEn?: string;
+  passportFullNameAr?: string;
+  birthDate?: string;
+  passportIssueDate?: string;
   passportExpiryDate?: string;
   nationality?: string;
+  visaDocumentNumber?: string;
+  saudiSponsorId?: string;
+  applicantNameAr?: string;
+  applicantNameEn?: string;
+  documentPassportNumber?: string;
+  portOfEntry?: string;
   documents: TravelerDocument[];
   familyMembers?: FamilyMember[];
   issuedDocuments?: IssuedDocument[];
@@ -310,19 +324,43 @@ export interface PublicOrderStatusSummary {
   updatedAt: string;
 }
 
+export type DocumentClarityStatus = 'clear' | 'blurry' | 'cropped' | 'unclear';
+export type DetectedDocumentKind = 'passport' | 'saudi_visa' | 'other';
+
 export interface PassportAiCheckResult {
+  detectedDocumentKind?: DetectedDocumentKind;
   documentType: string;
   fullName: string;
+  passportFullNameEn?: string;
+  passportFullNameAr?: string;
   passportNumber: string;
   nationality: string;
   birthDate: string;
+  issueDate?: string;
   expiryDate: string;
+  visaDocumentNumber?: string;
+  saudiSponsorId?: string;
+  applicantNameAr?: string;
+  applicantNameEn?: string;
+  documentPassportNumber?: string;
+  portOfEntry?: string;
   hasSixMonthsValidity: boolean;
   remainingDays: number;
   validityStatus: 'valid_6m' | 'warning_under_6m' | 'expired' | 'unclear';
   summaryAr: string;
   missingRequirements: string[];
   confidenceNote: string;
+  isReadable?: boolean;
+  clarityStatus?: DocumentClarityStatus;
+  clarityIssueAr?: string;
+  clarityIssueEn?: string;
+}
+
+export interface DocumentClarityCheckResult {
+  isClear: boolean;
+  clarityStatus: DocumentClarityStatus;
+  issueAr: string;
+  issueEn: string;
 }
 
 export type AdminPermission =

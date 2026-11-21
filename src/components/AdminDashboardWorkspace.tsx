@@ -44,6 +44,8 @@ import {
   Building2,
   Smartphone,
   LayoutDashboard,
+  EyeOff,
+  Upload,
 } from 'lucide-react';
 import {
   AdminPermission,
@@ -82,6 +84,7 @@ import {
   buildAdminForwardActivationMessage,
   buildOrderCodeFromPhone,
   cleanupCompletedOrderAttachmentsCloud,
+  compressImageToDataUrl,
   computeStorageUsageStats,
   deleteTravelerProfile,
   digitsOnly,
@@ -97,11 +100,14 @@ import {
   normalizeOrderStatusValue,
   normalizePhone,
   previewOldCompletedAttachmentsCleanup,
+  readFileAsAiDataUrl,
   removeIssuedDeliverableCloud,
   sortProfilesByPresence,
+  splitPassportName,
   updateAdminPin,
   updateDocumentReviewStatusCloud,
   updateTravelerProfileDetails,
+  uploadAndAddDocumentToTravelerCloud,
 } from '../utils/travelerStore';
 import {
   playChatNotificationChime,
@@ -111,9 +117,15 @@ import {
   MAX_PDF_BYTES,
   buildDescriptiveFilename,
   downloadCloudFile,
+  fetchFileAsBase64WithMime,
   getDisplayableDriveImageUrl,
   getDriveViewUrl,
 } from '../utils/firebaseStorageHelper';
+import {
+  analyzePassportWithGemini,
+  checkDocumentClarityWithGemini,
+} from '../utils/geminiPassportService';
+import { evaluatePassportValidity } from '../utils/passportValidity';
 import {
   ALL_ADMIN_PERMISSIONS,
   ADMIN_AUTH_UPDATED_EVENT,
@@ -158,7 +170,13 @@ type DashboardTab =
   | 'messages_otp'
   | 'ads'
   | 'settings';
-type OrderFilter = 'all' | 'online' | 'active' | 'with_files' | 'completed';
+type OrderFilter =
+  | 'all'
+  | 'online'
+  | 'active'
+  | 'with_files'
+  | 'completed'
+  | 'expiring_passports';
 
 interface AdminDashboardWorkspaceProps {
   requestedChat?: { phone: string; nonce: number } | null;
@@ -234,9 +252,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [editFirstName, setEditFirstName] = useState('');
   const [editLastName, setEditLastName] = useState('');
   const [editPassportFullName, setEditPassportFullName] = useState('');
+  const [editPassportFullNameEn, setEditPassportFullNameEn] = useState('');
+  const [editPassportFullNameAr, setEditPassportFullNameAr] = useState('');
   const [editPassportNumber, setEditPassportNumber] = useState('');
+  const [editBirthDate, setEditBirthDate] = useState('');
+  const [editPassportIssueDate, setEditPassportIssueDate] = useState('');
   const [editPassportExpiry, setEditPassportExpiry] = useState('');
   const [editNationality, setEditNationality] = useState('');
+  const [editVisaDocumentNumber, setEditVisaDocumentNumber] = useState('');
+  const [editSaudiSponsorId, setEditSaudiSponsorId] = useState('');
+  const [editApplicantNameAr, setEditApplicantNameAr] = useState('');
+  const [editApplicantNameEn, setEditApplicantNameEn] = useState('');
+  const [editDocumentPassportNumber, setEditDocumentPassportNumber] = useState('');
+  const [editPortOfEntry, setEditPortOfEntry] = useState('');
+  const [adminCopiedKey, setAdminCopiedKey] = useState<string | null>(null);
   const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('تم استلام الطلب');
   const [editAdminNotes, setEditAdminNotes] = useState('');
   const [editApptServiceType, setEditApptServiceType] = useState('');
@@ -248,6 +277,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [folderSavedMsg, setFolderSavedMsg] = useState('');
   const [stageUpdatedPhone, setStageUpdatedPhone] = useState<string | null>(null);
   const [confirmDeletePhone, setConfirmDeletePhone] = useState<string | null>(null);
+  const [isAdminScanningPassport, setIsAdminScanningPassport] = useState(false);
+  const [isUploadingAdminPassport, setIsUploadingAdminPassport] = useState(false);
+  const [adminPassportAiBadge, setAdminPassportAiBadge] = useState(false);
+  const [adminPassportAiMsg, setAdminPassportAiMsg] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [adminClarityWarning, setAdminClarityWarning] = useState<string | null>(null);
+  const adminPassportInputRef = useRef<HTMLInputElement>(null);
   const [previewDocImage, setPreviewDocImage] = useState<{
     label: string;
     dataUrl: string;
@@ -302,6 +340,16 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [adminCloudTokens, setAdminCloudTokens] = useState<string[]>([]);
   const [lastPushLog, setLastPushLog] = useState<PushDiagnosticLog | null>(() => getLastPushDiagnosticLog());
   const [isTestingWorkerPush, setIsTestingWorkerPush] = useState(false);
+  const [geminiKeyInput, setGeminiKeyInput] = useState<string>(
+    () => getSiteConfig().geminiApiKey || ''
+  );
+  const [showGeminiKeyPlain, setShowGeminiKeyPlain] = useState(false);
+  const [isSavingGeminiKey, setIsSavingGeminiKey] = useState(false);
+  const [geminiKeyFeedback, setGeminiKeyFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const geminiKeyDirtyRef = useRef(false);
 
   // Real-time Instant Admin Alert (Audio Chime + Top Banner for Incoming OTP Requests)
   const [alertSoundEnabled, setAlertSoundEnabled] = useState(true);
@@ -420,6 +468,9 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       if (!retentionDirtyRef.current) {
         setCleanupAgeDays(fresh.retentionDays);
       }
+      if (!geminiKeyDirtyRef.current) {
+        setGeminiKeyInput(fresh.geminiApiKey || '');
+      }
     });
     const onTravelersUpdate = () => loadTravelers();
     const onAuthUpdate = () => setSubAdmins(getSubAdmins());
@@ -433,14 +484,22 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
   useEffect(() => {
     setSiteDraft((prev) =>
-      prev.retentionDays === liveSiteConfig.retentionDays
+      prev.retentionDays === liveSiteConfig.retentionDays &&
+      (prev.geminiApiKey || '') === (liveSiteConfig.geminiApiKey || '')
         ? prev
-        : { ...prev, retentionDays: liveSiteConfig.retentionDays }
+        : {
+            ...prev,
+            retentionDays: liveSiteConfig.retentionDays,
+            geminiApiKey: liveSiteConfig.geminiApiKey || '',
+          }
     );
     if (!retentionDirtyRef.current) {
       setCleanupAgeDays(liveSiteConfig.retentionDays);
     }
-  }, [liveSiteConfig.retentionDays]);
+    if (!geminiKeyDirtyRef.current) {
+      setGeminiKeyInput(liveSiteConfig.geminiApiKey || '');
+    }
+  }, [liveSiteConfig.retentionDays, liveSiteConfig.geminiApiKey]);
 
   // Live Firestore Chat Threads Inbox Subscription & 15s Presence UI Ticker
   useEffect(() => {
@@ -604,10 +663,22 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       const names = getTravelerDisplayNames(selectedClient);
       setEditFirstName(names.firstName);
       setEditLastName(names.lastName);
-      setEditPassportFullName(selectedClient.passportFullName || '');
+      const fullEn = selectedClient.passportFullNameEn || selectedClient.passportFullName || '';
+      setEditPassportFullName(fullEn);
+      setEditPassportFullNameEn(fullEn);
+      setEditPassportFullNameAr(selectedClient.passportFullNameAr || '');
       setEditPassportNumber(selectedClient.passportNumber || '');
+      setEditBirthDate(selectedClient.birthDate || '');
+      setEditPassportIssueDate(selectedClient.passportIssueDate || '');
       setEditPassportExpiry(selectedClient.passportExpiryDate || '');
       setEditNationality(selectedClient.nationality || '');
+      setEditVisaDocumentNumber(selectedClient.visaDocumentNumber || '');
+      setEditSaudiSponsorId(selectedClient.saudiSponsorId || '');
+      setEditApplicantNameAr(selectedClient.applicantNameAr || '');
+      setEditApplicantNameEn(selectedClient.applicantNameEn || '');
+      setEditDocumentPassportNumber(selectedClient.documentPassportNumber || '');
+      setEditPortOfEntry(selectedClient.portOfEntry || '');
+      setAdminCopiedKey(null);
       setEditOrderStatus(normalizeOrderStatusValue(selectedClient.orderStatus));
       setEditAdminNotes(selectedClient.adminNotes || '');
       setEditApptServiceType(
@@ -640,6 +711,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setDocNoteDrafts(initialDocNotes);
     }
   }, [selectedClientPhone, travelers.length]);
+
+  useEffect(() => {
+    setAdminPassportAiBadge(false);
+    setAdminPassportAiMsg(null);
+    setAdminClarityWarning(null);
+  }, [selectedClientPhone]);
 
   const handleOpenClientFromAnyTab = (phone: string) => {
     if (!canManageClients) return;
@@ -860,14 +937,25 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           }
         : undefined;
 
+    const cleanFullEn = (editPassportFullNameEn || editPassportFullName).trim();
     updateTravelerProfileDetails(selectedClient.phone, {
       firstName: cleanFirst,
       lastName: cleanLast,
       name: combinedName,
-      passportFullName: editPassportFullName.trim(),
+      passportFullName: cleanFullEn,
+      passportFullNameEn: cleanFullEn,
+      passportFullNameAr: editPassportFullNameAr.trim(),
       passportNumber: editPassportNumber.trim().toUpperCase(),
+      birthDate: editBirthDate,
+      passportIssueDate: editPassportIssueDate,
       passportExpiryDate: editPassportExpiry,
       nationality: editNationality.trim(),
+      visaDocumentNumber: editVisaDocumentNumber.trim(),
+      saudiSponsorId: editSaudiSponsorId.trim(),
+      applicantNameAr: editApplicantNameAr.trim(),
+      applicantNameEn: editApplicantNameEn.trim(),
+      documentPassportNumber: editDocumentPassportNumber.trim().toUpperCase(),
+      portOfEntry: editPortOfEntry.trim(),
       orderStatus: editOrderStatus,
       adminNotes: editAdminNotes.trim(),
       appointmentDetails: nextAppointmentDetails,
@@ -921,8 +1009,280 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     setDeliverableFile(file);
     if (file.type.startsWith('image/')) {
       setDeliverablePreviewUrl(URL.createObjectURL(file));
+      void compressImageToDataUrl(file, 900, 0.72)
+        .then((c) =>
+          checkDocumentClarityWithGemini({
+            imageBase64: c.base64,
+            mimeType: c.mimeType,
+            docCategory: 'deliverable',
+            lang,
+          })
+        )
+        .then((clarity) => {
+          if (clarity.ok && clarity.result && !clarity.result.isClear) {
+            setAdminClarityWarning(
+              (isAr ? clarity.result.issueAr : clarity.result.issueEn) ||
+                t(
+                  'تنبيه وضوح: صورة المستند المختار غير واضحة أو مقصوصة، يُفضل اختيار صورة أوضح قبل الإرسال للعميل.',
+                  'Clarity Alert: Selected deliverable image appears blurry or cropped.'
+                )
+            );
+          }
+        })
+        .catch(() => {});
     } else {
       setDeliverablePreviewUrl(null);
+    }
+  };
+
+  const handleAdminCopyValue = async (key: string, val: string) => {
+    const clean = (val || '').trim();
+    if (!clean) return;
+    try {
+      await navigator.clipboard.writeText(clean);
+      setAdminCopiedKey(key);
+      setTimeout(() => {
+        setAdminCopiedKey((prev) => (prev === key ? null : prev));
+      }, 1800);
+    } catch {
+      // Ignore clipboard permission errors
+    }
+  };
+
+  const applyAdminExtractedPassport = (
+    client: TravelerProfile,
+    extracted: NonNullable<Awaited<ReturnType<typeof analyzePassportWithGemini>>['result']>
+  ) => {
+    const cleanNo = (extracted.passportNumber || '').trim().toUpperCase();
+    const extractedFullEn = (extracted.passportFullNameEn || extracted.fullName || '').trim();
+    const extractedFullAr = (extracted.passportFullNameAr || '').trim();
+    const parts = extractedFullEn ? splitPassportName(extractedFullEn) : null;
+    const cleanBirth =
+      extracted.birthDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.birthDate)
+        ? extracted.birthDate
+        : '';
+    const cleanIssue =
+      extracted.issueDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.issueDate)
+        ? extracted.issueDate
+        : '';
+    const cleanExpiry =
+      extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)
+        ? extracted.expiryDate
+        : '';
+    const cleanNationality = (extracted.nationality || '').trim();
+
+    const cleanVisaDocNo = (extracted.visaDocumentNumber || '').trim();
+    const cleanSponsorId = (extracted.saudiSponsorId || '').trim();
+    const cleanAppAr = (extracted.applicantNameAr || '').trim();
+    const cleanAppEn = (extracted.applicantNameEn || '').trim();
+    const cleanDocPassNo = (extracted.documentPassportNumber || '').trim().toUpperCase();
+    const cleanPort = (extracted.portOfEntry || '').trim();
+    const isSaudiVisa =
+      extracted.detectedDocumentKind === 'saudi_visa' ||
+      Boolean(cleanVisaDocNo || cleanSponsorId || cleanDocPassNo || cleanPort);
+
+    if (cleanNo) setEditPassportNumber(cleanNo);
+    if (extractedFullEn) {
+      setEditPassportFullName(extractedFullEn);
+      setEditPassportFullNameEn(extractedFullEn);
+    }
+    if (extractedFullAr) setEditPassportFullNameAr(extractedFullAr);
+    if (parts?.firstName) setEditFirstName(parts.firstName);
+    if (parts?.lastName) setEditLastName(parts.lastName);
+    if (cleanBirth) setEditBirthDate(cleanBirth);
+    if (cleanIssue) setEditPassportIssueDate(cleanIssue);
+    if (cleanExpiry) setEditPassportExpiry(cleanExpiry);
+    if (cleanNationality) setEditNationality(cleanNationality);
+
+    if (cleanVisaDocNo) setEditVisaDocumentNumber(cleanVisaDocNo);
+    if (cleanSponsorId) setEditSaudiSponsorId(cleanSponsorId);
+    if (cleanAppAr) setEditApplicantNameAr(cleanAppAr);
+    if (cleanAppEn) setEditApplicantNameEn(cleanAppEn);
+    if (cleanDocPassNo) setEditDocumentPassportNumber(cleanDocPassNo);
+    if (cleanPort) setEditPortOfEntry(cleanPort);
+
+    if (
+      extracted.isReadable === false ||
+      (extracted.clarityStatus && extracted.clarityStatus !== 'clear')
+    ) {
+      setAdminClarityWarning(
+        (isAr ? extracted.clarityIssueAr : extracted.clarityIssueEn) ||
+          t(
+            'تنبيه جودة الملف: المستند غير واضح أو مقصوص، يرجى طلب نسخة أوضح من العميل.',
+            'Clarity Alert: Uploaded document is blurry or cropped. Request a clearer copy.'
+          )
+      );
+    }
+
+    const updates: Partial<TravelerProfile> = {};
+    if (cleanNo) updates.passportNumber = cleanNo;
+    if (extractedFullEn) {
+      updates.passportFullName = extractedFullEn;
+      updates.passportFullNameEn = extractedFullEn;
+    }
+    if (extractedFullAr) updates.passportFullNameAr = extractedFullAr;
+    if (parts?.firstName) updates.firstName = parts.firstName;
+    if (parts?.lastName) updates.lastName = parts.lastName;
+    if (cleanBirth) updates.birthDate = cleanBirth;
+    if (cleanIssue) updates.passportIssueDate = cleanIssue;
+    if (cleanExpiry) updates.passportExpiryDate = cleanExpiry;
+    if (cleanNationality) updates.nationality = cleanNationality;
+    const combinedName =
+      `${parts?.firstName || editFirstName} ${parts?.lastName || editLastName}`.trim();
+    if (combinedName && !isSaudiVisa) updates.name = combinedName;
+
+    if (cleanVisaDocNo) updates.visaDocumentNumber = cleanVisaDocNo;
+    if (cleanSponsorId) updates.saudiSponsorId = cleanSponsorId;
+    if (cleanAppAr) updates.applicantNameAr = cleanAppAr;
+    if (cleanAppEn) updates.applicantNameEn = cleanAppEn;
+    if (cleanDocPassNo) updates.documentPassportNumber = cleanDocPassNo;
+    if (cleanPort) updates.portOfEntry = cleanPort;
+
+    if (Object.keys(updates).length > 0) {
+      updateTravelerProfileDetails(client.phone, updates);
+      loadTravelers();
+      setAdminPassportAiBadge(true);
+      setAdminPassportAiMsg({
+        ok: true,
+        text: isSaudiVisa
+          ? t(
+              `تم التعرف التلقائي على مستند تأشيرة / زيارة سعودية ✨ واستخراج البيانات (${cleanVisaDocNo || cleanAppAr || cleanAppEn}) في ملف العميل.`,
+              `Auto-detected Saudi Visa / Visit document ✨ and saved extracted details (${cleanVisaDocNo || cleanAppEn}) to client folder.`
+            )
+          : t(
+              `تمت القراءة بالذكاء الاصطناعي ✨ وحفظ بيانات الجواز (${cleanNo || extractedFullEn || extractedFullAr}) في ملف العميل.`,
+              `Extracted with AI ✨ and saved passport details (${cleanNo || extractedFullEn}) to client folder.`
+            ),
+      });
+    } else {
+      setAdminPassportAiMsg({
+        ok: false,
+        text: t(
+          'لم تظهر بيانات مقروءة بوضوح كافٍ في الملف. يرجى تجربة صورة أو ملف PDF أوضح.',
+          'Document details were not clearly legible. Please try a clearer image or PDF.'
+        ),
+      });
+    }
+  };
+
+  const handleAdminUploadPassportWithAi = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedClient || !canManageClients) return;
+    setAdminPassportAiMsg(null);
+    setAdminClarityWarning(null);
+    setIsUploadingAdminPassport(true);
+    setIsAdminScanningPassport(true);
+    try {
+      const payload = await readFileAsAiDataUrl(file, 1100, 0.78);
+      const res = await analyzePassportWithGemini({
+        imageBase64: payload.base64,
+        mimeType: payload.mimeType,
+        visaType: selectedClient.preferredVisaType,
+        lang,
+      });
+
+      const isDetectedVisa =
+        res.ok &&
+        res.result &&
+        (res.result.detectedDocumentKind === 'saudi_visa' ||
+          Boolean(res.result.visaDocumentNumber || res.result.saudiSponsorId));
+
+      await uploadAndAddDocumentToTravelerCloud(selectedClient.phone, {
+        docType: isDetectedVisa ? 'visa' : 'passport',
+        label: isDetectedVisa
+          ? t('مستند تأشيرة / زيارة (مرفوع من الإدارة)', 'Visa / Visit Document (Admin Upload)')
+          : t('جواز السفر (مرفوع من الإدارة)', 'Passport Document (Admin Upload)'),
+        dataUrl: payload.dataUrl,
+        fileName: payload.fileName,
+      });
+      loadTravelers();
+
+      if (res.ok && res.result) {
+        applyAdminExtractedPassport(selectedClient, res.result);
+      } else {
+        setAdminPassportAiMsg({
+          ok: false,
+          text:
+            res.error ||
+            t(
+              'تم رفع الملف بنجاح، وتعذر تشغيل القراءة الذكية الآن.',
+              'Document uploaded, but AI extraction could not run.'
+            ),
+        });
+      }
+    } catch (err) {
+      setAdminPassportAiMsg({
+        ok: false,
+        text:
+          err instanceof Error && err.message
+            ? err.message
+            : t(
+                'تعذر معالجة أو قراءة الملف المختار (صورة أو PDF).',
+                'Could not process selected image or PDF.'
+              ),
+      });
+    } finally {
+      setIsUploadingAdminPassport(false);
+      setIsAdminScanningPassport(false);
+      if (adminPassportInputRef.current) adminPassportInputRef.current.value = '';
+    }
+  };
+
+  const handleAdminScanExistingPassport = async (
+    targetDoc?: NonNullable<TravelerProfile['documents']>[number]
+  ) => {
+    if (!selectedClient || isAdminScanningPassport) return;
+    const docToScan =
+      targetDoc ||
+      (selectedClient.documents || []).find(
+        (d) => (d.docType === 'passport' || d.docType === 'visa') && Boolean(d.dataUrl)
+      );
+    if (!docToScan?.dataUrl) {
+      adminPassportInputRef.current?.click();
+      return;
+    }
+
+    setAdminPassportAiMsg(null);
+    setAdminClarityWarning(null);
+    setIsAdminScanningPassport(true);
+    try {
+      const fetched = await fetchFileAsBase64WithMime(docToScan.dataUrl, docToScan.fileName);
+      if (!fetched.base64) {
+        setAdminPassportAiMsg({
+          ok: false,
+          text: t(
+            'تعذر جلب بيانات الملف مباشرة. يمكنك رفع الملف من جهازك للقراءة الفورية.',
+            'Could not fetch file bytes for scan. Upload file directly to scan.'
+          ),
+        });
+        return;
+      }
+      const res = await analyzePassportWithGemini({
+        imageBase64: fetched.base64,
+        mimeType: fetched.mimeType,
+        visaType: selectedClient.preferredVisaType,
+        lang,
+      });
+      if (res.ok && res.result) {
+        applyAdminExtractedPassport(selectedClient, res.result);
+      } else {
+        setAdminPassportAiMsg({
+          ok: false,
+          text:
+            res.error ||
+            t('تعذر قراءة المستند بالذكاء الاصطناعي.', 'AI document scan failed.'),
+        });
+      }
+    } catch {
+      setAdminPassportAiMsg({
+        ok: false,
+        text: t(
+          'تعذر تحميل محتوى المرفق للقراءة (قد يمنع المصدر الخارجي القراءة المباشرة).',
+          'Could not read remote attachment bytes directly.'
+        ),
+      });
+    } finally {
+      setIsAdminScanningPassport(false);
     }
   };
 
@@ -1150,6 +1510,51 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       )
     );
     setTimeout(() => setFcmSavedMsg(''), 3500);
+  };
+
+  const handleSaveGeminiApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((!canEditContent && !isSuperAdmin) || !isEditUnlocked || isSavingGeminiKey) return;
+    setIsSavingGeminiKey(true);
+    setGeminiKeyFeedback(null);
+    const trimmedKey = geminiKeyInput.trim();
+    try {
+      const res = await saveSiteConfigToCloudStrict({
+        ...siteDraft,
+        geminiApiKey: trimmedKey,
+      });
+      setSiteDraft(res.config);
+      if (res.ok) {
+        geminiKeyDirtyRef.current = false;
+        setGeminiKeyFeedback({
+          ok: true,
+          text: trimmedKey
+            ? t(
+                'تم حفظ المفتاح وتفعيل الذكاء الاصطناعي (gemini-2.5-flash) في قاعدة البيانات بنجاح ✨',
+                'Gemini API Key saved & AI (gemini-2.5-flash) enabled in Firestore ✨'
+              )
+            : t('تم مسح مفتاح الذكاء الاصطناعي من الإعدادات.', 'Gemini API Key cleared from settings.'),
+        });
+      } else {
+        setGeminiKeyFeedback({
+          ok: false,
+          text: t(
+            'تم حفظ المفتاح محلياً، لكن تعذر الحفظ في Firestore — يرجى التأكد من نشر قواعد Firestore والاتصال.',
+            'Saved locally, but could not sync to Firestore — check Firestore rules & connection.'
+          ),
+        });
+      }
+    } catch {
+      setGeminiKeyFeedback({
+        ok: false,
+        text: t(
+          'تم حفظ المفتاح محلياً، لكن تعذر المزامنة مع Firestore — تحقق من نشر قواعد Firestore.',
+          'Saved locally, but Firestore sync failed due to rules/permissions.'
+        ),
+      });
+    } finally {
+      setIsSavingGeminiKey(false);
+    }
   };
 
   const handleTestAdminPush = async () => {
@@ -1609,11 +2014,13 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       const isCompleted = normalizedSt === 'تم تنفيذ الطلب';
       const hasFiles = (tr.documents?.length || 0) > 0;
       const online = isUserCurrentlyOnline(tr);
+      const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
 
       if (orderFilter === 'online' && !online) return false;
       if (orderFilter === 'active' && isCompleted) return false;
       if (orderFilter === 'with_files' && !hasFiles) return false;
       if (orderFilter === 'completed' && !isCompleted) return false;
+      if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
 
       const q = searchQuery.trim().toLowerCase();
       if (!q) return true;
@@ -1627,6 +2034,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       );
     })
   );
+
+  const orderedRequests =
+    orderFilter === 'expiring_passports'
+      ? [...filteredRequests].sort((a, b) => {
+          const da = evaluatePassportValidity(a.passportExpiryDate).remainingDays ?? 9999;
+          const dbVal = evaluatePassportValidity(b.passportExpiryDate).remainingDays ?? 9999;
+          return da - dbVal;
+        })
+      : filteredRequests;
 
   const filteredB2BPartners = sortProfilesByPresence(
     b2bPartners.filter((tr) => {
@@ -1697,6 +2113,9 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   ).length;
   const withFilesCount = individualTravelers.filter(
     (tr) => (tr.documents?.length || 0) > 0
+  ).length;
+  const expiringPassportCount = individualTravelers.filter(
+    (tr) => evaluatePassportValidity(tr.passportExpiryDate).isUnderSixMonths
   ).length;
   const completedCount = individualTravelers.length - activeOrdersCount;
   const messagesBadgeCount =
@@ -2163,7 +2582,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {activeTab === 'individuals' && canManageClients && !selectedClient && (
           <div className="space-y-4">
             {/* Compact Real-Time KPI Summary Strip (SaaS-Grade) */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-center tabular-nums">
+            <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-center tabular-nums">
               <div className="bg-white border border-slate-200/90 rounded-xl p-2.5 sm:p-3 shadow-xs">
                 <span className="text-[10.5px] sm:text-[11px] text-slate-500 block font-medium">
                   {t('إجمالي الأفراد', 'Total Individuals')}
@@ -2193,12 +2612,36 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-amber-900">{withFilesCount}</span>
               </div>
-              <div className="bg-emerald-50/40 border border-emerald-200/70 rounded-xl p-2.5 sm:p-3 shadow-xs col-span-2 sm:col-span-1">
+              <div className="bg-emerald-50/40 border border-emerald-200/70 rounded-xl p-2.5 sm:p-3 shadow-xs">
                 <span className="text-[10.5px] sm:text-[11px] text-emerald-900 block font-medium">
                   {t('طلبات مكتملة', 'Completed')}
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-emerald-900">{completedCount}</span>
               </div>
+              <button
+                type="button"
+                onClick={() => setOrderFilter('expiring_passports')}
+                className={`rounded-xl p-2.5 sm:p-3 shadow-xs border text-center transition cursor-pointer ${
+                  expiringPassportCount > 0
+                    ? 'bg-red-50 border-red-300 hover:bg-red-100'
+                    : 'bg-slate-50 border-slate-200/90 hover:bg-slate-100'
+                }`}
+              >
+                <span
+                  className={`text-[10.5px] sm:text-[11px] block font-bold ${
+                    expiringPassportCount > 0 ? 'text-red-800' : 'text-slate-600'
+                  }`}
+                >
+                  {t('جوازات تنتهي قريباً', 'Expiring Passports')}
+                </span>
+                <span
+                  className={`text-lg sm:text-xl font-bold font-mono ${
+                    expiringPassportCount > 0 ? 'text-red-700' : 'text-slate-700'
+                  }`}
+                >
+                  {expiringPassportCount}
+                </span>
+              </button>
             </div>
 
             {/* Search & Order Filter Pills */}
@@ -2240,37 +2683,52 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       id: 'completed',
                       label: t(`مكتملة (${completedCount})`, `Completed (${completedCount})`),
                     },
+                    {
+                      id: 'expiring_passports',
+                      label: t(
+                        `جوازات تنتهي قريباً (${expiringPassportCount})`,
+                        `Expiring Soon Passports (${expiringPassportCount})`
+                      ),
+                    },
                   ] as { id: OrderFilter; label: string }[]
                 ).map((f) => (
                   <button
                     key={f.id}
                     type="button"
                     onClick={() => setOrderFilter(f.id)}
-                    className={`px-3 py-1.5 rounded-lg text-[11.5px] font-black transition cursor-pointer tabular-nums ${
+                    className={`px-3 py-1.5 rounded-lg text-[11.5px] font-black transition cursor-pointer tabular-nums flex items-center gap-1 ${
                       orderFilter === f.id
-                        ? 'bg-[#0F2438] text-[#E5C887]'
+                        ? f.id === 'expiring_passports'
+                          ? 'bg-red-700 text-white'
+                          : 'bg-[#0F2438] text-[#E5C887]'
+                        : f.id === 'expiring_passports' && expiringPassportCount > 0
+                        ? 'bg-red-50 border border-red-200 text-red-800 hover:bg-red-100'
                         : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
-                    {f.label}
+                    {f.id === 'expiring_passports' && (
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>{f.label}</span>
                   </button>
                 ))}
               </div>
             </div>
 
             {/* Client Order Cards (Sorted Online First, then Latest Last Seen) */}
-            {filteredRequests.length === 0 ? (
+            {orderedRequests.length === 0 ? (
               <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-8 text-center text-xs sm:text-sm text-slate-500">
                 {t('لا توجد طلبات أو ملفات عملاء تطابق البحث حالياً.', 'No client requests match your filter.')}
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {filteredRequests.map((client) => {
+                {orderedRequests.map((client) => {
                   const docsCount = client.documents?.length || 0;
                   const receiptsCount = (client.documents || []).filter((d) => d.docType === 'receipt').length;
                   const clientDisplayName = getTravelerDisplayNames(client).fullDisplayName;
                   const isOnline = isUserCurrentlyOnline(client);
                   const unreadChat = chatThreads[client.phone]?.unreadAdminCount || 0;
+                  const clientPassportEval = evaluatePassportValidity(client.passportExpiryDate);
                   return (
                     <div
                       key={client.phone}
@@ -2383,6 +2841,22 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                         `العائلة: ${client.familyMembers?.length}`,
                                         `Family: ${client.familyMembers?.length}`
                                       )}
+                                    </span>
+                                  </>
+                                )}
+                                {clientPassportEval.isUnderSixMonths && (
+                                  <>
+                                    <span>·</span>
+                                    <span className="px-2 py-0.5 rounded-full bg-red-50 border border-red-300 text-red-800 text-[10.5px] font-black inline-flex items-center gap-1">
+                                      <AlertTriangle className="w-3 h-3 text-red-600 shrink-0" />
+                                      <span>
+                                        {clientPassportEval.isExpired
+                                          ? t('جواز منتهي', 'Passport Expired')
+                                          : t(
+                                              `صلاحية الجواز ${clientPassportEval.remainingDays} يوم (< 6 أشهر)`,
+                                              `Passport ${clientPassportEval.remainingDays}d (< 6m)`
+                                            )}
+                                      </span>
                                     </span>
                                   </>
                                 )}
@@ -3201,9 +3675,123 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 onSubmit={handleSaveClientFolder}
                 className="lg:col-span-6 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3"
               >
-                <h4 className="text-sm font-black text-[#0F2438]">
-                  {t('بيانات العميل وحالة الطلب', 'Client Details & Visa Stage')}
-                </h4>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="text-sm font-black text-[#0F2438]">
+                      {t('بيانات العميل وحالة الطلب', 'Client Details & Visa Stage')}
+                    </h4>
+                    {adminPassportAiBadge && (
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                        {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <input
+                      ref={adminPassportInputRef}
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={handleAdminUploadPassportWithAi}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      disabled={isAdminScanningPassport || isUploadingAdminPassport}
+                      onClick={() => adminPassportInputRef.current?.click()}
+                      className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
+                    >
+                      {isUploadingAdminPassport ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Upload className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {t('رفع وقراءة جواز / تأشيرة (صورة أو PDF) ✨', 'Upload & Scan Passport / Visa ✨')}
+                      </span>
+                    </button>
+
+                    {(selectedClient.documents || []).some(
+                      (d) =>
+                        (d.docType === 'passport' || d.docType === 'visa') &&
+                        Boolean(d.dataUrl)
+                    ) && (
+                      <button
+                        type="button"
+                        disabled={isAdminScanningPassport}
+                        onClick={() => void handleAdminScanExistingPassport()}
+                        className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
+                      >
+                        {isAdminScanningPassport ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5" />
+                        )}
+                        <span>{t('قراءة المرفق بالذكاء ✨', 'AI Scan Attached ✨')}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {adminPassportAiMsg && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                      adminPassportAiMsg.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}
+                  >
+                    <Sparkles className="w-4 h-4 shrink-0" />
+                    <span>{adminPassportAiMsg.text}</span>
+                  </div>
+                )}
+
+                {adminClarityWarning && (
+                  <div className="p-2.5 rounded-xl border-2 border-amber-300 bg-amber-50 text-xs font-bold text-amber-950 flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <span>{adminClarityWarning}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAdminClarityWarning(null)}
+                      className="text-amber-700 hover:text-amber-950 cursor-pointer shrink-0"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+                {evaluatePassportValidity(editPassportExpiry || selectedClient.passportExpiryDate)
+                  .isUnderSixMonths && (
+                  <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex items-start gap-2">
+                    <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
+                    <div>
+                      <span>
+                        {t(
+                          'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                          'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                        )}
+                      </span>
+                      {(() => {
+                        const ev = evaluatePassportValidity(
+                          editPassportExpiry || selectedClient.passportExpiryDate
+                        );
+                        if (ev.remainingDays === null) return null;
+                        return (
+                          <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                            {ev.remainingDays <= 0
+                              ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
+                              : t(
+                                  `المتبقي في الجواز: ${ev.remainingDays} يوماً فقط.`,
+                                  `Remaining validity: ${ev.remainingDays} days.`
+                                )}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
@@ -3230,37 +3818,58 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   </div>
                   <div>
                     <label className="block font-bold text-slate-600 mb-1">
-                      {t('رقم جواز السفر', 'Passport Number')}
+                      {t('الاسم الكامل بالإنجليزية (كما في الجواز)', 'Full Name (English)')}
                     </label>
                     <input
                       type="text"
-                      value={editPassportNumber}
-                      onChange={(e) => setEditPassportNumber(e.target.value.toUpperCase())}
-                      placeholder="A12345678"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم بالجواز', 'Full Name as on Passport')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editPassportFullName}
-                      onChange={(e) => setEditPassportFullName(e.target.value)}
+                      value={editPassportFullNameEn}
+                      onChange={(e) => {
+                        setEditPassportFullNameEn(e.target.value);
+                        setEditPassportFullName(e.target.value);
+                      }}
+                      dir="ltr"
+                      placeholder="AHMED MOHAMED ALI"
                       className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                     />
                   </div>
                   <div>
                     <label className="block font-bold text-slate-600 mb-1">
-                      {t('تاريخ انتهاء الجواز', 'Passport Expiry')}
+                      {t('الاسم الكامل بالعربية (إن وجد)', 'Full Name (Arabic)')}
                     </label>
                     <input
-                      type="date"
-                      value={editPassportExpiry}
-                      onChange={(e) => setEditPassportExpiry(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                      type="text"
+                      value={editPassportFullNameAr}
+                      onChange={(e) => setEditPassportFullNameAr(e.target.value)}
+                      placeholder="أحمد محمد علي"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                     />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('رقم جواز السفر', 'Passport Number')}
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={editPassportNumber}
+                        onChange={(e) => setEditPassportNumber(e.target.value.toUpperCase())}
+                        placeholder="A12345678"
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleAdminCopyValue('passportNumber', editPassportNumber)}
+                        disabled={!editPassportNumber.trim()}
+                        title={t('نسخ رقم الجواز', 'Copy Passport Number')}
+                        className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                      >
+                        {adminCopiedKey === 'passportNumber' ? (
+                          <Check className="w-4 h-4 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
                   </div>
                   <div>
                     <label className="block font-bold text-slate-600 mb-1">
@@ -3273,6 +3882,192 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                     />
                   </div>
+                  <div>
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('تاريخ الميلاد', 'Date of Birth')}
+                    </label>
+                    <input
+                      type="date"
+                      value={editBirthDate}
+                      onChange={(e) => setEditBirthDate(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('تاريخ الإصدار', 'Issue Date')}
+                    </label>
+                    <input
+                      type="date"
+                      value={editPassportIssueDate}
+                      onChange={(e) => setEditPassportIssueDate(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('تاريخ انتهاء الجواز', 'Passport Expiry')}
+                    </label>
+                    <input
+                      type="date"
+                      value={editPassportExpiry}
+                      onChange={(e) => setEditPassportExpiry(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                    />
+                  </div>
+
+                  {/* Extracted Saudi Visa / Visit Invitation Section */}
+                  <div className="sm:col-span-2 bg-white border border-sky-200 rounded-xl p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-sky-100">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <FileText className="w-4 h-4 text-[#0284C7]" />
+                        <span>
+                          {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
+                        </span>
+                      </span>
+                      <span className="text-[10.5px] font-bold text-sky-700">
+                        {t('نسخ بضغطة واحدة لإنجاز وتساهيل', '1-Click Copy for Enjaz & Tasheer')}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('رقم المستند', 'Visa / Document Number')}
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={editVisaDocumentNumber}
+                            onChange={(e) => setEditVisaDocumentNumber(e.target.value)}
+                            placeholder="1001234567"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleAdminCopyValue('visaDocumentNumber', editVisaDocumentNumber)
+                            }
+                            disabled={!editVisaDocumentNumber.trim()}
+                            title={t('نسخ رقم المستند', 'Copy Document Number')}
+                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                          >
+                            {adminCopiedKey === 'visaDocumentNumber' ? (
+                              <Check className="w-4 h-4 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('رقم الكفيل / الإقامة أو الهوية', 'Sponsor / Iqama ID')}
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={editSaudiSponsorId}
+                            onChange={(e) => setEditSaudiSponsorId(e.target.value)}
+                            placeholder="2012345678"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleAdminCopyValue('saudiSponsorId', editSaudiSponsorId)
+                            }
+                            disabled={!editSaudiSponsorId.trim()}
+                            title={t('نسخ رقم الكفيل / الإقامة', 'Copy Sponsor ID')}
+                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                          >
+                            {adminCopiedKey === 'saudiSponsorId' ? (
+                              <Check className="w-4 h-4 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('اسم صاحب الطلب بالعربية', 'Applicant Name (Arabic)')}
+                        </label>
+                        <input
+                          type="text"
+                          value={editApplicantNameAr}
+                          onChange={(e) => setEditApplicantNameAr(e.target.value)}
+                          placeholder="الاسم بالعربية"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('اسم صاحب الطلب بالإنجليزية', 'Applicant Name (English)')}
+                        </label>
+                        <input
+                          type="text"
+                          value={editApplicantNameEn}
+                          onChange={(e) => setEditApplicantNameEn(e.target.value)}
+                          dir="ltr"
+                          placeholder="Applicant Name in English"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('رقم الجواز المدوّن في المستند', 'Passport No. on Document')}
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={editDocumentPassportNumber}
+                            onChange={(e) =>
+                              setEditDocumentPassportNumber(e.target.value.toUpperCase())
+                            }
+                            placeholder="A12345678"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleAdminCopyValue(
+                                'documentPassportNumber',
+                                editDocumentPassportNumber
+                              )
+                            }
+                            disabled={!editDocumentPassportNumber.trim()}
+                            title={t('نسخ رقم الجواز', 'Copy Passport Number')}
+                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                          >
+                            {adminCopiedKey === 'documentPassportNumber' ? (
+                              <Check className="w-4 h-4 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-4 h-4" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-600 mb-1">
+                          {t('جهة القدوم', 'Port / Embassy of Entry')}
+                        </label>
+                        <input
+                          type="text"
+                          value={editPortOfEntry}
+                          onChange={(e) => setEditPortOfEntry(e.target.value)}
+                          placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="sm:col-span-2">
                     <label className="block font-bold text-slate-600 mb-1.5">
                       {t('مرحلة طلب التأشيرة / تساهيل (تحديث فوري بضغطة واحدة)', 'Order Stage (1-Click Live Update)')}
@@ -3681,6 +4476,22 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                               <span>{t('تحميل', 'Download')}</span>
                             </button>
                           </div>
+
+                          {docItem.dataUrl && (
+                            <button
+                              type="button"
+                              disabled={isAdminScanningPassport}
+                              onClick={() => void handleAdminScanExistingPassport(docItem)}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 disabled:opacity-50 text-indigo-800 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer transition"
+                            >
+                              {isAdminScanningPassport ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-3.5 h-3.5" />
+                              )}
+                              <span>{t('قراءة واستخراج بالذكاء ✨', 'AI Read & Extract ✨')}</span>
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -3857,7 +4668,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     <span>{t('اختيار ملف', 'Choose File')}</span>
                     <input
                       type="file"
-                      accept="application/pdf,image/*"
+                      accept="image/*,application/pdf"
                       onChange={handleSelectDeliverableFile}
                       className="hidden"
                     />
@@ -5003,6 +5814,110 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   >
                     <Save className="w-4 h-4" />
                     <span>{t('حفظ روابط التخزين السحابي', 'Save Cloud Storage Settings')}</span>
+                  </button>
+                </form>
+
+                {/* Persistent Gemini AI API Key Settings (Firestore site_config/general) */}
+                <form
+                  onSubmit={handleSaveGeminiApiKey}
+                  className="bg-white border-2 border-indigo-200/90 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4.5 h-4.5 text-indigo-600 shrink-0" />
+                      <div>
+                        <h4 className="text-sm font-black text-[#0F2438]">
+                          {t(
+                            'مفتاح الذكاء الاصطناعي (Gemini API Key) ✨',
+                            'Gemini AI API Key (Gemini API Key) ✨'
+                          )}
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          {t(
+                            'يُحفظ هذا المفتاح بشكل دائم في قاعدة البيانات (Firestore) لقراءة جوازات السفر وفحص جودة المستندات بـ gemini-2.5-flash تلقائياً عبر الموقع وتطبيق الأندرويد.',
+                            'Permanently stored in Firestore (site_config/general) so Smart Passport Reader & clarity checks (gemini-2.5-flash) stay active across Web, GitHub Pages, and Android.'
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-black border ${
+                        liveSiteConfig.geminiApiKey
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-amber-50 border-amber-200 text-amber-800'
+                      }`}
+                    >
+                      {liveSiteConfig.geminiApiKey
+                        ? t('مفعّل ومحفوظ سحابياً ✅', 'Active in Cloud ✅')
+                        : t('غير مهيأ بعد', 'Not Configured')}
+                    </span>
+                  </div>
+
+                  <div className="text-xs space-y-1.5">
+                    <label className="block font-bold text-slate-700">
+                      {t(
+                        'مفتاح الذكاء الاصطناعي (Gemini API Key) ✨',
+                        'Gemini API Key ✨'
+                      )}
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type={showGeminiKeyPlain ? 'text' : 'password'}
+                        dir="ltr"
+                        value={geminiKeyInput}
+                        onChange={(e) => {
+                          geminiKeyDirtyRef.current = true;
+                          setGeminiKeyInput(e.target.value);
+                        }}
+                        placeholder="AIzaSy..."
+                        className="flex-1 px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-[#0F2438] text-xs font-mono focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowGeminiKeyPlain((v) => !v)}
+                        className="px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer"
+                        aria-label={showGeminiKeyPlain ? t('إخفاء المفتاح', 'Hide key') : t('إظهار المفتاح', 'Show key')}
+                      >
+                        {showGeminiKeyPlain ? (
+                          <EyeOff className="w-4 h-4" />
+                        ) : (
+                          <Eye className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {geminiKeyFeedback && (
+                    <div
+                      className={`p-2.5 rounded-xl border text-xs font-bold ${
+                        geminiKeyFeedback.ok
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-amber-50 border-amber-200 text-amber-900'
+                      }`}
+                    >
+                      {geminiKeyFeedback.text}
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={isSavingGeminiKey}
+                    className="min-h-[42px] px-4 py-2 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                  >
+                    {isSavingGeminiKey ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="w-4 h-4" />
+                    )}
+                    <span>
+                      {isSavingGeminiKey
+                        ? t('جاري الحفظ والتفعيل...', 'Saving & Activating...')
+                        : t(
+                            'حفظ المفتاح وتفعيل الذكاء الاصطناعي',
+                            'Save Key & Activate AI'
+                          )}
+                    </span>
                   </button>
                 </form>
 

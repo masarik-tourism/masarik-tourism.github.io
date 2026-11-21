@@ -726,3 +726,57 @@ export async function imageUrlToBase64(urlOrDataUrl: string): Promise<string> {
     reader.readAsDataURL(blob);
   });
 }
+
+export async function fetchFileAsBase64WithMime(
+  urlOrDataUrl: string,
+  fileName?: string
+): Promise<{ base64: string; mimeType: string }> {
+  const lowerName = String(fileName || '').toLowerCase();
+  const isPdfHint =
+    lowerName.endsWith('.pdf') ||
+    urlOrDataUrl.startsWith('data:application/pdf') ||
+    urlOrDataUrl.toLowerCase().includes('.pdf');
+
+  if (urlOrDataUrl.includes(',') && urlOrDataUrl.startsWith('data:')) {
+    const header = urlOrDataUrl.slice(5, urlOrDataUrl.indexOf(','));
+    const mime = header.split(';')[0] || (isPdfHint ? 'application/pdf' : 'image/jpeg');
+    return {
+      base64: urlOrDataUrl.split(',')[1],
+      mimeType: isPdfHint ? 'application/pdf' : mime,
+    };
+  }
+
+  const driveId = extractGoogleDriveFileId(urlOrDataUrl);
+  const fetchTarget =
+    isPdfHint && driveId
+      ? buildGoogleDriveUrls(driveId).downloadUrl
+      : isPdfHint
+      ? urlOrDataUrl
+      : getDisplayableDriveImageUrl(urlOrDataUrl);
+
+  const response = await fetch(fetchTarget);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  const blobMime =
+    blob.type && blob.type !== 'application/octet-stream'
+      ? blob.type
+      : isPdfHint
+      ? 'application/pdf'
+      : 'image/jpeg';
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read remote document.'));
+    reader.onload = () => {
+      const res = String(reader.result || '');
+      resolve({
+        base64: res.includes(',') ? res.split(',')[1] : res,
+        mimeType: blobMime,
+      });
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+

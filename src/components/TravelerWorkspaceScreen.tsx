@@ -37,6 +37,8 @@ import {
   MapPin,
   Building2,
   Volume2,
+  AlertTriangle,
+  Copy,
 } from 'lucide-react';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
@@ -45,7 +47,6 @@ import {
   DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
-  PassportAiCheckResult,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
@@ -71,6 +72,7 @@ import {
   markClientNotificationsReadCloud,
   normalizeArabicDigits,
   normalizePhone,
+  readFileAsAiDataUrl,
   requestAccountSecurityOtpCloud,
   saveClientFcmTokenCloud,
   saveFamilyMemberCloud,
@@ -79,6 +81,7 @@ import {
   splitPassportName,
   startTravelerSession,
   subscribePendingClientCloud,
+  updateTravelerProfileDetails,
   uploadAndSaveAvatarImmediateCloud,
   uploadBatchFilesToTravelerCloud,
   verifyAccountSecurityOtpCloud,
@@ -100,10 +103,15 @@ import { isRunningInApp } from '../utils/appEnvironment';
 import {
   buildDescriptiveFilename,
   downloadCloudFile,
+  fetchFileAsBase64WithMime,
   getDisplayableDriveImageUrl,
   getDriveViewUrl,
-  imageUrlToBase64,
 } from '../utils/firebaseStorageHelper';
+import {
+  analyzePassportWithGemini,
+  checkDocumentClarityWithGemini,
+} from '../utils/geminiPassportService';
+import { evaluatePassportValidity } from '../utils/passportValidity';
 import { translateOrderStatus } from '../data/travelData';
 import { openWhatsApp } from '../utils/communication';
 import { WhatsAppIcon } from './WhatsAppIcon';
@@ -259,7 +267,10 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [memberFirstName, setMemberFirstName] = useState('');
   const [memberLastName, setMemberLastName] = useState('');
   const [memberPassportFullName, setMemberPassportFullName] = useState('');
+  const [memberPassportFullNameAr, setMemberPassportFullNameAr] = useState('');
   const [memberPassportNumber, setMemberPassportNumber] = useState('');
+  const [memberBirthDate, setMemberBirthDate] = useState('');
+  const [memberPassportIssueDate, setMemberPassportIssueDate] = useState('');
   const [memberPassportExpiry, setMemberPassportExpiry] = useState('');
   const [memberNationality, setMemberNationality] = useState('');
   const [memberPassportPhotoUrl, setMemberPassportPhotoUrl] = useState('');
@@ -279,6 +290,23 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [capturedSnapshotDataUrl, setCapturedSnapshotDataUrl] = useState<string | null>(null);
   const [isUploadingAvatarImmediate, setIsUploadingAvatarImmediate] = useState(false);
   const [isUploadingBatchDocs, setIsUploadingBatchDocs] = useState(false);
+  const [aiExtractedBadge, setAiExtractedBadge] = useState(false);
+  const [uploadClarityWarning, setUploadClarityWarning] = useState<string | null>(null);
+  const [memberAiExtractedBadge, setMemberAiExtractedBadge] = useState(false);
+  const [memberClarityWarning, setMemberClarityWarning] = useState<string | null>(null);
+  const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
+
+  const handleCopyFieldValue = async (key: string, value: string) => {
+    const clean = (value || '').trim();
+    if (!clean) return;
+    try {
+      await navigator.clipboard.writeText(clean);
+      setCopiedFieldKey(key);
+      setTimeout(() => setCopiedFieldKey((prev) => (prev === key ? null : prev)), 2000);
+    } catch {
+      // Ignore clipboard failure
+    }
+  };
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const cameraFallbackInputRef = useRef<HTMLInputElement>(null);
@@ -560,13 +588,18 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setMemberFirstName('');
     setMemberLastName('');
     setMemberPassportFullName('');
+    setMemberPassportFullNameAr('');
     setMemberPassportNumber('');
+    setMemberBirthDate('');
+    setMemberPassportIssueDate('');
     setMemberPassportExpiry('');
     setMemberNationality('');
     setMemberPassportPhotoUrl('');
     setMemberPersonalPhotoUrl('');
     setMemberOcrFeedback(null);
     setMemberFormError(null);
+    setMemberAiExtractedBadge(false);
+    setMemberClarityWarning(null);
   };
 
   const handleOpenAddFamilyMember = () => {
@@ -580,8 +613,11 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setMemberRelationship(member.relationship);
     setMemberFirstName(member.firstName);
     setMemberLastName(member.lastName);
-    setMemberPassportFullName(member.passportFullName || '');
+    setMemberPassportFullName(member.passportFullNameEn || member.passportFullName || '');
+    setMemberPassportFullNameAr(member.passportFullNameAr || '');
     setMemberPassportNumber(member.passportNumber);
+    setMemberBirthDate(member.birthDate || '');
+    setMemberPassportIssueDate(member.passportIssueDate || '');
     setMemberPassportExpiry(member.passportExpiryDate || '');
     setMemberNationality(member.nationality || '');
     setMemberPassportPhotoUrl(member.passportPhotoUrl);
@@ -595,31 +631,43 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const runMemberPassportOcr = async (base64: string, mimeType: string) => {
     setIsExtractingMemberPassport(true);
     setMemberOcrFeedback(null);
+    setMemberClarityWarning(null);
     try {
-      const response = await fetch('/api/passport-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64,
-          mimeType,
-          visaType: draft.preferredVisaType,
-          lang,
-        }),
+      const res = await analyzePassportWithGemini({
+        imageBase64: base64,
+        mimeType,
+        visaType: draft.preferredVisaType,
+        lang,
       });
-      const contentType = response.headers.get('content-type') || '';
-      if (!response.ok || !contentType.includes('application/json')) return;
-      const data = (await response.json()) as { result?: PassportAiCheckResult };
-      const extracted = data.result;
-      if (!extracted) return;
+      if (!res.ok || !res.result) return;
+      const extracted = res.result;
+
+      if (extracted.isReadable === false || (extracted.clarityStatus && extracted.clarityStatus !== 'clear')) {
+        setMemberClarityWarning(
+          (isAr ? extracted.clarityIssueAr : extracted.clarityIssueEn) ||
+            t(
+              'الملف المرفق للجواز غير واضح أو مقصوص، يرجى إعادة رفعه بوضوح.',
+              'The passport file looks blurry or cropped. Please upload a clearer scan.'
+            )
+        );
+      }
 
       const cleanNo = (extracted.passportNumber || '').trim().toUpperCase();
-      const extractedFull = (extracted.fullName || '').trim();
-      const parts = extractedFull ? splitPassportName(extractedFull) : null;
+      const extractedFullEn = (extracted.passportFullNameEn || extracted.fullName || '').trim();
+      const extractedFullAr = (extracted.passportFullNameAr || '').trim();
+      const parts = extractedFullEn ? splitPassportName(extractedFullEn) : null;
 
       if (cleanNo) setMemberPassportNumber(cleanNo);
-      if (extractedFull) setMemberPassportFullName(extractedFull);
+      if (extractedFullEn) setMemberPassportFullName(extractedFullEn);
+      if (extractedFullAr) setMemberPassportFullNameAr(extractedFullAr);
       if (parts?.firstName) setMemberFirstName(parts.firstName);
       if (parts?.lastName) setMemberLastName(parts.lastName);
+      if (extracted.birthDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.birthDate)) {
+        setMemberBirthDate(extracted.birthDate);
+      }
+      if (extracted.issueDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.issueDate)) {
+        setMemberPassportIssueDate(extracted.issueDate);
+      }
       if (extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)) {
         setMemberPassportExpiry(extracted.expiryDate);
       }
@@ -627,11 +675,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         setMemberNationality(extracted.nationality.trim());
       }
 
-      if (cleanNo || extractedFull) {
+      if (cleanNo || extractedFullEn || extractedFullAr) {
+        setMemberAiExtractedBadge(true);
         setMemberOcrFeedback(
           t(
-            `تم قراءة بيانات الجواز وتعبئتها تلقائياً (${cleanNo || extractedFull}).`,
-            `Passport data auto-filled via AI OCR (${cleanNo || extractedFull}).`
+            `تم قراءة بيانات الجواز وتعبئتها تلقائياً (${cleanNo || extractedFullEn || extractedFullAr}).`,
+            `Passport data auto-filled via AI OCR (${cleanNo || extractedFullEn || extractedFullAr}).`
           )
         );
       }
@@ -646,13 +695,17 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const file = e.target.files?.[0];
     if (!file) return;
     setMemberFormError(null);
+    setMemberClarityWarning(null);
     try {
-      const compressed = await compressImageToDataUrl(file, 1100, 0.76);
-      setMemberPassportPhotoUrl(compressed.dataUrl);
-      void runMemberPassportOcr(compressed.base64, compressed.mimeType);
+      const payload = await readFileAsAiDataUrl(file, 1100, 0.76);
+      setMemberPassportPhotoUrl(payload.dataUrl);
+      void runMemberPassportOcr(payload.base64, payload.mimeType);
     } catch {
       setMemberFormError(
-        t('تعذر معالجة صورة جواز السفر المختارة.', 'Could not process selected passport photo.')
+        t(
+          'تعذر معالجة ملف جواز السفر المختار (صورة أو PDF).',
+          'Could not process selected passport file (image or PDF).'
+        )
       );
     }
     if (memberPassportInputRef.current) memberPassportInputRef.current.value = '';
@@ -662,9 +715,26 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const file = e.target.files?.[0];
     if (!file) return;
     setMemberFormError(null);
+    setMemberClarityWarning(null);
     try {
       const compressed = await compressImageToDataUrl(file, 520, 0.8);
       setMemberPersonalPhotoUrl(compressed.dataUrl);
+      void checkDocumentClarityWithGemini({
+        imageBase64: compressed.base64,
+        mimeType: compressed.mimeType,
+        docCategory: 'photo',
+        lang,
+      }).then((clarity) => {
+        if (clarity.ok && clarity.result && !clarity.result.isClear) {
+          setMemberClarityWarning(
+            (isAr ? clarity.result.issueAr : clarity.result.issueEn) ||
+              t(
+                'الصورة الشخصية غير واضحة أو الوجه غير مكتمل. يرجى رفع صورة أوضح.',
+                'The personal photo looks blurry or cropped. Please upload a clearer photo.'
+              )
+          );
+        }
+      });
     } catch {
       setMemberFormError(
         t('تعذر معالجة الصورة الشخصية المختارة.', 'Could not process selected personal photo.')
@@ -705,7 +775,15 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         passportFullName:
           memberPassportFullName.trim() ||
           `${memberFirstName.trim()} ${memberLastName.trim()}`.trim(),
+        passportFullNameEn:
+          memberPassportFullName.trim() ||
+          `${memberFirstName.trim()} ${memberLastName.trim()}`.trim(),
+        ...(memberPassportFullNameAr.trim()
+          ? { passportFullNameAr: memberPassportFullNameAr.trim() }
+          : {}),
         passportNumber: memberPassportNumber.trim().toUpperCase(),
+        ...(memberBirthDate ? { birthDate: memberBirthDate } : {}),
+        ...(memberPassportIssueDate ? { passportIssueDate: memberPassportIssueDate } : {}),
         passportExpiryDate: memberPassportExpiry,
         nationality: memberNationality.trim(),
         passportPhotoUrl: memberPassportPhotoUrl,
@@ -1541,8 +1619,10 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     if (!activeTraveler || !capturedSnapshotDataUrl) return;
     setIsUploadingAvatarImmediate(true);
     setSaveFeedback(null);
+    setUploadClarityWarning(null);
     try {
-      await uploadAndSaveAvatarImmediateCloud(activeTraveler.phone, capturedSnapshotDataUrl);
+      const snapshotDataUrl = capturedSnapshotDataUrl;
+      await uploadAndSaveAvatarImmediateCloud(activeTraveler.phone, snapshotDataUrl);
       onUpdateDraft((prev) => ({
         ...prev,
         pendingAvatarPreviewUrl: '',
@@ -1555,6 +1635,22 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           'Selfie avatar captured and saved to cloud immediately!'
         ),
       });
+      void checkDocumentClarityWithGemini({
+        imageBase64: snapshotDataUrl,
+        mimeType: 'image/jpeg',
+        docCategory: 'avatar',
+        lang,
+      }).then((clarity) => {
+        if (clarity.ok && clarity.result && !clarity.result.isClear) {
+          setUploadClarityWarning(
+            (isAr ? clarity.result.issueAr : clarity.result.issueEn) ||
+              t(
+                'تنبيه وضوح: الصورة الشخصية الملتقطة تبدو غير واضحة أو مقصوصة، يرجى إعادة التقاط صورة أوضح.',
+                'Clarity Warning: Captured personal photo looks blurry or cropped. Please retake a clearer photo.'
+              )
+          );
+        }
+      });
     } catch {
       setCameraError(t('تعذر حفظ الصورة. يرجى المحاولة مجدداً.', 'Failed to save captured photo.'));
     } finally {
@@ -1562,71 +1658,148 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // AI OCR Extraction updating lifted draft immediately (and preserving across navigation)
-  const runAutoPassportExtractionIntoDraft = async (base64: string, mimeType: string) => {
+  // AI OCR Extraction updating lifted draft immediately (supports Passport OR Saudi Visa/Visit docs in Image or PDF)
+  const runAutoPassportExtractionIntoDraft = async (
+    base64: string,
+    mimeType: string,
+    syncCloudNow = false
+  ) => {
     setIsExtractingPassport(true);
     setPassportExtractFeedback(null);
+    setUploadClarityWarning(null);
     try {
-      const response = await fetch('/api/passport-check', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64,
-          mimeType,
-          visaType: draft.preferredVisaType,
-          lang,
-        }),
+      const res = await analyzePassportWithGemini({
+        imageBase64: base64,
+        mimeType,
+        visaType: draft.preferredVisaType,
+        lang,
       });
 
-      const contentType = response.headers.get('content-type') || '';
-      if (!response.ok || !contentType.includes('application/json')) {
+      if (!res.ok || !res.result) {
         setPassportExtractFeedback({
           type: 'info',
-          text: t(
-            'تم إرفاق صورة الجواز في المسودة. يمكنك مراجعة أو كتابة رقم الجواز والاسم يدوياً ثم الضغط على "حفظ البيانات".',
-            'Passport scan staged in draft. You can type or adjust passport details above and click Save Data.'
-          ),
+          text: res.noKeyConfigured
+            ? t(
+                'تم إرفاق الملف في المسودة. يمكنك مراجعة أو كتابة البيانات يدوياً ثم الضغط على "حفظ البيانات".',
+                'File staged in draft. You can type or adjust details above and click Save Data.'
+              )
+            : res.error ||
+              t(
+                'تم إرفاق الملف في المسودة. يمكنك مراجعة البيانات يدوياً ثم الضغط على "حفظ البيانات".',
+                'File staged in draft. You can verify details manually and click Save Data.'
+              ),
         });
         return;
       }
 
-      const data = (await response.json()) as { result?: PassportAiCheckResult };
-      const extracted = data.result;
-      if (!extracted) return;
+      const extracted = res.result;
+
+      if (
+        extracted.isReadable === false ||
+        (extracted.clarityStatus && extracted.clarityStatus !== 'clear')
+      ) {
+        setUploadClarityWarning(
+          (isAr ? extracted.clarityIssueAr : extracted.clarityIssueEn) ||
+            t(
+              'تنبيه جودة الملف: الملف المرفق غير واضح أو مقصوص. يرجى رفع نسخة أوضح لضمان دقة القراءة.',
+              'Clarity Alert: The uploaded file looks blurry, cropped, or obscured. Please upload a clearer scan.'
+            )
+        );
+      }
+
+      const isSaudiVisaDoc =
+        extracted.detectedDocumentKind === 'saudi_visa' ||
+        Boolean(
+          extracted.visaDocumentNumber?.trim() ||
+            extracted.saudiSponsorId?.trim() ||
+            extracted.portOfEntry?.trim()
+        );
 
       const cleanPassportNo = (extracted.passportNumber || '').trim().toUpperCase();
-      const extractedFullName = (extracted.fullName || '').trim();
-      const nameParts = extractedFullName ? splitPassportName(extractedFullName) : null;
+      const extractedNameEn = (extracted.passportFullNameEn || extracted.fullName || '').trim();
+      const extractedNameAr = (extracted.passportFullNameAr || '').trim();
+      const nameParts = extractedNameEn ? splitPassportName(extractedNameEn) : null;
+      const cleanBirthDate =
+        extracted.birthDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.birthDate)
+          ? extracted.birthDate
+          : '';
+      const cleanIssueDate =
+        extracted.issueDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.issueDate)
+          ? extracted.issueDate
+          : '';
+      const cleanExpiryDate =
+        extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)
+          ? extracted.expiryDate
+          : '';
+      const cleanNationality = (extracted.nationality || '').trim();
 
-      onUpdateDraft((prev) => ({
-        ...prev,
-        ...(cleanPassportNo ? { passportNumber: cleanPassportNo } : {}),
-        ...(extractedFullName ? { passportFullName: extractedFullName } : {}),
-        ...(nameParts?.firstName ? { firstName: nameParts.firstName } : {}),
-        ...(nameParts?.lastName ? { lastName: nameParts.lastName } : {}),
-        ...(extracted.expiryDate && /^\d{4}-\d{2}-\d{2}$/.test(extracted.expiryDate)
-          ? { passportExpiryDate: extracted.expiryDate }
-          : {}),
-        ...(extracted.nationality && extracted.nationality.trim()
-          ? { nationality: extracted.nationality.trim() }
-          : {}),
-        isDirty: true,
-      }));
+      const visaDocNo = (extracted.visaDocumentNumber || '').trim();
+      const sponsorId = (extracted.saudiSponsorId || '').trim();
+      const appNameAr = (extracted.applicantNameAr || '').trim();
+      const appNameEn = (extracted.applicantNameEn || '').trim();
+      const docPassNo = (extracted.documentPassportNumber || '').trim().toUpperCase();
+      const portEntry = (extracted.portOfEntry || '').trim();
 
-      if (cleanPassportNo || extractedFullName) {
+      const passportPatch: Partial<TravelerProfileDraft> =
+        !isSaudiVisaDoc || cleanPassportNo || cleanExpiryDate
+          ? {
+              ...(cleanPassportNo ? { passportNumber: cleanPassportNo } : {}),
+              ...(extractedNameEn
+                ? { passportFullName: extractedNameEn, passportFullNameEn: extractedNameEn }
+                : {}),
+              ...(extractedNameAr ? { passportFullNameAr: extractedNameAr } : {}),
+              ...(nameParts?.firstName ? { firstName: nameParts.firstName } : {}),
+              ...(nameParts?.lastName ? { lastName: nameParts.lastName } : {}),
+              ...(cleanBirthDate ? { birthDate: cleanBirthDate } : {}),
+              ...(cleanIssueDate ? { passportIssueDate: cleanIssueDate } : {}),
+              ...(cleanExpiryDate ? { passportExpiryDate: cleanExpiryDate } : {}),
+              ...(cleanNationality ? { nationality: cleanNationality } : {}),
+            }
+          : {};
+
+      const visaPatch: Partial<TravelerProfileDraft> = {
+        ...(visaDocNo ? { visaDocumentNumber: visaDocNo } : {}),
+        ...(sponsorId ? { saudiSponsorId: sponsorId } : {}),
+        ...(appNameAr ? { applicantNameAr: appNameAr } : {}),
+        ...(appNameEn ? { applicantNameEn: appNameEn } : {}),
+        ...(docPassNo ? { documentPassportNumber: docPassNo } : {}),
+        ...(portEntry ? { portOfEntry: portEntry } : {}),
+      };
+
+      const combinedPatch = { ...passportPatch, ...visaPatch };
+
+      if (Object.keys(combinedPatch).length > 0) {
+        onUpdateDraft((prev) => ({
+          ...prev,
+          ...combinedPatch,
+          isDirty: syncCloudNow ? prev.isDirty : true,
+        }));
+        if (syncCloudNow && activeTraveler) {
+          updateTravelerProfileDetails(activeTraveler.phone, combinedPatch);
+        }
+
+        setAiExtractedBadge(true);
+        const summaryLabel = isSaudiVisaDoc
+          ? visaDocNo || sponsorId || appNameAr || appNameEn
+          : cleanPassportNo || extractedNameEn || extractedNameAr;
         setPassportExtractFeedback({
           type: 'success',
-          text: t(
-            `تم قراءة بيانات الجواز وتحديث المسودة تلقائياً (${cleanPassportNo || extractedFullName}). اضغط "حفظ البيانات" للاعتماد النهائي.`,
-            `Passport details auto-extracted into draft (${cleanPassportNo || extractedFullName}). Click Save Data to commit.`
-          ),
+          text: isSaudiVisaDoc
+            ? t(
+                `تم التعرّف تلقائياً على مستند التأشيرة/الزيارة واستخراج بياناته ✨ (${summaryLabel}).`,
+                `Saudi Visa/Visit document auto-detected & extracted with AI ✨ (${summaryLabel}).`
+              )
+            : t(
+                `تمت القراءة بالذكاء الاصطناعي ✨ وتعبئة بيانات جواز السفر (${summaryLabel}).`,
+                `Passport extracted with AI ✨ (${summaryLabel}).`
+              ),
         });
       } else {
         setPassportExtractFeedback({
           type: 'info',
           text: t(
-            'تم إرفاق صورة الجواز، ولم يظهر رقم الجواز بوضوح كافٍ. يرجى كتابته يدوياً أو رفع صورة أوضح.',
-            'Passport image attached, but passport number was not clearly legible. Please enter it manually or upload a clearer photo.'
+            'تم إرفاق الملف، ولم تظهر البيانات بوضوح كافٍ. يرجى كتابتها يدوياً أو رفع نسخة أوضح.',
+            'File attached, but details were not clearly legible. Please enter them manually or upload a clearer file.'
           ),
         });
       }
@@ -1634,8 +1807,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setPassportExtractFeedback({
         type: 'info',
         text: t(
-          'تم إرفاق صورة الجواز في المسودة. يرجى كتابة رقم الجواز يدوياً ثم الضغط على "حفظ البيانات".',
-          'Passport image staged in draft. Please enter your passport number manually and click Save Data.'
+          'تم إرفاق الملف في المسودة. يرجى مراجعة البيانات ثم الضغط على "حفظ البيانات".',
+          'File staged in draft. Please verify details and click Save Data.'
         ),
       });
     } finally {
@@ -1643,10 +1816,37 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
+  const inspectUploadedImageClarity = async (
+    base64OrDataUrl: string,
+    mimeType: string,
+    docCategory: string
+  ) => {
+    try {
+      const clarity = await checkDocumentClarityWithGemini({
+        imageBase64: base64OrDataUrl,
+        mimeType,
+        docCategory,
+        lang,
+      });
+      if (clarity.ok && clarity.result && !clarity.result.isClear) {
+        setUploadClarityWarning(
+          (isAr ? clarity.result.issueAr : clarity.result.issueEn) ||
+            t(
+              'تنبيه وضوح المستند: الصورة المرفوعة تبدو غير واضحة أو مقصوصة. يرجى إعادة رفع صورة واضحة لضمان سرعة الإنجاز.',
+              'Document Clarity Alert: Uploaded image appears blurry, cropped, or illegible. Please upload a clearer photo.'
+            )
+        );
+      }
+    } catch {
+      // Ignore clarity check error silently
+    }
+  };
+
   const handleStageAvatar = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setSaveFeedback(null);
+    setUploadClarityWarning(null);
     setIsUploadingAvatarImmediate(true);
     try {
       const compressed = await compressImageToDataUrl(file, 520, 0.82);
@@ -1670,6 +1870,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           isDirty: true,
         }));
       }
+      void inspectUploadedImageClarity(compressed.base64, compressed.mimeType, 'avatar');
     } catch {
       setSaveFeedback({
         type: 'error',
@@ -1689,31 +1890,37 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const file = e.target.files?.[0];
     if (!file) return;
     setSaveFeedback(null);
+    setUploadClarityWarning(null);
     try {
-      const compressed = await compressImageToDataUrl(file, 1100, 0.76);
+      const payload = await readFileAsAiDataUrl(file, 1100, 0.76);
       const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       onUpdateDraft((prev) => ({
         ...prev,
         pendingDocuments: [
           {
             id: docId,
-            label: t('صورة جواز السفر', 'Passport Copy'),
+            label: payload.isPdf
+              ? t('جواز السفر / مستند (PDF)', 'Passport / Document (PDF)')
+              : t('صورة جواز السفر', 'Passport Copy'),
             docType: 'passport',
-            fileName: file.name || 'passport.jpg',
-            dataUrl: compressed.dataUrl,
+            fileName: payload.fileName,
+            dataUrl: payload.dataUrl,
           },
           ...prev.pendingDocuments,
         ],
         isDirty: true,
       }));
-      void runAutoPassportExtractionIntoDraft(compressed.base64, compressed.mimeType);
-    } catch {
+      void runAutoPassportExtractionIntoDraft(payload.base64, payload.mimeType);
+    } catch (err) {
       setSaveFeedback({
         type: 'error',
-        text: t(
-          'تعذر قراءة صورة جواز السفر. يرجى المحاولة بصورة أوضح.',
-          'Could not read passport photo. Please try a valid image.'
-        ),
+        text:
+          err instanceof Error
+            ? err.message
+            : t(
+                'تعذر قراءة ملف جواز السفر (صورة أو PDF).',
+                'Could not read passport file (image or PDF).'
+              ),
       });
     }
     if (accountPassportInputRef.current) accountPassportInputRef.current.value = '';
@@ -1723,6 +1930,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     const files = Array.from(e.target.files || []);
     if (files.length === 0 || !activeTraveler) return;
     setSaveFeedback(null);
+    setUploadClarityWarning(null);
 
     const hasPdfOrBatch =
       files.length > 1 ||
@@ -1743,10 +1951,27 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           setSaveFeedback({
             type: 'success',
             text: t(
-              `تم ضغط ورفع ${res.uploadedCount} ملف/مستند بنجاح إلى محفظتك السحابية.`,
-              `Successfully compressed & uploaded ${res.uploadedCount} file(s) to your cloud wallet.`
+              `تم رفع ${res.uploadedCount} ملف/مستند بنجاح إلى محفظتك السحابية.`,
+              `Successfully uploaded ${res.uploadedCount} file(s) to your cloud wallet.`
             ),
           });
+          const scannableFile = files.find(
+            (f) =>
+              f.type === 'application/pdf' ||
+              f.name.toLowerCase().endsWith('.pdf') ||
+              f.type.startsWith('image/')
+          );
+          if (scannableFile) {
+            void readFileAsAiDataUrl(scannableFile, 1100, 0.76)
+              .then((payload) => {
+                if (docType === 'passport' || docType === 'visa' || docType === 'other' || payload.isPdf) {
+                  void runAutoPassportExtractionIntoDraft(payload.base64, payload.mimeType, true);
+                } else {
+                  void inspectUploadedImageClarity(payload.base64, payload.mimeType, docType);
+                }
+              })
+              .catch(() => {});
+          }
         }
         if (res.errors.length > 0) {
           setSaveFeedback({
@@ -1763,7 +1988,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
 
     const file = files[0];
     try {
-      const compressed = await compressImageToDataUrl(file, 1100, 0.76);
+      const payload = await readFileAsAiDataUrl(file, 1100, 0.76);
       const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       onUpdateDraft((prev) => ({
         ...prev,
@@ -1772,24 +1997,26 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
             id: docId,
             label: docLabel.trim() || t('مستند مسافر', 'Traveler Document'),
             docType,
-            fileName: file.name || 'document.jpg',
-            dataUrl: compressed.dataUrl,
+            fileName: payload.fileName,
+            dataUrl: payload.dataUrl,
           },
           ...prev.pendingDocuments,
         ],
         isDirty: true,
       }));
 
-      if (docType === 'passport') {
-        void runAutoPassportExtractionIntoDraft(compressed.base64, compressed.mimeType);
+      if (docType === 'passport' || docType === 'visa' || docType === 'other') {
+        void runAutoPassportExtractionIntoDraft(payload.base64, payload.mimeType);
+      } else {
+        void inspectUploadedImageClarity(payload.base64, payload.mimeType, docType);
       }
-    } catch {
+    } catch (err) {
       setSaveFeedback({
         type: 'error',
-        text: t(
-          'تعذر ضغط الصورة المختارة.',
-          'Could not compress selected image.'
-        ),
+        text:
+          err instanceof Error
+            ? err.message
+            : t('تعذر معالجة الملف المختار.', 'Could not process selected file.'),
       });
     }
     if (walletFileInputRef.current) walletFileInputRef.current.value = '';
@@ -2825,7 +3052,7 @@ Please advise on the next steps for my application.`
           <input
             ref={memberPassportInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,application/pdf"
             onChange={handlePickMemberPassportPhoto}
             className="hidden"
           />
@@ -2842,10 +3069,11 @@ Please advise on the next steps for my application.`
             <div className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-black text-[#0F2438]">
-                  {t('صورة جواز السفر (مع قراءة OCR تلقائية)', 'Passport Photo (Auto OCR)')}{' '}
+                  {t('جواز السفر (صورة أو PDF — قراءة OCR تلقائية)', 'Passport (Image or PDF — Auto OCR)')}{' '}
                   <span className="text-red-500">*</span>
                 </span>
-                {memberPassportPhotoUrl && (
+                {memberPassportPhotoUrl &&
+                  !memberPassportPhotoUrl.startsWith('data:application/pdf') && (
                   <button
                     type="button"
                     onClick={() =>
@@ -2869,26 +3097,33 @@ Please advise on the next steps for my application.`
 
               {memberPassportPhotoUrl ? (
                 <div className="flex items-center gap-3">
-                  <img
-                    src={memberPassportPhotoUrl}
-                    alt="Passport"
-                    loading="lazy"
-                    decoding="async"
-                    className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
-                    onClick={() =>
-                      setPreviewLightbox({
-                        label: t('معاينة جواز المرافق', 'Companion Passport Preview'),
-                        dataUrl: memberPassportPhotoUrl,
-                      })
-                    }
-                  />
+                  {memberPassportPhotoUrl.startsWith('data:application/pdf') ? (
+                    <div className="w-16 h-16 rounded-xl bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center shrink-0">
+                      <FileText className="w-6 h-6" />
+                      <span className="text-[9px] font-black">PDF</span>
+                    </div>
+                  ) : (
+                    <img
+                      src={memberPassportPhotoUrl}
+                      alt="Passport"
+                      loading="lazy"
+                      decoding="async"
+                      className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0 cursor-pointer"
+                      onClick={() =>
+                        setPreviewLightbox({
+                          label: t('معاينة جواز المرافق', 'Companion Passport Preview'),
+                          dataUrl: memberPassportPhotoUrl,
+                        })
+                      }
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => memberPassportInputRef.current?.click()}
                     className="flex-1 min-h-[42px] px-3 py-2 rounded-xl bg-[#C6A052]/15 hover:bg-[#C6A052]/25 border border-[#C6A052] text-[#0F2438] text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Upload className="w-4 h-4" />
-                    <span>{t('تغيير صورة الجواز', 'Change Passport Photo')}</span>
+                    <span>{t('تغيير ملف الجواز', 'Change Passport File')}</span>
                   </button>
                 </div>
               ) : (
@@ -2898,7 +3133,7 @@ Please advise on the next steps for my application.`
                   className="w-full min-h-[48px] px-3 py-3 rounded-xl border-2 border-dashed border-[#C6A052] bg-[#FAF8F2] hover:bg-[#F5EFE0] text-[#0F2438] text-xs font-black flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Upload className="w-4 h-4 text-[#9E7B33]" />
-                  <span>{t('رفع صورة جواز السفر (إلزامي)', 'Upload Passport Photo (Required)')}</span>
+                  <span>{t('رفع جواز السفر (صورة أو PDF)', 'Upload Passport (Image or PDF)')}</span>
                 </button>
               )}
             </div>
@@ -2980,9 +3215,44 @@ Please advise on the next steps for my application.`
           )}
 
           {memberOcrFeedback && !isExtractingMemberPassport && (
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>{memberOcrFeedback}</span>
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{memberOcrFeedback}</span>
+              </div>
+              {memberAiExtractedBadge && (
+                <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                  {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                </span>
+              )}
+            </div>
+          )}
+
+          {memberClarityWarning && (
+            <div className="p-3 rounded-xl bg-amber-50 border-2 border-amber-300 text-xs font-bold text-amber-950 flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span>{memberClarityWarning}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMemberClarityWarning(null)}
+                className="text-amber-700 hover:text-amber-950 cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {evaluatePassportValidity(memberPassportExpiry).isUnderSixMonths && (
+            <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex items-start gap-2">
+              <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
+              <span>
+                {t(
+                  'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                  'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                )}
+              </span>
             </div>
           )}
 
@@ -3502,6 +3772,59 @@ Please advise on the next steps for my application.`
           </div>
         )}
 
+        {uploadClarityWarning && (
+          <div className="p-3.5 rounded-2xl border-2 border-amber-300 bg-amber-50 text-xs sm:text-sm font-bold text-amber-950 flex items-start justify-between gap-2.5 shadow-xs">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4.5 h-4.5 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-black block">
+                  {t('تنبيه وضوح الصورة المرفوعة', 'Uploaded Image Clarity Warning')}
+                </span>
+                <p className="text-xs font-semibold text-amber-900 mt-0.5">{uploadClarityWarning}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setUploadClarityWarning(null)}
+              className="p-1 rounded-lg text-amber-700 hover:bg-amber-100 cursor-pointer shrink-0"
+              aria-label={t('إغلاق', 'Dismiss')}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {evaluatePassportValidity(draft.passportExpiryDate || activeTraveler.passportExpiryDate)
+          .isUnderSixMonths && (
+          <div className="p-3.5 rounded-2xl border-2 border-red-300 bg-red-50 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5 shadow-xs">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <span>
+                {t(
+                  'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                  'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                )}
+              </span>
+              {(() => {
+                const ev = evaluatePassportValidity(
+                  draft.passportExpiryDate || activeTraveler.passportExpiryDate
+                );
+                if (ev.remainingDays === null) return null;
+                return (
+                  <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                    {ev.remainingDays <= 0
+                      ? t('جواز السفر منتهي الصلاحية حالياً.', 'Your passport is currently expired.')
+                      : t(
+                          `المتبقي على انتهاء الجواز: ${ev.remainingDays} يوماً فقط.`,
+                          `Remaining passport validity: ${ev.remainingDays} days.`
+                        )}
+                  </span>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
         {/* SUB-TAB 1: ACCOUNT INFO & MANDATORY PASSPORT / AVATAR */}
         {subTab === 'account' && (
           <form onSubmit={handleCommitSaveAll} className="space-y-5">
@@ -3652,88 +3975,118 @@ Please advise on the next steps for my application.`
                   <input
                     ref={accountPassportInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,application/pdf"
                     onChange={handleStagePassportPhotoFromAccount}
                     className="hidden"
                   />
 
-                  {latestPassportScan && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
-                      <div className="flex items-center gap-2.5">
-                        <img
-                          src={getDisplayableDriveImageUrl(latestPassportScan.dataUrl)}
-                          alt={latestPassportScan.label}
-                          loading="lazy"
-                          decoding="async"
-                          className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 cursor-pointer"
-                          onClick={() =>
-                            setPreviewLightbox({
-                              label: latestPassportScan.label,
-                              dataUrl: latestPassportScan.dataUrl,
-                              downloadName: buildDescriptiveFilename(
-                                'Passport',
-                                draft.firstName || names.firstName,
-                                draft.lastName || names.lastName
-                              ),
-                            })
-                          }
-                        />
-                        <div className="min-w-0 flex-1">
-                          <span className="text-xs font-bold text-[#0F2438] block truncate">
-                            {latestPassportScan.label}
-                          </span>
-                          <span className="text-[10px] text-slate-500 block truncate">
-                            {latestPassportScan.fileName}
-                          </span>
+                  {latestPassportScan && (() => {
+                    const isLatestPdf =
+                      (latestPassportScan.fileName || '').toLowerCase().endsWith('.pdf') ||
+                      (latestPassportScan.dataUrl || '').startsWith('data:application/pdf');
+                    return (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
+                        <div className="flex items-center gap-2.5">
+                          {isLatestPdf ? (
+                            <div className="w-12 h-12 rounded-lg bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center shrink-0">
+                              <FileText className="w-5 h-5" />
+                              <span className="text-[8px] font-black">PDF</span>
+                            </div>
+                          ) : (
+                            <img
+                              src={getDisplayableDriveImageUrl(latestPassportScan.dataUrl)}
+                              alt={latestPassportScan.label}
+                              loading="lazy"
+                              decoding="async"
+                              className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 cursor-pointer"
+                              onClick={() =>
+                                setPreviewLightbox({
+                                  label: latestPassportScan.label,
+                                  dataUrl: latestPassportScan.dataUrl,
+                                  downloadName: buildDescriptiveFilename(
+                                    'Passport',
+                                    draft.firstName || names.firstName,
+                                    draft.lastName || names.lastName
+                                  ),
+                                })
+                              }
+                            />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-bold text-[#0F2438] block truncate">
+                              {latestPassportScan.label}
+                            </span>
+                            <span className="text-[10px] text-slate-500 block truncate">
+                              {latestPassportScan.fileName}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {isLatestPdf ? (
+                            <a
+                              href={getDriveViewUrl(
+                                latestPassportScan.dataUrl,
+                                'viewUrl' in latestPassportScan ? latestPassportScan.viewUrl : undefined,
+                                'storagePath' in latestPassportScan ? latestPassportScan.storagePath : undefined
+                              )}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="min-h-[38px] px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>{t('فتح PDF', 'Open PDF')}</span>
+                            </a>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewLightbox({
+                                  label: latestPassportScan.label,
+                                  dataUrl: latestPassportScan.dataUrl,
+                                  downloadName: buildDescriptiveFilename(
+                                    'Passport',
+                                    draft.firstName || names.firstName,
+                                    draft.lastName || names.lastName
+                                  ),
+                                })
+                              }
+                              className="min-h-[38px] px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>{t('معاينة', 'Preview')}</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            disabled={downloadingKey === 'owner-passport'}
+                            onClick={() =>
+                              void handleDirectDownload(
+                                'owner-passport',
+                                latestPassportScan.dataUrl,
+                                isLatestPdf
+                                  ? latestPassportScan.fileName || 'Passport.pdf'
+                                  : buildDescriptiveFilename(
+                                      'Passport',
+                                      draft.firstName || names.firstName,
+                                      draft.lastName || names.lastName
+                                    )
+                              )
+                            }
+                            className="min-h-[38px] px-2 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer disabled:opacity-60"
+                          >
+                            {downloadingKey === 'owner-passport' ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5" />
+                            )}
+                            <span>{t('تحميل الجواز', 'Download')}</span>
+                          </button>
                         </div>
                       </div>
-
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPreviewLightbox({
-                              label: latestPassportScan.label,
-                              dataUrl: latestPassportScan.dataUrl,
-                              downloadName: buildDescriptiveFilename(
-                                'Passport',
-                                draft.firstName || names.firstName,
-                                draft.lastName || names.lastName
-                              ),
-                            })
-                          }
-                          className="min-h-[38px] px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>{t('معاينة', 'Preview')}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={downloadingKey === 'owner-passport'}
-                          onClick={() =>
-                            void handleDirectDownload(
-                              'owner-passport',
-                              latestPassportScan.dataUrl,
-                              buildDescriptiveFilename(
-                                'Passport',
-                                draft.firstName || names.firstName,
-                                draft.lastName || names.lastName
-                              )
-                            )
-                          }
-                          className="min-h-[38px] px-2 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer disabled:opacity-60"
-                        >
-                          {downloadingKey === 'owner-passport' ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Download className="w-3.5 h-3.5" />
-                          )}
-                          <span>{t('تحميل الجواز', 'Download')}</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   <button
                     type="button"
@@ -3743,8 +4096,8 @@ Please advise on the next steps for my application.`
                     <Upload className="w-4 h-4" />
                     <span>
                       {hasPassportScan
-                        ? t('رفع / تحديث صورة الجواز (OCR)', 'Update Passport Scan (OCR)')
-                        : t('رفع صورة جواز السفر الآن (إلزامي)', 'Upload Passport Photo (Required)')}
+                        ? t('رفع / تحديث الجواز (صورة أو PDF)', 'Update Passport (Image / PDF)')
+                        : t('رفع الجواز الآن (صورة أو PDF)', 'Upload Passport (Image / PDF)')}
                     </span>
                   </button>
                 </div>
@@ -3761,6 +4114,11 @@ Please advise on the next steps for my application.`
                           'Saved Traveler Profile (Quick Order Auto-Fill)'
                         )}
                       </h2>
+                      {aiExtractedBadge && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                          {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                        </span>
+                      )}
                       {Boolean(
                         (draft.passportFullName.trim() || (draft.firstName.trim() && draft.lastName.trim())) &&
                           draft.passportNumber.trim() &&
@@ -3810,14 +4168,21 @@ Please advise on the next steps for my application.`
 
                 {passportExtractFeedback && !isExtractingPassport && (
                   <div
-                    className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                    className={`p-3 rounded-xl border text-xs font-bold flex flex-wrap items-center justify-between gap-2 ${
                       passportExtractFeedback.type === 'success'
                         ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
                         : 'bg-amber-50 border-amber-200 text-amber-900'
                     }`}
                   >
-                    <Sparkles className="w-4 h-4 shrink-0" />
-                    <span>{passportExtractFeedback.text}</span>
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 shrink-0" />
+                      <span>{passportExtractFeedback.text}</span>
+                    </div>
+                    {passportExtractFeedback.type === 'success' && (
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                        {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                      </span>
+                    )}
                   </div>
                 )}
 
@@ -3869,38 +4234,129 @@ Please advise on the next steps for my application.`
                       {t('رقم جواز السفر', 'Passport Number')}{' '}
                       <span className="text-red-500">*</span>
                     </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        value={draft.passportNumber}
+                        onChange={(e) =>
+                          onUpdateDraft((prev) => ({
+                            ...prev,
+                            passportNumber: e.target.value.toUpperCase(),
+                            isDirty: true,
+                          }))
+                        }
+                        placeholder="A12345678"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums uppercase focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                      {draft.passportNumber && (
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyFieldValue('clientPassport', draft.passportNumber)}
+                          title={t('نسخ رقم الجواز', 'Copy Passport Number')}
+                          className="min-h-[40px] px-2.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                        >
+                          {copiedFieldKey === 'clientPassport' ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                          <span>{copiedFieldKey === 'clientPassport' ? t('تم', 'Copied') : t('نسخ', 'Copy')}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('الجنسية', 'Nationality')}
+                    </label>
                     <input
                       type="text"
-                      required
-                      value={draft.passportNumber}
+                      value={draft.nationality}
                       onChange={(e) =>
                         onUpdateDraft((prev) => ({
                           ...prev,
-                          passportNumber: e.target.value.toUpperCase(),
+                          nationality: e.target.value,
                           isDirty: true,
                         }))
                       }
-                      placeholder="A12345678"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums uppercase focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                     />
                   </div>
 
                   <div>
                     <label className="block font-bold text-[#0F2438] mb-1.5">
-                      {t('الاسم الكامل بالإنجليزية في الجواز', 'Full Passport Name (Latin)')}
+                      {t('الاسم الكامل بالإنجليزية في الجواز', 'Full Name in English (Passport)')}
                     </label>
                     <input
                       type="text"
-                      value={draft.passportFullName}
+                      value={draft.passportFullNameEn || draft.passportFullName}
                       onChange={(e) =>
                         onUpdateDraft((prev) => ({
                           ...prev,
+                          passportFullNameEn: e.target.value,
                           passportFullName: e.target.value,
                           isDirty: true,
                         }))
                       }
                       placeholder="AHMED MOHAMED ALI"
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('الاسم الكامل بالعربية في الجواز (إن وجد)', 'Full Name in Arabic (If printed)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={draft.passportFullNameAr}
+                      onChange={(e) =>
+                        onUpdateDraft((prev) => ({
+                          ...prev,
+                          passportFullNameAr: e.target.value,
+                          isDirty: true,
+                        }))
+                      }
+                      placeholder={t('أحمد محمد علي', 'Arabic full name')}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('تاريخ الميلاد', 'Birth Date')}
+                    </label>
+                    <input
+                      type="date"
+                      value={draft.birthDate}
+                      onChange={(e) =>
+                        onUpdateDraft((prev) => ({
+                          ...prev,
+                          birthDate: e.target.value,
+                          isDirty: true,
+                        }))
+                      }
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('تاريخ إصدار الجواز', 'Passport Issue Date')}
+                    </label>
+                    <input
+                      type="date"
+                      value={draft.passportIssueDate}
+                      onChange={(e) =>
+                        onUpdateDraft((prev) => ({
+                          ...prev,
+                          passportIssueDate: e.target.value,
+                          isDirty: true,
+                        }))
+                      }
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                     />
                   </div>
 
@@ -3924,24 +4380,6 @@ Please advise on the next steps for my application.`
 
                   <div>
                     <label className="block font-bold text-[#0F2438] mb-1.5">
-                      {t('الجنسية', 'Nationality')}
-                    </label>
-                    <input
-                      type="text"
-                      value={draft.nationality}
-                      onChange={(e) =>
-                        onUpdateDraft((prev) => ({
-                          ...prev,
-                          nationality: e.target.value,
-                          isDirty: true,
-                        }))
-                      }
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block font-bold text-[#0F2438] mb-1.5">
                       {t('نوع التأشيرة / الخدمة المفضلة', 'Preferred Visa / Service')}
                     </label>
                     <input
@@ -3956,6 +4394,189 @@ Please advise on the next steps for my application.`
                       }
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                     />
+                  </div>
+                </div>
+
+                {/* Extracted Saudi Visa / Visit Document Section */}
+                <div className="rounded-2xl border border-[#C6A052]/50 bg-[#FAF8F2]/80 p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-[#C6A052]/30">
+                    <div>
+                      <h3 className="text-xs sm:text-sm font-black text-[#0F2438]">
+                        {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
+                      </h3>
+                      <p className="text-[11px] text-slate-600">
+                        {t(
+                          'تُملأ تلقائياً بالذكاء الاصطناعي عند رفع صورة أو ملف PDF لمستند التأشيرة أو الزيارة السعودية مع أزرار نسخ سريع.',
+                          'Auto-populated by AI when uploading a Saudi visa or visit invitation image/PDF with 1-click copy.'
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('رقم المستند', 'Document Number')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.visaDocumentNumber}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              visaDocumentNumber: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder="700xxxxxxx"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.visaDocumentNumber && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('visaDocNo', draft.visaDocumentNumber)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'visaDocNo' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'visaDocNo' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي', 'Saudi Sponsor / Host Iqama or ID')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.saudiSponsorId}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              saudiSponsorId: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder="1xxxxxxxxx / 2xxxxxxxxx"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.saudiSponsorId && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('sponsorId', draft.saudiSponsorId)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'sponsorId' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'sponsorId' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('اسم صاحب الطلب بالعربية', 'Applicant Name (Arabic)')}
+                      </label>
+                      <input
+                        type="text"
+                        value={draft.applicantNameAr}
+                        onChange={(e) =>
+                          onUpdateDraft((prev) => ({
+                            ...prev,
+                            applicantNameAr: e.target.value,
+                            isDirty: true,
+                          }))
+                        }
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('اسم صاحب الطلب بالإنجليزية', 'Applicant Name (English)')}
+                      </label>
+                      <input
+                        type="text"
+                        value={draft.applicantNameEn}
+                        onChange={(e) =>
+                          onUpdateDraft((prev) => ({
+                            ...prev,
+                            applicantNameEn: e.target.value,
+                            isDirty: true,
+                          }))
+                        }
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('رقم الجواز المدوّن في المستند', 'Passport Number on Document')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.documentPassportNumber}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              documentPassportNumber: e.target.value.toUpperCase(),
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder="A12345678"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.documentPassportNumber && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleCopyFieldValue('docPassportNo', draft.documentPassportNumber)
+                            }
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'docPassportNo' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>
+                              {copiedFieldKey === 'docPassportNo' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('جهة القدوم', 'Port of Entry')}
+                      </label>
+                      <input
+                        type="text"
+                        value={draft.portOfEntry}
+                        onChange={(e) =>
+                          onUpdateDraft((prev) => ({
+                            ...prev,
+                            portOfEntry: e.target.value,
+                            isDirty: true,
+                          }))
+                        }
+                        placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -4693,7 +5314,7 @@ Please advise on the next steps for my application.`
                 ref={walletFileInputRef}
                 type="file"
                 multiple
-                accept="image/*,.pdf"
+                accept="image/*,application/pdf"
                 onChange={handleStageWalletDoc}
                 className="hidden"
               />
@@ -4898,22 +5519,28 @@ Please advise on the next steps for my application.`
                             </button>
                           )}
 
-                          {doc.docType === 'passport' && doc.dataUrl && (
+                          {(doc.docType === 'passport' || doc.docType === 'visa') && doc.dataUrl && (
                             <button
                               type="button"
                               disabled={isExtractingPassport}
                               onClick={async () => {
                                 try {
-                                  const b64 = await imageUrlToBase64(doc.dataUrl);
-                                  void runAutoPassportExtractionIntoDraft(b64, 'image/jpeg');
+                                  const fetched = await fetchFileAsBase64WithMime(
+                                    doc.dataUrl,
+                                    doc.fileName
+                                  );
+                                  void runAutoPassportExtractionIntoDraft(
+                                    fetched.base64,
+                                    fetched.mimeType
+                                  );
                                 } catch {
-                                  // Ignore unreadable image
+                                  // Ignore unreadable file
                                 }
                               }}
                               className="min-h-[36px] px-2.5 py-1.5 rounded-lg bg-sky-50 border border-sky-200 hover:bg-sky-100 text-[11px] font-bold text-[#0284C7] flex items-center gap-1 cursor-pointer disabled:opacity-50"
                             >
                               <Sparkles className="w-3 h-3" />
-                              <span>{t('قراءة OCR', 'Extract OCR')}</span>
+                              <span>{t('قراءة بالذكاء ✨', 'AI Scan ✨')}</span>
                             </button>
                           )}
                         </div>

@@ -248,10 +248,20 @@ export interface TravelerProfileDraft {
   firstName: string;
   lastName: string;
   passportFullName: string;
+  passportFullNameEn: string;
+  passportFullNameAr: string;
   passportNumber: string;
+  birthDate: string;
+  passportIssueDate: string;
   passportExpiryDate: string;
   nationality: string;
   preferredVisaType: string;
+  visaDocumentNumber: string;
+  saudiSponsorId: string;
+  applicantNameAr: string;
+  applicantNameEn: string;
+  documentPassportNumber: string;
+  portOfEntry: string;
   pendingAvatarPreviewUrl: string;
   pendingDocuments: StagedDraftDocument[];
   removedDocIds: string[];
@@ -483,7 +493,17 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
           ...(m.passportFullName
             ? { passportFullName: String(m.passportFullName).trim().slice(0, 200) }
             : {}),
+          ...(m.passportFullNameEn
+            ? { passportFullNameEn: String(m.passportFullNameEn).trim().slice(0, 200) }
+            : {}),
+          ...(m.passportFullNameAr
+            ? { passportFullNameAr: String(m.passportFullNameAr).trim().slice(0, 200) }
+            : {}),
           passportNumber: String(m.passportNumber || '').trim().toUpperCase().slice(0, 40),
+          ...(m.birthDate ? { birthDate: String(m.birthDate).slice(0, 32) } : {}),
+          ...(m.passportIssueDate
+            ? { passportIssueDate: String(m.passportIssueDate).slice(0, 32) }
+            : {}),
           ...(m.passportExpiryDate
             ? { passportExpiryDate: String(m.passportExpiryDate).slice(0, 32) }
             : {}),
@@ -738,10 +758,33 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     payload.passportNumber = String(profile.passportNumber).trim().toUpperCase().slice(0, 40);
   if (profile.passportFullName !== undefined)
     payload.passportFullName = String(profile.passportFullName).slice(0, 200);
+  if (profile.passportFullNameEn !== undefined)
+    payload.passportFullNameEn = String(profile.passportFullNameEn).slice(0, 200);
+  if (profile.passportFullNameAr !== undefined)
+    payload.passportFullNameAr = String(profile.passportFullNameAr).slice(0, 200);
+  if (profile.birthDate !== undefined)
+    payload.birthDate = String(profile.birthDate).slice(0, 32);
+  if (profile.passportIssueDate !== undefined)
+    payload.passportIssueDate = String(profile.passportIssueDate).slice(0, 32);
   if (profile.passportExpiryDate !== undefined)
     payload.passportExpiryDate = String(profile.passportExpiryDate).slice(0, 32);
   if (profile.nationality !== undefined)
     payload.nationality = String(profile.nationality).slice(0, 100);
+  if (profile.visaDocumentNumber !== undefined)
+    payload.visaDocumentNumber = String(profile.visaDocumentNumber).trim().slice(0, 64);
+  if (profile.saudiSponsorId !== undefined)
+    payload.saudiSponsorId = String(profile.saudiSponsorId).trim().slice(0, 64);
+  if (profile.applicantNameAr !== undefined)
+    payload.applicantNameAr = String(profile.applicantNameAr).slice(0, 200);
+  if (profile.applicantNameEn !== undefined)
+    payload.applicantNameEn = String(profile.applicantNameEn).slice(0, 200);
+  if (profile.documentPassportNumber !== undefined)
+    payload.documentPassportNumber = String(profile.documentPassportNumber)
+      .trim()
+      .toUpperCase()
+      .slice(0, 40);
+  if (profile.portOfEntry !== undefined)
+    payload.portOfEntry = String(profile.portOfEntry).slice(0, 160);
   if (profile.avatarUrl && profile.avatarUrl.length <= 4096) {
     payload.avatarUrl = profile.avatarUrl;
   }
@@ -917,6 +960,19 @@ function mergeCloudClientWithLocal(
       typeof cloudData.avatarSizeBytes === 'number'
         ? cloudData.avatarSizeBytes
         : localExisting?.avatarSizeBytes,
+    passportFullName: cloudData.passportFullName ?? localExisting?.passportFullName,
+    passportFullNameEn: cloudData.passportFullNameEn ?? localExisting?.passportFullNameEn,
+    passportFullNameAr: cloudData.passportFullNameAr ?? localExisting?.passportFullNameAr,
+    birthDate: cloudData.birthDate ?? localExisting?.birthDate,
+    passportIssueDate: cloudData.passportIssueDate ?? localExisting?.passportIssueDate,
+    passportExpiryDate: cloudData.passportExpiryDate ?? localExisting?.passportExpiryDate,
+    visaDocumentNumber: cloudData.visaDocumentNumber ?? localExisting?.visaDocumentNumber,
+    saudiSponsorId: cloudData.saudiSponsorId ?? localExisting?.saudiSponsorId,
+    applicantNameAr: cloudData.applicantNameAr ?? localExisting?.applicantNameAr,
+    applicantNameEn: cloudData.applicantNameEn ?? localExisting?.applicantNameEn,
+    documentPassportNumber:
+      cloudData.documentPassportNumber ?? localExisting?.documentPassportNumber,
+    portOfEntry: cloudData.portOfEntry ?? localExisting?.portOfEntry,
     appointmentDetails: cloudData.appointmentDetails || localExisting?.appointmentDetails,
     documents: mergedDocs,
     familyMembers: mergedFamilyMembers,
@@ -4072,9 +4128,19 @@ export function updateTravelerProfileDetails(
       | 'avatarUrl'
       | 'avatarStoragePath'
       | 'passportFullName'
+      | 'passportFullNameEn'
+      | 'passportFullNameAr'
       | 'passportNumber'
+      | 'birthDate'
+      | 'passportIssueDate'
       | 'passportExpiryDate'
       | 'nationality'
+      | 'visaDocumentNumber'
+      | 'saudiSponsorId'
+      | 'applicantNameAr'
+      | 'applicantNameEn'
+      | 'documentPassportNumber'
+      | 'portOfEntry'
       | 'preferredVisaType'
       | 'orderStatus'
       | 'adminNotes'
@@ -4095,6 +4161,9 @@ export function updateTravelerProfileDetails(
   const cleanUpdates = { ...updates };
   if (typeof cleanUpdates.passportNumber === 'string') {
     cleanUpdates.passportNumber = cleanUpdates.passportNumber.trim().toUpperCase();
+  }
+  if (typeof cleanUpdates.documentPassportNumber === 'string') {
+    cleanUpdates.documentPassportNumber = cleanUpdates.documentPassportNumber.trim().toUpperCase();
   }
 
   const nextFirst =
@@ -5106,11 +5175,23 @@ export async function commitTravelerProfileDraftCloud(
     firstName: cleanFirst,
     lastName: cleanLast,
     name: fullDisplayName,
-    passportFullName: draft.passportFullName.trim() || fullDisplayName,
+    passportFullName:
+      draft.passportFullNameEn.trim() || draft.passportFullName.trim() || fullDisplayName,
+    passportFullNameEn:
+      draft.passportFullNameEn.trim() || draft.passportFullName.trim() || fullDisplayName,
+    passportFullNameAr: draft.passportFullNameAr.trim(),
     passportNumber: draft.passportNumber.trim().toUpperCase(),
+    birthDate: draft.birthDate,
+    passportIssueDate: draft.passportIssueDate,
     passportExpiryDate: draft.passportExpiryDate,
     nationality: draft.nationality.trim(),
     preferredVisaType: draft.preferredVisaType.trim(),
+    visaDocumentNumber: draft.visaDocumentNumber.trim(),
+    saudiSponsorId: draft.saudiSponsorId.trim(),
+    applicantNameAr: draft.applicantNameAr.trim(),
+    applicantNameEn: draft.applicantNameEn.trim(),
+    documentPassportNumber: draft.documentPassportNumber.trim().toUpperCase(),
+    portOfEntry: draft.portOfEntry.trim(),
     ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
     ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
     ...(typeof nextAvatarSizeBytes === 'number' ? { avatarSizeBytes: nextAvatarSizeBytes } : {}),
@@ -5146,7 +5227,11 @@ export async function saveFamilyMemberCloud(
     firstName: string;
     lastName: string;
     passportFullName?: string;
+    passportFullNameEn?: string;
+    passportFullNameAr?: string;
     passportNumber: string;
+    birthDate?: string;
+    passportIssueDate?: string;
     passportExpiryDate?: string;
     nationality?: string;
     passportPhotoUrl: string;
@@ -5224,7 +5309,17 @@ export async function saveFamilyMemberCloud(
     ...(memberInput.passportFullName?.trim()
       ? { passportFullName: memberInput.passportFullName.trim() }
       : {}),
+    ...(memberInput.passportFullNameEn?.trim()
+      ? { passportFullNameEn: memberInput.passportFullNameEn.trim() }
+      : {}),
+    ...(memberInput.passportFullNameAr?.trim()
+      ? { passportFullNameAr: memberInput.passportFullNameAr.trim() }
+      : {}),
     passportNumber: memberInput.passportNumber.trim().toUpperCase(),
+    ...(memberInput.birthDate ? { birthDate: memberInput.birthDate } : {}),
+    ...(memberInput.passportIssueDate
+      ? { passportIssueDate: memberInput.passportIssueDate }
+      : {}),
     ...(memberInput.passportExpiryDate
       ? { passportExpiryDate: memberInput.passportExpiryDate }
       : {}),
@@ -5629,3 +5724,52 @@ export async function compressImageToDataUrl(
     reader.readAsDataURL(file);
   });
 }
+
+export async function readFileAsAiDataUrl(
+  file: File,
+  maxImageDimension = 1200,
+  initialImageQuality = 0.78
+): Promise<{
+  dataUrl: string;
+  base64: string;
+  mimeType: string;
+  isPdf: boolean;
+  fileName: string;
+}> {
+  const fileName = file.name || 'document';
+  const isPdf =
+    file.type === 'application/pdf' || fileName.toLowerCase().endsWith('.pdf');
+
+  if (isPdf) {
+    if (file.size > 12 * 1024 * 1024) {
+      throw new Error('حجم ملف PDF يتجاوز 12 ميجابايت. يرجى ضغط الملف أولاً.');
+    }
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('تعذر قراءة ملف PDF المختار.'));
+      reader.onload = () => {
+        const raw = String(reader.result || '');
+        const base64 = raw.includes(',') ? raw.split(',')[1] : raw;
+        const dataUrl = raw.startsWith('data:')
+          ? raw
+          : `data:application/pdf;base64,${base64}`;
+        resolve({
+          dataUrl,
+          base64,
+          mimeType: 'application/pdf',
+          isPdf: true,
+          fileName: fileName.toLowerCase().endsWith('.pdf') ? fileName : `${fileName}.pdf`,
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  const compressed = await compressImageToDataUrl(file, maxImageDimension, initialImageQuality);
+  return {
+    ...compressed,
+    isPdf: false,
+    fileName: fileName || 'document.jpg',
+  };
+}
+
