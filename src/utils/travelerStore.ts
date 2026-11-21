@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   limit,
   onSnapshot,
@@ -2426,13 +2427,83 @@ export async function respondToLoginApprovalRequestCloud(
 }
 
 /**
+ * Server-backed one-shot approval check (used as a polling safety net alongside onSnapshot)
+ * reading both deviceApprovals/{requestId} and clients/{phone} straight from Firestore.
+ */
+export async function checkNewDeviceApprovalOnceCloud(
+  rawPhone: string,
+  requestId: string | null
+): Promise<{
+  approvalDoc?: PendingDeviceRequest | null;
+  clientProfile?: TravelerProfile | null;
+}> {
+  const phone = normalizePhone(rawPhone);
+  const result: {
+    approvalDoc?: PendingDeviceRequest | null;
+    clientProfile?: TravelerProfile | null;
+  } = {};
+
+  if (requestId && /^[a-zA-Z0-9_\-]{6,80}$/.test(requestId)) {
+    try {
+      const snap = await getDocFromServer(doc(db, 'deviceApprovals', requestId));
+      if (snap.exists()) {
+        result.approvalDoc = snap.data() as PendingDeviceRequest;
+      }
+    } catch {
+      try {
+        const cacheSnap = await getDoc(doc(db, 'deviceApprovals', requestId));
+        if (cacheSnap.exists()) {
+          result.approvalDoc = cacheSnap.data() as PendingDeviceRequest;
+        }
+      } catch {
+        // Ignore network/offline failure during poll
+      }
+    }
+  }
+
+  if (/^[0-9]{8,20}$/.test(phone)) {
+    try {
+      const snap = await getDocFromServer(doc(db, 'clients', phone));
+      if (snap.exists()) {
+        const cloudProfile = snap.data() as TravelerProfile;
+        const all = getAllTravelers();
+        const merged = mergeCloudClientWithLocal(cloudProfile, all[phone]);
+        all[phone] = merged;
+        saveAllTravelersLocalOnly(all);
+        result.clientProfile = merged;
+      }
+    } catch {
+      try {
+        const cacheSnap = await getDoc(doc(db, 'clients', phone));
+        if (cacheSnap.exists()) {
+          const cloudProfile = cacheSnap.data() as TravelerProfile;
+          const all = getAllTravelers();
+          const merged = mergeCloudClientWithLocal(cloudProfile, all[phone]);
+          all[phone] = merged;
+          saveAllTravelersLocalOnly(all);
+          result.clientProfile = merged;
+        }
+      } catch {
+        // Ignore network/offline failure during poll
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Automatically opens the account on a waiting new device the exact instant
  * the trusted device taps Approve (Permanent Trusted or 1h/24h Temporary).
  */
 export async function completeApprovedNewDeviceLoginCloud(
   rawPhone: string,
   approvalMode: 'trusted' | 'temporary',
-  temporaryDurationHours: 1 | 24 = 1
+  temporaryDurationHours: 1 | 24 = 1,
+  options?: {
+    existingSessionId?: string;
+    customExpiresAtMs?: number | null;
+  }
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) return null;
@@ -2454,14 +2525,16 @@ export async function completeApprovedNewDeviceLoginCloud(
   const nowIso = new Date(nowMs).toISOString();
 
   const expiresAtMs =
-    approvalMode === 'temporary' ? nowMs + temporaryDurationHours * 3600 * 1000 : null;
+    approvalMode === 'trusted'
+      ? null
+      : options?.customExpiresAtMs !== undefined && options.customExpiresAtMs !== null
+      ? options.customExpiresAtMs
+      : nowMs + temporaryDurationHours * 3600 * 1000;
   const expiresAtIso = expiresAtMs ? new Date(expiresAtMs).toISOString() : null;
 
-  const meta = startTravelerSession(phone, approvalMode, {
-    customExpiresAtMs: expiresAtMs,
-    persistInLocalStorage: true,
-    cloudRegistered: false,
-  });
+  const resolvedSessionId =
+    options?.existingSessionId ||
+    `sess_${deviceId.slice(0, 12)}_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
 
   let nextTrustedDevices = Array.isArray(target.trustedDevices) ? [...target.trustedDevices] : [];
   if (approvalMode === 'trusted') {
@@ -2478,8 +2551,10 @@ export async function completeApprovedNewDeviceLoginCloud(
     ].slice(0, 15);
   }
 
+  const nextBlockedDevices = (target.blockedDevices || []).filter((id) => id !== deviceId);
+
   const sessionRecord: ActiveSessionRecord = {
-    sessionId: meta.sessionId || `sess_${nowMs}`,
+    sessionId: resolvedSessionId,
     deviceId,
     deviceName: label,
     mode: approvalMode,
@@ -2492,15 +2567,40 @@ export async function completeApprovedNewDeviceLoginCloud(
 
   const updated: TravelerProfile = {
     ...target,
+    verified: true,
+    accountStatus: 'verified',
     isOnline: true,
     lastSeenAt: nowIso,
     trustedDevices: nextTrustedDevices,
+    blockedDevices: nextBlockedDevices,
     activeSessions: nextSessions,
     updatedAt: nowIso,
   };
+
+  // Persist local profile BEFORE startTravelerSession emits TRAVELERS_UPDATED_EVENT
+  // so App.tsx opens the authenticated workspace instantaneously in the same tick.
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
-  await syncTravelerToCloud(updated);
+
+  const meta = startTravelerSession(phone, approvalMode, {
+    sessionId: resolvedSessionId,
+    customExpiresAtMs: expiresAtMs,
+    persistInLocalStorage: true,
+    cloudRegistered: false,
+  });
+
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      isOnline: true,
+      lastSeenAt: nowIso,
+      trustedDevices: nextTrustedDevices,
+      blockedDevices: nextBlockedDevices,
+      activeSessions: nextSessions,
+      updatedAt: nowIso,
+    });
+  } catch {
+    await syncTravelerToCloud(updated);
+  }
   markCurrentSessionCloudRegistered(meta.sessionId);
   return updated;
 }
@@ -2511,7 +2611,8 @@ export async function completeApprovedNewDeviceLoginCloud(
  */
 export async function promoteSessionToTrustedCloud(
   rawPhone: string,
-  targetSessionId: string
+  targetSessionId: string,
+  fallbackSession?: ActiveSessionRecord
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone) || !targetSessionId) return null;
@@ -2528,16 +2629,33 @@ export async function promoteSessionToTrustedCloud(
   }
   if (!target) return null;
 
-  const sessions = Array.isArray(target.activeSessions) ? target.activeSessions : [];
-  const match = sessions.find((s) => s.sessionId === targetSessionId);
-  if (!match) return null;
-
   const nowIso = new Date().toISOString();
-  const nextSessions: ActiveSessionRecord[] = sessions.map((s) =>
-    s.sessionId === targetSessionId
-      ? { ...s, mode: 'trusted', expiresAt: null, lastActiveAt: nowIso }
-      : s
-  );
+  const sessions = Array.isArray(target.activeSessions) ? target.activeSessions : [];
+  let match = sessions.find((s) => s.sessionId === targetSessionId);
+  let nextSessions: ActiveSessionRecord[];
+
+  if (match) {
+    nextSessions = sessions.map((s) =>
+      s.sessionId === targetSessionId
+        ? { ...s, mode: 'trusted', expiresAt: null, lastActiveAt: nowIso }
+        : s
+    );
+  } else {
+    const { deviceId, label } = getDeviceFingerprint();
+    const synth: ActiveSessionRecord = fallbackSession
+      ? { ...fallbackSession, mode: 'trusted', expiresAt: null, lastActiveAt: nowIso }
+      : {
+          sessionId: targetSessionId,
+          deviceId,
+          deviceName: label,
+          mode: 'trusted',
+          loggedInAt: nowIso,
+          lastActiveAt: nowIso,
+          expiresAt: null,
+        };
+    match = synth;
+    nextSessions = buildNextActiveSessionsList(sessions, synth);
+  }
 
   const existingTrust = (target.trustedDevices || []).find((d) => d.deviceId === match.deviceId);
   const trustedEntry: TrustedDevice = {
@@ -2565,9 +2683,14 @@ export async function promoteSessionToTrustedCloud(
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
 
-  // If promoting the current device's session, upgrade local storage immediately
+  // If promoting the current device's session (matching sessionId or deviceId), upgrade local storage immediately
   const localMeta = readStoredSessionMeta();
-  if (localMeta && localMeta.phone === phone && localMeta.sessionId === targetSessionId) {
+  const currentFp = getDeviceFingerprint();
+  if (
+    localMeta &&
+    localMeta.phone === phone &&
+    (localMeta.sessionId === targetSessionId || match.deviceId === currentFp.deviceId)
+  ) {
     try {
       window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, phone);
@@ -2576,6 +2699,7 @@ export async function promoteSessionToTrustedCloud(
     }
     writeStoredSessionMeta({
       ...localMeta,
+      sessionId: targetSessionId,
       mode: 'trusted',
       expiresAt: null,
       persistInLocalStorage: true,

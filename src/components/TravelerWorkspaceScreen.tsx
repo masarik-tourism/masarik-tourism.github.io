@@ -64,6 +64,7 @@ import {
   buildClientOtpWhatsAppUrl,
   buildOrderCodeFromPhone,
   checkClientAccountAndDeviceCloud,
+  checkNewDeviceApprovalOnceCloud,
   commitTravelerProfileDraftCloud,
   completeApprovedNewDeviceLoginCloud,
   compressImageToDataUrl,
@@ -109,6 +110,12 @@ import {
   getRemainingTemporaryMinutes,
   isDeviceInTrustedList,
 } from '../utils/deviceTrust';
+import {
+  ApprovalResolution,
+  buildConnectedSessionsView,
+  evaluateApprovalDocResponse,
+  evaluateClientProfileApproval,
+} from '../utils/deviceApprovalHelpers';
 import {
   buildDescriptiveFilename,
   downloadCloudFile,
@@ -412,7 +419,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     onSetPendingPostAuthFlow,
   ]);
 
-  // Dual-Path Real-Time Listener while waiting on "Request Approval from Trusted Device"
+  // Dual-Path Real-Time Listener + Server Polling Fallback while waiting on "Request Approval from Trusted Device"
   useEffect(() => {
     if (
       activeTraveler ||
@@ -425,42 +432,49 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     if (!targetPhone) return;
 
     let handled = false;
-    const processApprovalStatus = (opts: {
-      phone: string;
-      status: string;
-      approvalMode?: 'trusted' | 'temporary';
-      temporaryDurationHours?: 1 | 24;
-    }) => {
-      if (handled) return;
-      if (
-        opts.status === 'approved_trusted' ||
-        opts.status === 'approved_temporary' ||
-        opts.status === 'approved'
-      ) {
+    let disposed = false;
+
+    const applyResolution = (phone: string, resolution: ApprovalResolution) => {
+      if (handled || disposed || resolution.outcome === 'pending') return;
+      if (resolution.outcome === 'approved') {
         handled = true;
         const resolvedMode: 'trusted' | 'temporary' =
-          opts.status === 'approved_temporary' || opts.approvalMode === 'temporary'
-            ? 'temporary'
-            : 'trusted';
-        const resolvedHours: 1 | 24 = opts.temporaryDurationHours === 24 ? 24 : 1;
+          resolution.approvalMode === 'temporary' ? 'temporary' : 'trusted';
+        const resolvedHours: 1 | 24 = resolution.temporaryDurationHours === 24 ? 24 : 1;
 
-        setApprovalRequestState('idle');
-        setApprovalRequestError('');
-        setPendingApprovalReqId(null);
-        void completeApprovedNewDeviceLoginCloud(opts.phone, resolvedMode, resolvedHours).then(
-          () => {
+        void completeApprovedNewDeviceLoginCloud(phone, resolvedMode, resolvedHours, {
+          existingSessionId: resolution.existingSessionId,
+          customExpiresAtMs: resolution.customExpiresAtMs,
+        })
+          .then(() => {
+            if (disposed) return;
+            setApprovalRequestState('idle');
+            setApprovalRequestError('');
+            setPendingApprovalReqId(null);
             onSetPendingOtpPhone(null);
             onSetPendingPostAuthFlow?.(null);
             setAuthStage('phone_entry');
             onChangeSubTab('account');
-          }
-        );
-      } else if (opts.status === 'blocked' || opts.status === 'rejected') {
+          })
+          .catch((err) => {
+            if (disposed) return;
+            handled = false;
+            const errMsg = err instanceof Error ? err.message : String(err);
+            setApprovalRequestState('error');
+            setApprovalRequestError(
+              errMsg ||
+                t(
+                  'تمت الموافقة ولكن تعذر فتح الجلسة. يرجى المحاولة مرة أخرى.',
+                  'Approval received but failed to open session. Please try again.'
+                )
+            );
+          });
+      } else if (resolution.outcome === 'blocked' || resolution.outcome === 'rejected') {
         handled = true;
         setApprovalRequestState('rejected');
         setPendingApprovalReqId(null);
         setApprovalRequestError(
-          opts.status === 'blocked'
+          resolution.outcome === 'blocked'
             ? t(
                 'تم رفض وحظر هذا الجهاز من قبل جهازك الموثوق. يمكنك فك الحظر من الجهاز الموثوق أو التحقق عبر الواتساب عند رفع الحظر.',
                 'This device was rejected and blocked by your trusted device.'
@@ -474,63 +488,72 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     };
 
     const unsubClient = subscribePendingClientCloud(targetPhone, (cloudProfile) => {
-      if (
-        Array.isArray(cloudProfile.blockedDevices) &&
-        cloudProfile.blockedDevices.includes(currentDevice.deviceId)
-      ) {
-        processApprovalStatus({ phone: cloudProfile.phone, status: 'blocked' });
-        return;
-      }
-
-      const pdList = Array.isArray(cloudProfile.pendingDevices)
-        ? cloudProfile.pendingDevices
-        : [];
-      const matchedPending =
-        (pendingApprovalReqId
-          ? pdList.find((r) => r.requestId === pendingApprovalReqId)
-          : undefined) || pdList.find((r) => r.deviceId === currentDevice.deviceId);
-      if (matchedPending) {
-        processApprovalStatus({
-          phone: cloudProfile.phone,
-          status: matchedPending.status,
-          approvalMode: matchedPending.approvalMode,
-          temporaryDurationHours: matchedPending.temporaryDurationHours,
-        });
-        return;
-      }
-
-      const legacyList = Array.isArray(cloudProfile.pendingLoginRequests)
-        ? cloudProfile.pendingLoginRequests
-        : [];
-      const matchedLegacy =
-        (pendingApprovalReqId
-          ? legacyList.find((r) => r.requestId === pendingApprovalReqId)
-          : undefined) || legacyList.find((r) => r.deviceId === currentDevice.deviceId);
-      if (matchedLegacy) {
-        processApprovalStatus({
-          phone: cloudProfile.phone,
-          status: matchedLegacy.status,
-          approvalMode: matchedLegacy.approvalMode,
-          temporaryDurationHours: matchedLegacy.temporaryDurationHours,
-        });
-      }
+      const resolution = evaluateClientProfileApproval(
+        cloudProfile,
+        currentDevice.deviceId,
+        pendingApprovalReqId
+      );
+      applyResolution(cloudProfile.phone || targetPhone, resolution);
     });
 
     const unsubApprovalDoc = subscribeDeviceApprovalRequestCloud(
       pendingApprovalReqId,
       (reqDoc) => {
-        processApprovalStatus({
-          phone: reqDoc.phoneId || targetPhone,
-          status: reqDoc.status,
-          approvalMode: reqDoc.approvalMode,
-          temporaryDurationHours: reqDoc.temporaryDurationHours,
-        });
+        const resolution = evaluateApprovalDocResponse(reqDoc);
+        applyResolution(reqDoc.phoneId || targetPhone, resolution);
       }
     );
 
+    const unsubApprovalsByPhone = subscribeDeviceApprovalsByPhoneCloud(targetPhone, (docs) => {
+      const matching =
+        (pendingApprovalReqId
+          ? docs.find((d) => d.requestId === pendingApprovalReqId)
+          : undefined) ||
+        docs.find(
+          (d) =>
+            d.deviceId === currentDevice.deviceId &&
+            evaluateApprovalDocResponse(d).outcome !== 'pending'
+        );
+      if (matching) {
+        const resolution = evaluateApprovalDocResponse(matching);
+        applyResolution(matching.phoneId || targetPhone, resolution);
+      }
+    });
+
+    // Polling safety net (every 2 seconds) in case WebSocket/onSnapshot delivery is delayed in WebView/mobile
+    const pollServer = async () => {
+      if (handled || disposed) return;
+      const res = await checkNewDeviceApprovalOnceCloud(targetPhone, pendingApprovalReqId);
+      if (handled || disposed) return;
+      if (res.approvalDoc) {
+        const docRes = evaluateApprovalDocResponse(res.approvalDoc);
+        if (docRes.outcome !== 'pending') {
+          applyResolution(res.approvalDoc.phoneId || targetPhone, docRes);
+          return;
+        }
+      }
+      if (res.clientProfile) {
+        const clientRes = evaluateClientProfileApproval(
+          res.clientProfile,
+          currentDevice.deviceId,
+          pendingApprovalReqId
+        );
+        if (clientRes.outcome !== 'pending') {
+          applyResolution(res.clientProfile.phone || targetPhone, clientRes);
+        }
+      }
+    };
+
+    const pollIntervalId = window.setInterval(() => {
+      void pollServer();
+    }, 2000);
+
     return () => {
+      disposed = true;
+      window.clearInterval(pollIntervalId);
       unsubClient();
       unsubApprovalDoc();
+      unsubApprovalsByPhone();
     };
   }, [
     activeTraveler,
@@ -1367,12 +1390,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setSessionActionBusyId(session.sessionId);
     setSecurityFeedback(null);
     try {
-      await promoteSessionToTrustedCloud(activeTraveler.phone, session.sessionId);
+      await promoteSessionToTrustedCloud(activeTraveler.phone, session.sessionId, session);
       setSecurityFeedback({
         type: 'success',
         text: t(
-          `تم تثبيت (${session.deviceName}) كجهاز موثوق دائم بنجاح.`,
-          `(${session.deviceName}) promoted to a permanent trusted device.`
+          `تم توثيق (${session.deviceName}) كجهاز موثوق دائم بنجاح.`,
+          `(${session.deviceName}) trusted permanently.`
         ),
       });
     } finally {
@@ -4899,7 +4922,8 @@ Please advise on the next steps for my application.`
                 </div>
               </div>
 
-              {sessionMeta?.mode === 'temporary' && (
+              {(sessionMeta?.mode === 'temporary' ||
+                !isDeviceInTrustedList(activeTraveler.trustedDevices, currentDevice.deviceId)) && (
                 <button
                   type="button"
                   disabled={isFinalizingTrust}
@@ -4907,7 +4931,7 @@ Please advise on the next steps for my application.`
                   className="min-h-[38px] px-3.5 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center gap-1.5 transition cursor-pointer shrink-0 disabled:opacity-60"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  <span>{t('توثيق هذا الجهاز الآن', 'Trust This Device Now')}</span>
+                  <span>{t('توثيق هذا الجهاز كموثوق دائم 🛡️', 'Trust This Device Permanently 🛡️')}</span>
                 </button>
               )}
             </div>
@@ -5039,21 +5063,13 @@ Please advise on the next steps for my application.`
 
             {/* SECTION 2: CONNECTED SESSIONS ("الجلسات والأجهزة المتصلة حالياً") */}
             {(() => {
-              const nowMs = Date.now();
-              const connectedSessions: ActiveSessionRecord[] = [
-                ...(activeTraveler.activeSessions || []),
-              ]
-                .filter((s) => {
-                  if (!s.expiresAt) return true;
-                  const expMs = Date.parse(s.expiresAt);
-                  return !Number.isFinite(expMs) || expMs > nowMs;
-                })
-                .sort((a, b) => {
-                  const aCurr = a.sessionId === sessionMeta?.sessionId ? 1 : 0;
-                  const bCurr = b.sessionId === sessionMeta?.sessionId ? 1 : 0;
-                  if (aCurr !== bCurr) return bCurr - aCurr;
-                  return (Date.parse(b.lastActiveAt) || 0) - (Date.parse(a.lastActiveAt) || 0);
-                });
+              const sessionItems = buildConnectedSessionsView(
+                activeTraveler.activeSessions,
+                activeTraveler.trustedDevices,
+                sessionMeta,
+                currentDevice,
+                Date.now()
+              );
 
               return (
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
@@ -5062,19 +5078,16 @@ Please advise on the next steps for my application.`
                       <Smartphone className="w-4 h-4 text-[#0284C7]" />
                       <span>
                         {t(
-                          `الجلسات والأجهزة المتصلة حالياً (${connectedSessions.length})`,
-                          `Currently Connected Devices & Sessions (${connectedSessions.length})`
+                          `الجلسات والأجهزة المتصلة حالياً (${sessionItems.length})`,
+                          `Currently Connected Devices & Sessions (${sessionItems.length})`
                         )}
                       </span>
                     </h3>
                   </div>
 
-                  {connectedSessions.length > 0 ? (
+                  {sessionItems.length > 0 ? (
                     <div className="space-y-2.5">
-                      {connectedSessions.map((sess) => {
-                        const isThisSession =
-                          sess.sessionId === sessionMeta?.sessionId ||
-                          (sess.deviceId === currentDevice.deviceId && !sessionMeta?.sessionId);
+                      {sessionItems.map(({ session: sess, isThisSession, isTrustedMode }) => {
                         const isBusy = sessionActionBusyId === sess.sessionId;
                         const isEditingExpiry = editingExpirySessionId === sess.sessionId;
                         const loginTimeStr = new Date(sess.loggedInAt).toLocaleString(
@@ -5082,7 +5095,6 @@ Please advise on the next steps for my application.`
                           { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
                         );
                         const remainingStr = formatRemainingSessionDuration(sess.expiresAt, lang);
-                        const isTrustedMode = sess.mode === 'trusted' && !sess.expiresAt;
 
                         return (
                           <div
@@ -5132,7 +5144,7 @@ Please advise on the next steps for my application.`
                                   type="button"
                                   disabled={isBusy}
                                   onClick={() => void handlePromoteSessionToTrusted(sess)}
-                                  className="min-h-[34px] px-3 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer"
+                                  className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
                                 >
                                   {isBusy ? (
                                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -5140,7 +5152,10 @@ Please advise on the next steps for my application.`
                                     <ShieldCheck className="w-3.5 h-3.5" />
                                   )}
                                   <span>
-                                    {t('تثبيت كجهاز موثوق دائم 🛡️', 'Make Permanent Trusted 🛡️')}
+                                    {t(
+                                      'توثيق هذا الجهاز كموثوق دائم 🛡️',
+                                      'Trust This Device Permanently 🛡️'
+                                    )}
                                   </span>
                                 </button>
                               )}
