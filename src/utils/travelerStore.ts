@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocFromServer,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
   query,
@@ -58,6 +59,7 @@ import {
   uploadTravelerDocumentToStorage,
 } from './firebaseStorageHelper';
 import { sendChatMessageCloud } from './chatStore';
+import { computeRevokeTrustedDeviceState } from './deviceApprovalHelpers';
 import { dispatchRemotePushNotification } from './fcmPushService';
 import { getSiteConfig } from './siteConfigStore';
 import { getCmsState } from './cmsStore';
@@ -2435,11 +2437,13 @@ export async function checkNewDeviceApprovalOnceCloud(
   requestId: string | null
 ): Promise<{
   approvalDoc?: PendingDeviceRequest | null;
+  approvalDocs?: PendingDeviceRequest[];
   clientProfile?: TravelerProfile | null;
 }> {
   const phone = normalizePhone(rawPhone);
   const result: {
     approvalDoc?: PendingDeviceRequest | null;
+    approvalDocs?: PendingDeviceRequest[];
     clientProfile?: TravelerProfile | null;
   } = {};
 
@@ -2462,6 +2466,17 @@ export async function checkNewDeviceApprovalOnceCloud(
   }
 
   if (/^[0-9]{8,20}$/.test(phone)) {
+    try {
+      const q = query(collection(db, 'deviceApprovals'), where('phoneId', '==', phone));
+      const docsSnap = await getDocsFromServer(q).catch(() => getDocs(q));
+      const docs: PendingDeviceRequest[] = [];
+      docsSnap.forEach((d) => docs.push(d.data() as PendingDeviceRequest));
+      docs.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+      result.approvalDocs = docs;
+    } catch {
+      // Ignore query failure during poll
+    }
+
     try {
       const snap = await getDocFromServer(doc(db, 'clients', phone));
       if (snap.exists()) {
@@ -3371,54 +3386,51 @@ export async function revokeTrustedDeviceCloud(
   targetDeviceId: string
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
-  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+  if (!/^[0-9]{8,20}$/.test(phone) || !targetDeviceId) return null;
 
   const all = getAllTravelers();
-  const existing = all[phone];
+  let existing = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, existing);
+    }
+  } catch {
+    // Offline cache fallback
+  }
   if (!existing) return null;
 
-  const nextDevices = (existing.trustedDevices || []).filter(
-    (d) => d.deviceId !== targetDeviceId
-  );
-
-  // If removing another trusted device, also kick any remote active sessions belonging to that device
-  const currentDeviceId = getDeviceFingerprint().deviceId;
   const nowIso = new Date().toISOString();
-  let nextSessions = Array.isArray(existing.activeSessions) ? [...existing.activeSessions] : [];
-  if (targetDeviceId !== currentDeviceId) {
-    nextSessions = nextSessions.filter((s) => s.deviceId !== targetDeviceId);
-  } else {
-    nextSessions = nextSessions.map((s) =>
-      s.deviceId === currentDeviceId
-        ? {
-            ...s,
-            mode: 'temporary',
-            expiresAt: new Date(Date.now() + TEMPORARY_SESSION_DURATION_MS).toISOString(),
-            lastActiveAt: nowIso,
-          }
-        : s
-    );
-  }
+  const nextState = computeRevokeTrustedDeviceState(existing, targetDeviceId);
 
   const updated: TravelerProfile = {
     ...existing,
-    trustedDevices: nextDevices,
-    activeSessions: nextSessions,
+    trustedDevices: nextState.trustedDevices,
+    activeSessions: nextState.activeSessions,
+    blockedDevices: nextState.blockedDevices,
+    updatedAt: nowIso,
   };
 
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
 
-  const meta = getTravelerSessionMeta();
-  if (targetDeviceId === currentDeviceId && meta?.phone === phone && meta.mode === 'trusted') {
-    startTravelerSession(phone, 'temporary', {
-      sessionId: meta.sessionId,
-      persistInLocalStorage: false,
-      cloudRegistered: meta.cloudRegistered,
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      trustedDevices: nextState.trustedDevices,
+      activeSessions: nextState.activeSessions,
+      blockedDevices: nextState.blockedDevices,
+      updatedAt: nowIso,
     });
+  } catch {
+    await syncTravelerToCloud(updated);
   }
 
-  await syncTravelerToCloud(updated);
+  const currentDeviceId = getDeviceFingerprint().deviceId;
+  const meta = getTravelerSessionMeta();
+  if (targetDeviceId === currentDeviceId && meta?.phone === phone) {
+    logoutTravelerSession('manual');
+  }
+
   return updated;
 }
 

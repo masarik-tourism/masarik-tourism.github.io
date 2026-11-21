@@ -37,10 +37,12 @@ import {
   getTravelerDisplayNames,
   getTravelerSessionMeta,
   logoutTravelerSession,
+  respondToDeviceApprovalCloud,
   saveClientFcmTokenCloud,
   setPendingVerificationPhone,
   subscribeActiveTravelerCloud,
   subscribeAllClientsCloud,
+  subscribeDeviceApprovalsByPhoneCloud,
   updateUserPresenceCloud,
 } from './utils/travelerStore';
 import {
@@ -60,8 +62,19 @@ import {
   subscribeForegroundFcmMessages,
   waitForNativeAndroidFcmToken,
 } from './utils/fcmPushService';
-import { consumeSessionExpiredNotice } from './utils/deviceTrust';
-import { ChatThreadSummary, TravelerProfile, TravelerSessionMeta } from './types/travel';
+import {
+  consumeSessionExpiredNotice,
+  getDeviceFingerprint,
+  isDeviceInTrustedList,
+} from './utils/deviceTrust';
+import { collectPendingApprovalRequests } from './utils/deviceApprovalHelpers';
+import { GlobalDeviceApprovalModal } from './components/GlobalDeviceApprovalModal';
+import {
+  ChatThreadSummary,
+  PendingDeviceRequest,
+  TravelerProfile,
+  TravelerSessionMeta,
+} from './types/travel';
 import { FacebookIcon } from './components/FacebookIcon';
 import { WhatsAppIcon } from './components/WhatsAppIcon';
 import { useLanguage } from './contexts/LanguageContext';
@@ -160,6 +173,12 @@ export const App: React.FC = () => {
     phone: string;
     nonce: number;
   } | null>(null);
+  const [globalDeviceApprovals, setGlobalDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
+  const [dismissedGlobalReqIds, setDismissedGlobalReqIds] = useState<string[]>([]);
+  const [respondingGlobalReqId, setRespondingGlobalReqId] = useState<string | null>(null);
+  const [globalApprovalError, setGlobalApprovalError] = useState<string | null>(null);
+  const lastGlobalChimeReqIdRef = useRef<string | null>(null);
+  const currentDeviceId = getDeviceFingerprint().deviceId;
 
   // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
   useEffect(() => {
@@ -291,10 +310,96 @@ export const App: React.FC = () => {
 
   // Real-time cloud subscription & session backfill for currently signed-in traveler
   useEffect(() => {
-    if (!activeTravelerPhone) return;
+    if (!activeTravelerPhone) {
+      setGlobalDeviceApprovals([]);
+      setGlobalApprovalError(null);
+      return;
+    }
     void ensureCurrentSessionRegisteredCloud(activeTravelerPhone);
-    return subscribeActiveTravelerCloud(activeTravelerPhone);
+    const unsubClient = subscribeActiveTravelerCloud(activeTravelerPhone);
+    const unsubApprovals = subscribeDeviceApprovalsByPhoneCloud(
+      activeTravelerPhone,
+      setGlobalDeviceApprovals
+    );
+    return () => {
+      unsubClient();
+      unsubApprovals();
+    };
   }, [activeTravelerPhone]);
+
+  const canApproveGlobally = Boolean(
+    activeTraveler &&
+      (sessionMeta?.mode === 'trusted' ||
+        isDeviceInTrustedList(activeTraveler.trustedDevices, currentDeviceId))
+  );
+
+  const globalIncomingApprovalRequest: PendingDeviceRequest | null = (() => {
+    if (!activeTraveler || !canApproveGlobally) return null;
+    const pending = collectPendingApprovalRequests({
+      phone: activeTraveler.phone,
+      pendingDevices: activeTraveler.pendingDevices,
+      pendingLoginRequests: activeTraveler.pendingLoginRequests,
+      cloudDeviceApprovals: globalDeviceApprovals,
+      currentDeviceId,
+      dismissedRequestIds: dismissedGlobalReqIds,
+    });
+    return pending[0] || null;
+  })();
+
+  // Play real-time sound alert the instant a new device approval request arrives on any tab
+  useEffect(() => {
+    if (!globalIncomingApprovalRequest) return;
+    if (lastGlobalChimeReqIdRef.current !== globalIncomingApprovalRequest.requestId) {
+      lastGlobalChimeReqIdRef.current = globalIncomingApprovalRequest.requestId;
+      playChatNotificationChime(true);
+    }
+  }, [globalIncomingApprovalRequest]);
+
+  const handleGlobalApprovalRespond = useCallback(
+    async (
+      req: PendingDeviceRequest,
+      decision: 'approved_trusted' | 'approved_temporary' | 'rejected',
+      temporaryDurationHours: 1 | 24 = 1
+    ) => {
+      if (!activeTraveler || respondingGlobalReqId) return;
+      setRespondingGlobalReqId(req.requestId);
+      setGlobalApprovalError(null);
+      try {
+        const ok = await respondToDeviceApprovalCloud(activeTraveler.phone, req.requestId, {
+          decision,
+          temporaryDurationHours,
+          fallbackDeviceId: req.deviceId,
+          fallbackDeviceName: req.deviceName,
+        });
+        if (ok) {
+          setDismissedGlobalReqIds((prev) =>
+            prev.includes(req.requestId) ? prev : [...prev, req.requestId]
+          );
+        } else {
+          setGlobalApprovalError(
+            t(
+              'تعذر حفظ الاستجابة. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.',
+              'Could not save your response. Check connection and try again.'
+            )
+          );
+        }
+      } catch (err) {
+        setGlobalApprovalError(
+          err instanceof Error
+            ? err.message
+            : t('حدث خطأ أثناء معالجة الطلب.', 'Failed to process approval request.')
+        );
+      } finally {
+        setRespondingGlobalReqId(null);
+      }
+    },
+    [activeTraveler, respondingGlobalReqId, t]
+  );
+
+  const handleGlobalApprovalDismiss = useCallback((requestId: string) => {
+    setGlobalApprovalError(null);
+    setDismissedGlobalReqIds((prev) => (prev.includes(requestId) ? prev : [...prev, requestId]));
+  }, []);
 
   // 30-second Live Online/Offline Heartbeat + page exit & visibility presence updater
   useEffect(() => {
@@ -1163,6 +1268,23 @@ export const App: React.FC = () => {
       <PrivacyPolicyModal
         isOpen={privacyModalOpen}
         onClose={() => setPrivacyModalOpen(false)}
+      />
+
+      {/* Global Centered Floating Device Approval Modal (works across all site/app tabs) */}
+      <GlobalDeviceApprovalModal
+        request={globalIncomingApprovalRequest}
+        accountLabel={
+          activeTraveler ? getTravelerDisplayNames(activeTraveler).fullDisplayName : undefined
+        }
+        isBusy={
+          Boolean(globalIncomingApprovalRequest) &&
+          respondingGlobalReqId === globalIncomingApprovalRequest?.requestId
+        }
+        errorText={globalApprovalError}
+        onRespond={(req, decision, hours) =>
+          void handleGlobalApprovalRespond(req, decision, hours)
+        }
+        onDismiss={handleGlobalApprovalDismiss}
       />
 
       {/* Offline Mode Alert */}

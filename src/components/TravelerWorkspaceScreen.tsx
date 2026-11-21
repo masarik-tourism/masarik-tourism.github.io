@@ -103,7 +103,6 @@ import {
   verifyClientPinForNewDeviceCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
-import { playChatNotificationChime } from '../utils/chatStore';
 import {
   formatRemainingSessionDuration,
   getDeviceFingerprint,
@@ -113,8 +112,9 @@ import {
 import {
   ApprovalResolution,
   buildConnectedSessionsView,
+  collectPendingApprovalRequests,
   evaluateApprovalDocResponse,
-  evaluateClientProfileApproval,
+  evaluateNewDeviceVerifyUpdate,
 } from '../utils/deviceApprovalHelpers';
 import {
   buildDescriptiveFilename,
@@ -234,7 +234,13 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [cloudDeviceApprovals, setCloudDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
   const [editingExpirySessionId, setEditingExpirySessionId] = useState<string | null>(null);
   const [sessionActionBusyId, setSessionActionBusyId] = useState<string | null>(null);
-  const lastChimeLoginReqIdRef = useRef<string | null>(null);
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Logged-out Step 2 OTP unlock (with 24h validity countdown & Admin real-time instant activation)
   const [otpInput, setOtpInput] = useState('');
@@ -419,13 +425,9 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     onSetPendingPostAuthFlow,
   ]);
 
-  // Dual-Path Real-Time Listener + Server Polling Fallback while waiting on "Request Approval from Trusted Device"
+  // Dual-Path Real-Time Listener + Server Polling Fallback on New Device Verification Screen
   useEffect(() => {
-    if (
-      activeTraveler ||
-      authStage !== 'new_device_verify' ||
-      approvalRequestState !== 'waiting'
-    ) {
+    if (activeTraveler || authStage !== 'new_device_verify') {
       return;
     }
     const targetPhone = trustedPhone || normalizePhone(loginPhone);
@@ -446,8 +448,19 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
           existingSessionId: resolution.existingSessionId,
           customExpiresAtMs: resolution.customExpiresAtMs,
         })
-          .then(() => {
-            if (disposed) return;
+          .then((unlockedProfile) => {
+            if (!isMountedRef.current) return;
+            if (!unlockedProfile) {
+              handled = false;
+              setApprovalRequestState('error');
+              setApprovalRequestError(
+                t(
+                  'تمت الموافقة ولكن تعذر فتح الجلسة محلياً. يرجى المحاولة مرة أخرى.',
+                  'Approval received but failed to open local session. Please try again.'
+                )
+              );
+              return;
+            }
             setApprovalRequestState('idle');
             setApprovalRequestError('');
             setPendingApprovalReqId(null);
@@ -457,7 +470,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
             onChangeSubTab('account');
           })
           .catch((err) => {
-            if (disposed) return;
+            if (!isMountedRef.current) return;
             handled = false;
             const errMsg = err instanceof Error ? err.message : String(err);
             setApprovalRequestState('error');
@@ -469,7 +482,10 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
                 )
             );
           });
-      } else if (resolution.outcome === 'blocked' || resolution.outcome === 'rejected') {
+      } else if (
+        approvalRequestState === 'waiting' &&
+        (resolution.outcome === 'blocked' || resolution.outcome === 'rejected')
+      ) {
         handled = true;
         setApprovalRequestState('rejected');
         setPendingApprovalReqId(null);
@@ -488,68 +504,64 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     };
 
     const unsubClient = subscribePendingClientCloud(targetPhone, (cloudProfile) => {
-      const resolution = evaluateClientProfileApproval(
-        cloudProfile,
-        currentDevice.deviceId,
-        pendingApprovalReqId
-      );
+      const resolution = evaluateNewDeviceVerifyUpdate({
+        approvalRequestState,
+        profile: cloudProfile,
+        currentDeviceId: currentDevice.deviceId,
+        pendingApprovalReqId,
+      });
       applyResolution(cloudProfile.phone || targetPhone, resolution);
     });
 
-    const unsubApprovalDoc = subscribeDeviceApprovalRequestCloud(
-      pendingApprovalReqId,
-      (reqDoc) => {
-        const resolution = evaluateApprovalDocResponse(reqDoc);
-        applyResolution(reqDoc.phoneId || targetPhone, resolution);
-      }
-    );
+    const unsubApprovalDoc =
+      approvalRequestState === 'waiting'
+        ? subscribeDeviceApprovalRequestCloud(pendingApprovalReqId, (reqDoc) => {
+            const resolution = evaluateApprovalDocResponse(reqDoc);
+            applyResolution(reqDoc.phoneId || targetPhone, resolution);
+          })
+        : () => {};
 
     const unsubApprovalsByPhone = subscribeDeviceApprovalsByPhoneCloud(targetPhone, (docs) => {
-      const matching =
-        (pendingApprovalReqId
-          ? docs.find((d) => d.requestId === pendingApprovalReqId)
-          : undefined) ||
-        docs.find(
-          (d) =>
-            d.deviceId === currentDevice.deviceId &&
-            evaluateApprovalDocResponse(d).outcome !== 'pending'
-        );
-      if (matching) {
-        const resolution = evaluateApprovalDocResponse(matching);
-        applyResolution(matching.phoneId || targetPhone, resolution);
-      }
+      const resolution = evaluateNewDeviceVerifyUpdate({
+        approvalRequestState,
+        approvalDocs: docs,
+        currentDeviceId: currentDevice.deviceId,
+        pendingApprovalReqId,
+      });
+      applyResolution(targetPhone, resolution);
     });
 
-    // Polling safety net (every 2 seconds) in case WebSocket/onSnapshot delivery is delayed in WebView/mobile
+    // Polling safety net (immediate check + every 2 seconds) in case WebSocket/onSnapshot delivery is delayed
     const pollServer = async () => {
       if (handled || disposed) return;
       const res = await checkNewDeviceApprovalOnceCloud(targetPhone, pendingApprovalReqId);
       if (handled || disposed) return;
-      if (res.approvalDoc) {
-        const docRes = evaluateApprovalDocResponse(res.approvalDoc);
-        if (docRes.outcome !== 'pending') {
-          applyResolution(res.approvalDoc.phoneId || targetPhone, docRes);
-          return;
-        }
-      }
-      if (res.clientProfile) {
-        const clientRes = evaluateClientProfileApproval(
-          res.clientProfile,
-          currentDevice.deviceId,
-          pendingApprovalReqId
-        );
-        if (clientRes.outcome !== 'pending') {
-          applyResolution(res.clientProfile.phone || targetPhone, clientRes);
-        }
+      const mergedDocs: PendingDeviceRequest[] = [
+        ...(res.approvalDoc ? [res.approvalDoc] : []),
+        ...(Array.isArray(res.approvalDocs) ? res.approvalDocs : []),
+      ];
+      const resolution = evaluateNewDeviceVerifyUpdate({
+        approvalRequestState,
+        profile: res.clientProfile,
+        approvalDocs: mergedDocs,
+        currentDeviceId: currentDevice.deviceId,
+        pendingApprovalReqId,
+      });
+      if (resolution.outcome !== 'pending') {
+        applyResolution(res.clientProfile?.phone || targetPhone, resolution);
       }
     };
 
+    const initialPollTimerId = window.setTimeout(() => {
+      void pollServer();
+    }, 450);
     const pollIntervalId = window.setInterval(() => {
       void pollServer();
     }, 2000);
 
     return () => {
       disposed = true;
+      window.clearTimeout(initialPollTimerId);
       window.clearInterval(pollIntervalId);
       unsubClient();
       unsubApprovalDoc();
@@ -569,7 +581,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     t,
   ]);
 
-  // Real-time subscription to deviceApprovals collection for logged-in account
+  // Real-time subscription to deviceApprovals collection for logged-in account (Account Security Tab list)
   useEffect(() => {
     if (!activeTraveler?.phone) {
       setCloudDeviceApprovals([]);
@@ -577,43 +589,6 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
     return subscribeDeviceApprovalsByPhoneCloud(activeTraveler.phone, setCloudDeviceApprovals);
   }, [activeTraveler?.phone]);
-
-  // Real-time audio alert when a new-device approval request arrives on a Trusted logged-in session
-  useEffect(() => {
-    if (!activeTraveler || sessionMeta?.mode !== 'trusted') return;
-    const nowMs = Date.now();
-    const pendingPool: PendingDeviceRequest[] = [
-      ...cloudDeviceApprovals,
-      ...(activeTraveler.pendingDevices || []),
-      ...(activeTraveler.pendingLoginRequests || []).map((r) => ({
-        requestId: r.requestId,
-        deviceId: r.deviceId,
-        deviceName: r.deviceLabel,
-        status: (r.status === 'approved'
-          ? 'approved_trusted'
-          : r.status) as PendingDeviceRequest['status'],
-        createdAt: r.createdAt,
-        expiresAt: r.expiresAt,
-      })),
-    ];
-    const pendingReq = pendingPool.find(
-      (r) =>
-        r.status === 'pending' &&
-        r.deviceId !== currentDevice.deviceId &&
-        Date.parse(r.expiresAt) > nowMs &&
-        !dismissedLoginReqIds.includes(r.requestId)
-    );
-    if (pendingReq && lastChimeLoginReqIdRef.current !== pendingReq.requestId) {
-      lastChimeLoginReqIdRef.current = pendingReq.requestId;
-      playChatNotificationChime();
-    }
-  }, [
-    activeTraveler,
-    cloudDeviceApprovals,
-    sessionMeta?.mode,
-    currentDevice.deviceId,
-    dismissedLoginReqIds,
-  ]);
 
   // Live 1-second countdown ticker for 24-hour OTP validity window
   useEffect(() => {
@@ -1747,12 +1722,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         text:
           deviceId === currentDevice.deviceId
             ? t(
-                'تم إلغاء الثقة من هذا الجهاز وتحويل جلستك الحالية إلى جلسة مؤقتة (لمدة ساعة). عند تسجيل الدخول لاحقاً سيُطلب كود واتساب OTP.',
-                'Trust removed from this device and current session switched to a 1-hour temporary session. Future sign-ins will require WhatsApp OTP.'
+                'تم حذف هذا الجهاز من الأجهزة الموثوقة (دون حظر) وتسجيل الخروج. يمكنك الدخول مجدداً كجهاز جديد عبر طلب الموافقة أو الـ PIN أو OTP.',
+                'Device deleted from trusted list (without blocking) and signed out. You can sign in again as a new device via Approval, PIN, or OTP.'
               )
             : t(
-                'تم حذف الجهاز من قائمة الأجهزة الموثوقة بنجاح.',
-                'Device successfully removed from your trusted devices list.'
+                'تم حذف الجهاز الموثوق وإلغاء جلسته بنجاح دون حظر — يمكنه إعادة تسجيل الدخول كجهاز جديد في أي وقت.',
+                'Trusted device and its sessions removed without blocking — it can sign in again as a new device anytime.'
               ),
       });
     } finally {
@@ -4021,128 +3996,18 @@ Please advise on the next steps for my application.`
   );
 
   // Deduplicate pending approval requests across deviceApprovals collection + pendingDevices + legacy pendingLoginRequests
-  const pendingApprovalRequests: PendingDeviceRequest[] = (() => {
-    const nowMs = Date.now();
-    const byId = new Map<string, PendingDeviceRequest>();
-    const addCandidate = (item: PendingDeviceRequest) => {
-      if (!item || !item.requestId) return;
-      const existing = byId.get(item.requestId);
-      if (!existing || (existing.status === 'pending' && item.status !== 'pending')) {
-        byId.set(item.requestId, item);
-      }
-    };
-    (activeTraveler.pendingDevices || []).forEach(addCandidate);
-    (activeTraveler.pendingLoginRequests || []).forEach((r) =>
-      addCandidate({
-        requestId: r.requestId,
-        phoneId: activeTraveler.phone,
-        deviceId: r.deviceId,
-        deviceName: r.deviceLabel,
-        status: (r.status === 'approved'
-          ? 'approved_trusted'
-          : r.status) as PendingDeviceRequest['status'],
-        approvalMode: r.approvalMode,
-        temporaryDurationHours: r.temporaryDurationHours,
-        createdAt: r.createdAt,
-        expiresAt: r.expiresAt,
-        respondedAt: r.respondedAt,
-      })
-    );
-    cloudDeviceApprovals.forEach(addCandidate);
-
-    return Array.from(byId.values())
-      .filter(
-        (r) =>
-          r.status === 'pending' &&
-          r.deviceId !== currentDevice.deviceId &&
-          Date.parse(r.expiresAt) > nowMs &&
-          !dismissedLoginReqIds.includes(r.requestId)
-      )
-      .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
-  })();
-
-  const incomingApprovalRequest: PendingDeviceRequest | null =
-    sessionMeta?.mode === 'trusted' ? pendingApprovalRequests[0] || null : null;
+  const pendingApprovalRequests: PendingDeviceRequest[] = collectPendingApprovalRequests({
+    phone: activeTraveler.phone,
+    pendingDevices: activeTraveler.pendingDevices,
+    pendingLoginRequests: activeTraveler.pendingLoginRequests,
+    cloudDeviceApprovals,
+    currentDeviceId: currentDevice.deviceId,
+    dismissedRequestIds: dismissedLoginReqIds,
+  });
 
   return (
     <div className="min-h-[80vh] bg-[#FAF9F6] pb-24 md:pb-16 pt-5 px-3 sm:px-4" dir={dir}>
       <div className="max-w-5xl mx-auto space-y-5">
-        {/* Instant Real-Time Security Approval Prompt on Trusted Devices when a New Device tries to log in */}
-        {incomingApprovalRequest && (
-          <div className="bg-gradient-to-l from-amber-50 via-white to-amber-50 border-2 border-[#C6A052] rounded-2xl p-4 sm:p-5 shadow-md space-y-3">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
-                <ShieldAlert className="w-5 h-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <span className="inline-block px-2.5 py-0.5 rounded-full bg-amber-200/80 text-[#0F2438] text-[10.5px] font-black mb-1">
-                  {t('تنبيه أمني: محاولة دخول من جهاز جديد 🔐', 'Security Alert: New Device Sign-In Attempt 🔐')}
-                </span>
-                <p className="text-xs sm:text-sm font-black text-[#0F2438] leading-snug">
-                  {t(
-                    `طلب دخول من (${incomingApprovalRequest.deviceName}) — اختر إجراء الأمان المناسب:`,
-                    `Sign-in request from (${incomingApprovalRequest.deviceName}) — choose a security action:`
-                  )}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <button
-                type="button"
-                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
-                onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_trusted')
-                }
-                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-              >
-                {respondingLoginReqId === incomingApprovalRequest.requestId ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4" />
-                )}
-                <span>{t('موافقة كجهاز موثوق دائم ✅', 'Approve as Permanent Trusted ✅')}</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
-                onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_temporary', 1)
-                }
-                className="min-h-[40px] px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-              >
-                <Clock className="w-4 h-4" />
-                <span>{t('موافقة مؤقتة (ساعة واحدة) ⏳', 'Temporary (1 Hour) ⏳')}</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
-                onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest, 'approved_temporary', 24)
-                }
-                className="min-h-[40px] px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
-              >
-                <Clock className="w-4 h-4" />
-                <span>{t('موافقة مؤقتة (24 ساعة) ⏳', 'Temporary (24 Hours) ⏳')}</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={respondingLoginReqId === incomingApprovalRequest.requestId}
-                onClick={() =>
-                  void handleRespondLoginApproval(incomingApprovalRequest, 'blocked')
-                }
-                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
-              >
-                <Ban className="w-4 h-4" />
-                <span>{t('رفض وحظر ❌', 'Reject & Block ❌')}</span>
-              </button>
-            </div>
-          </div>
-        )}
-
         <PushPermissionBanner
           role="client"
           phone={activeTraveler.phone}
@@ -5317,7 +5182,7 @@ Please advise on the next steps for my application.`
 
                           <div className="shrink-0">
                             {isConfirming ? (
-                              <div className="flex items-center gap-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <button
                                   type="button"
                                   disabled={revokingDeviceId === dev.deviceId}
@@ -5325,8 +5190,8 @@ Please advise on the next steps for my application.`
                                   className="min-h-[34px] px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-black cursor-pointer disabled:opacity-60"
                                 >
                                   {revokingDeviceId === dev.deviceId
-                                    ? t('جاري الحذف...', 'Removing...')
-                                    : t('تأكيد إلغاء الثقة', 'Confirm Remove')}
+                                    ? t('جاري الحذف...', 'Deleting...')
+                                    : t('تأكيد الحذف (دون حظر)', 'Confirm Delete (No Block)')}
                                 </button>
                                 <button
                                   type="button"
@@ -5343,7 +5208,7 @@ Please advise on the next steps for my application.`
                                 className="min-h-[36px] px-3 py-1.5 rounded-xl bg-white border border-red-200 hover:bg-red-50 text-red-700 text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
-                                <span>{t('إزالة / تسجيل خروج الجهاز', 'Remove & Log Out Device')}</span>
+                                <span>{t('حذف الجهاز الموثوق 🗑️', 'Delete Trusted Device 🗑️')}</span>
                               </button>
                             )}
                           </div>
