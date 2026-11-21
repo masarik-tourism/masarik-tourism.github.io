@@ -9,9 +9,6 @@ import {
   RotateCw,
   UserCheck,
   Globe,
-  Sparkles,
-  LayoutDashboard,
-  LogOut,
   Crown,
   Home,
   ClipboardList,
@@ -96,10 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     isAdminActive,
     isSuperAdmin,
     isDashboardMode,
-    isLiveEditorMode,
-    isEditUnlocked,
     setAdminMode,
-    logoutAdmin,
     hasPermission,
   } = useAdmin();
   const siteConfig = useSiteConfig();
@@ -489,40 +483,51 @@ export const Navbar: React.FC<NavbarProps> = ({
           </a>
         </nav>
 
-        {/* End Side: Admin Role Badge (when active) OR Traveler Account Button (with Avatar) + Hamburger Menu */}
+        {/* End Side: Universal Header Actions (Refresh & Lang) + Admin/Traveler Button + Hamburger Menu */}
         <div className="flex items-center gap-1 sm:gap-2 shrink-0" data-no-admin-edit="true">
-          {isAdminActive ? (
-            <>
-              <button
-                type="button"
-                onClick={handleHardRefresh}
-                disabled={isRefreshing}
-                data-testid="admin-header-refresh-btn"
-                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-slate-100 hover:bg-[#0F2438] text-[#0F2438] hover:text-[#E5C887] border border-[#C6A052]/60 shadow-xs flex items-center justify-center shrink-0 transition-all active:scale-95 cursor-pointer disabled:opacity-75"
-                title={t('تحديث الصفحة والبيانات', 'Refresh Page & Data')}
-                aria-label={t('تحديث الصفحة', 'Refresh Page')}
-              >
-                <RefreshCw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-              </button>
+          {/* Universal Refresh Button - visible to everyone in all cases */}
+          <button
+            type="button"
+            onClick={handleHardRefresh}
+            disabled={isRefreshing}
+            data-testid="header-refresh-btn"
+            className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-slate-100 hover:bg-[#0F2438] text-[#0F2438] hover:text-[#E5C887] border border-[#C6A052]/60 shadow-xs flex items-center justify-center shrink-0 transition-all active:scale-95 cursor-pointer disabled:opacity-75"
+            title={t('تحديث الصفحة والبيانات', 'Refresh Page & Data')}
+            aria-label={t('تحديث الصفحة', 'Refresh Page')}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          </button>
 
-              <button
-                type="button"
-                onClick={() => setAdminMode(isDashboardMode ? 'live_editor' : 'dashboard')}
-                className="bg-gradient-to-r from-[#0F2438] to-[#163B65] hover:brightness-110 text-[#E5C887] font-black text-[clamp(0.68rem,2.6vw,0.85rem)] px-2 sm:px-3.5 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border-2 border-[#C6A052] shadow-sm leading-none"
-                title={
-                  isSuperAdmin
-                    ? t('المدير العام — اضغط للتبديل', 'General Manager — Click to switch mode')
-                    : t('مدير مساعد — اضغط للتبديل', 'Sub-Admin — Click to switch mode')
-                }
-              >
-                <Crown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#E5C887] shrink-0" />
-                <span>
-                  {isSuperAdmin
-                    ? t('المدير العام', 'General Manager')
-                    : t('مدير مساعد', 'Sub-Admin')}
-                </span>
-              </button>
-            </>
+          {/* Universal Language Switcher (EN / عربي) in Header */}
+          <button
+            type="button"
+            onClick={toggleLang}
+            data-testid="header-lang-btn"
+            className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-slate-100 hover:bg-[#0F2438] text-[#0F2438] hover:text-[#E5C887] border border-[#C6A052]/60 shadow-xs flex items-center justify-center shrink-0 transition-all active:scale-95 cursor-pointer text-[11px] font-black leading-none"
+            title={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
+            aria-label={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
+          >
+            {isAr ? <span>EN</span> : <span className="text-[10px]">عربي</span>}
+          </button>
+
+          {isAdminActive ? (
+            <button
+              type="button"
+              onClick={() => setAdminMode(isDashboardMode ? 'live_editor' : 'dashboard')}
+              className="bg-gradient-to-r from-[#0F2438] to-[#163B65] hover:brightness-110 text-[#E5C887] font-black text-[clamp(0.68rem,2.6vw,0.85rem)] px-2 sm:px-3.5 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border-2 border-[#C6A052] shadow-sm leading-none"
+              title={
+                isSuperAdmin
+                  ? t('المدير العام — اضغط للتبديل', 'General Manager — Click to switch mode')
+                  : t('مدير مساعد — اضغط للتبديل', 'Sub-Admin — Click to switch mode')
+              }
+            >
+              <Crown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#E5C887] shrink-0" />
+              <span>
+                {isSuperAdmin
+                  ? t('المدير العام', 'General Manager')
+                  : t('مدير مساعد', 'Sub-Admin')}
+              </span>
+            </button>
           ) : (
             <button
               type="button"
@@ -843,129 +848,9 @@ export const Navbar: React.FC<NavbarProps> = ({
         );
       })()}
 
-      {/* Active Admin Session Control Bar */}
-      {isAdminActive && session && (
-        <div
-          data-no-admin-edit="true"
-          className="bg-[#0F2438] text-white px-2.5 sm:px-4 py-1.5 border-t border-[#C6A052]/50"
-        >
-          <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-2 text-[11px] sm:text-xs">
-            <div className="flex items-center gap-1.5 font-bold text-[#E5C887]">
-              <Crown className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate max-w-[160px] sm:max-w-xs">
-                {isSuperAdmin
-                  ? t('جلسة المدير العام نشطة', 'General Manager Session')
-                  : t(`مدير مساعد: ${session.name}`, `Sub-Admin: ${session.name}`)}
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => void handleBellActivateAndTest('admin', true)}
-                disabled={isRequestingBellPush}
-                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
-                  bellPermission === 'granted'
-                    ? 'bg-emerald-500/20 border border-emerald-400/50 text-emerald-200 hover:bg-emerald-500/30'
-                    : bellPermission === 'denied'
-                    ? 'bg-red-500/25 border border-red-400/50 text-red-200 hover:bg-red-500/35'
-                    : 'bg-[#C6A052]/25 border border-[#C6A052] text-[#E5C887] hover:bg-[#C6A052]/40'
-                }`}
-                title={
-                  bellStatusMessage?.text ||
-                  t('تفعيل إشعارات الإدارة واختبار الصوت', 'Enable Admin Alerts & Test Sound')
-                }
-              >
-                <Bell className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {bellPermission === 'granted'
-                    ? t('الإشعارات مفعّلة ✅', 'Alerts Active ✅')
-                    : bellPermission === 'denied'
-                    ? t('الإشعارات محظورة ❌', 'Alerts Blocked ❌')
-                    : t('تفعيل الإشعارات 🔔', 'Enable Alerts 🔔')}
-                </span>
-              </button>
-
-              {hasPermission('activate_otp') && (
-                <button
-                  type="button"
-                  onClick={() => onOpenQuickOtp?.()}
-                  data-testid="admin-bar-quick-otp-btn"
-                  className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1.5 transition cursor-pointer ${
-                    pendingOtpCount > 0
-                      ? 'bg-red-600 hover:bg-red-700 text-white border border-red-300 shadow-md animate-pulse'
-                      : 'bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40'
-                  }`}
-                  title={t(
-                    'أكواد التفعيل (OTP) — عرض ونسخ وإرسال وتفعيل فوري',
-                    'Activation Codes (OTP) — Quick view, copy, send & activate'
-                  )}
-                >
-                  <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                  <span>{t('أكواد OTP', 'OTP Codes')}</span>
-                  {pendingOtpCount > 0 && (
-                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-white text-red-700 text-[10px] font-black leading-none flex items-center justify-center tabular-nums shadow-xs">
-                      {pendingOtpCount > 99 ? '99+' : pendingOtpCount}
-                    </span>
-                  )}
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setAdminMode('dashboard')}
-                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
-                  isDashboardMode
-                    ? 'bg-[#C6A052] text-[#0A1926]'
-                    : 'bg-white/10 hover:bg-white/20 text-white'
-                }`}
-              >
-                <LayoutDashboard className="w-3.5 h-3.5 shrink-0" />
-                <span>{t('لوحة الإدارة الشاملة', 'Full Admin Dashboard')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAdminMode('live_editor')}
-                className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1 transition cursor-pointer ${
-                  isLiveEditorMode
-                    ? 'bg-[#C6A052] text-[#0A1926]'
-                    : 'bg-white/10 hover:bg-white/20 text-white'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {isEditUnlocked && hasPermission('edit_content')
-                    ? t('معاينة الموقع والتعديل المباشر', 'Live Site Editor')
-                    : t('معاينة الموقع (وضع آمن)', 'Preview Site (Safe)')}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={logoutAdmin}
-                className="px-2.5 py-1 rounded-lg bg-red-600/90 hover:bg-red-600 text-white font-bold flex items-center gap-1 transition cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5 shrink-0" />
-                <span>{t('خروج من الإدارة', 'Logout')}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Floating Circular Quick-Action Buttons Stacked Under Hamburger Menu Position */}
       {!mobileMenuOpen && (
         <div className="absolute top-full mt-2.5 end-2.5 sm:end-4 z-30 flex flex-col items-center gap-2 pointer-events-none">
-          <button
-            type="button"
-            onClick={toggleLang}
-            className="pointer-events-auto w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/95 hover:bg-[#0F2438] text-[#0F2438] hover:text-[#E5C887] border border-[#C6A052]/70 shadow-md backdrop-blur-md flex items-center justify-center transition-all active:scale-95 cursor-pointer text-[11px] font-black leading-none"
-            title={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
-            aria-label={isAr ? 'Switch to English' : 'التحويل إلى العربية'}
-          >
-            {isAr ? <span>EN</span> : <span className="text-[10.5px]">عربي</span>}
-          </button>
 
           <button
             type="button"

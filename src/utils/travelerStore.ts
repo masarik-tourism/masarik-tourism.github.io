@@ -2553,7 +2553,18 @@ export async function completeApprovedNewDeviceLoginCloud(
   } catch {
     // Offline fallback
   }
-  if (!target || !isClientAccountVerified(target)) return null;
+  if (!target) return null;
+  if (!isClientAccountVerified(target)) {
+    if (
+      (Array.isArray(target.trustedDevices) && target.trustedDevices.length > 0) ||
+      target.verified === true
+    ) {
+      target.verified = true;
+      target.accountStatus = 'verified';
+    } else {
+      return null;
+    }
+  }
 
   const { deviceId, label } = getDeviceFingerprint();
   const nowMs = Date.now();

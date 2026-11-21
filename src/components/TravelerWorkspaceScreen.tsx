@@ -262,7 +262,6 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [remainingTempMinutes, setRemainingTempMinutes] = useState<number | null>(() =>
     getRemainingTemporaryMinutes(sessionMeta || null)
   );
-  const [confirmRevokeDeviceId, setConfirmRevokeDeviceId] = useState<string | null>(null);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [securityFeedback, setSecurityFeedback] = useState<{
     type: 'success' | 'error';
@@ -514,7 +513,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     });
 
     const unsubApprovalDoc =
-      approvalRequestState === 'waiting'
+      pendingApprovalReqId
         ? subscribeDeviceApprovalRequestCloud(pendingApprovalReqId, (reqDoc) => {
             const resolution = evaluateApprovalDocResponse(reqDoc);
             applyResolution(reqDoc.phoneId || targetPhone, resolution);
@@ -531,7 +530,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       applyResolution(targetPhone, resolution);
     });
 
-    // Polling safety net (immediate check + every 2 seconds) in case WebSocket/onSnapshot delivery is delayed
+    // Polling safety net (immediate check + every 1.5 seconds) in case WebSocket/onSnapshot delivery is delayed
     const pollServer = async () => {
       if (handled || disposed) return;
       const res = await checkNewDeviceApprovalOnceCloud(targetPhone, pendingApprovalReqId);
@@ -554,10 +553,10 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
 
     const initialPollTimerId = window.setTimeout(() => {
       void pollServer();
-    }, 450);
+    }, 150);
     const pollIntervalId = window.setInterval(() => {
       void pollServer();
-    }, 2000);
+    }, 1500);
 
     return () => {
       disposed = true;
@@ -1716,7 +1715,6 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     setSecurityFeedback(null);
     try {
       await revokeTrustedDeviceCloud(activeTraveler.phone, deviceId);
-      setConfirmRevokeDeviceId(null);
       setSecurityFeedback({
         type: 'success',
         text:
@@ -5144,7 +5142,6 @@ Please advise on the next steps for my application.`
                   <div className="space-y-2.5">
                     {(activeTraveler.trustedDevices || []).map((dev) => {
                       const isCurrent = dev.deviceId === currentDevice.deviceId;
-                      const isConfirming = confirmRevokeDeviceId === dev.deviceId;
                       const formattedAdded = new Date(dev.addedAt).toLocaleDateString(
                         lang === 'en' ? 'en-US' : 'ar-EG',
                         { year: 'numeric', month: 'short', day: 'numeric' }
@@ -5181,36 +5178,23 @@ Please advise on the next steps for my application.`
                           </div>
 
                           <div className="shrink-0">
-                            {isConfirming ? (
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  disabled={revokingDeviceId === dev.deviceId}
-                                  onClick={() => void handleRevokeTrustedDevice(dev.deviceId)}
-                                  className="min-h-[34px] px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-black cursor-pointer disabled:opacity-60"
-                                >
-                                  {revokingDeviceId === dev.deviceId
-                                    ? t('جاري الحذف...', 'Deleting...')
-                                    : t('تأكيد الحذف (دون حظر)', 'Confirm Delete (No Block)')}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setConfirmRevokeDeviceId(null)}
-                                  className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-[11px] font-bold cursor-pointer"
-                                >
-                                  {t('تراجع', 'Cancel')}
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmRevokeDeviceId(dev.deviceId)}
-                                className="min-h-[36px] px-3 py-1.5 rounded-xl bg-white border border-red-200 hover:bg-red-50 text-red-700 text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
-                              >
+                            <button
+                              type="button"
+                              disabled={revokingDeviceId === dev.deviceId}
+                              onClick={() => void handleRevokeTrustedDevice(dev.deviceId)}
+                              className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-[11px] font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs disabled:opacity-60 active:scale-95"
+                              title={t(
+                                'حذف هذا الجهاز من قائمة الأجهزة الموثوقة وإلغاء جلسته دون حظر',
+                                'Remove device from trusted list without blocking'
+                              )}
+                            >
+                              {revokingDeviceId === dev.deviceId ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
                                 <Trash2 className="w-3.5 h-3.5" />
-                                <span>{t('حذف الجهاز الموثوق 🗑️', 'Delete Trusted Device 🗑️')}</span>
-                              </button>
-                            )}
+                              )}
+                              <span>{t('حذف الجهاز الموثوق 🗑️', 'Delete Trusted Device 🗑️')}</span>
+                            </button>
                           </div>
                         </div>
                       );

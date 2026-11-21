@@ -43,6 +43,7 @@ import {
   Volume2,
   Building2,
   Smartphone,
+  LayoutDashboard,
 } from 'lucide-react';
 import {
   AdminPermission,
@@ -57,11 +58,11 @@ import {
 } from '../types/travel';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
 import { DirectChatPanel } from './DirectChatPanel';
-import { PushPermissionBanner } from './PushPermissionBanner';
 import {
   NATIVE_FCM_TOKEN_EVENT,
   PUSH_LOG_UPDATED_EVENT,
   PushDiagnosticLog,
+  getBrowserNotificationPermission,
   getLastPushDiagnosticLog,
   getNativeAndroidFcmToken,
   requestAndGetFcmToken,
@@ -119,6 +120,7 @@ import {
   PERMISSION_LABELS,
   createSubAdmin,
   deleteSubAdmin,
+  getAdminFcmStatusCloud,
   getSubAdmins,
   saveAdminFcmTokenCloud,
   subscribeNotificationSettingsTokens,
@@ -302,6 +304,50 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const seenClientStateRef = useRef<Map<string, { verified: boolean; otpGeneratedAt: string }>>(
     new Map()
   );
+
+  // Compact Floating Notifications Popover for General Manager
+  const [showBellPopover, setShowBellPopover] = useState(false);
+  const [bellPermission, setBellPermission] = useState<NotificationPermission | 'unsupported'>(() =>
+    getBrowserNotificationPermission()
+  );
+  const [isActivatingBellPush, setIsActivatingBellPush] = useState(false);
+  const [isTestingBellPush, setIsTestingBellPush] = useState(false);
+  const [bellFeedback, setBellFeedback] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+  const [hasAdminFcmToken, setHasAdminFcmToken] = useState(false);
+  const bellPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showBellPopover) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (bellPopoverRef.current && !bellPopoverRef.current.contains(e.target as Node)) {
+        setShowBellPopover(false);
+      }
+    };
+    window.addEventListener('mousedown', handleClickOutside);
+    return () => window.removeEventListener('mousedown', handleClickOutside);
+  }, [showBellPopover]);
+
+  useEffect(() => {
+    let active = true;
+    const checkFcmStatus = async () => {
+      const perm = getBrowserNotificationPermission();
+      if (!active) return;
+      setBellPermission(perm);
+      if (session?.adminId) {
+        const st = await getAdminFcmStatusCloud(session.adminId);
+        if (active) {
+          setHasAdminFcmToken(Boolean(st.fcmToken && st.enabled));
+        }
+      }
+    };
+    void checkFcmStatus();
+    return () => {
+      active = false;
+    };
+  }, [session?.adminId]);
 
   // Tab 4: Sub-Admins & Security Settings
   const [subAdmins, setSubAdmins] = useState<SubAdminAccount[]>(() => getSubAdmins());
@@ -1092,6 +1138,123 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     }
   };
 
+  const handleEnableAdminBellPush = async () => {
+    if (isActivatingBellPush) return;
+    setIsActivatingBellPush(true);
+    setBellFeedback(null);
+    playChatNotificationChime(true);
+    try {
+      if ('vibrate' in navigator && typeof navigator.vibrate === 'function') {
+        navigator.vibrate([220, 100, 220]);
+      }
+    } catch {}
+
+    try {
+      const res = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+      setBellPermission(res.permission);
+      if (!res.ok) {
+        if (res.permission === 'unsupported' && isRunningInApp()) {
+          if (session?.adminId) {
+            await saveAdminFcmTokenCloud(session.adminId, res.token || '', true);
+            setHasAdminFcmToken(true);
+          }
+          setBellFeedback({
+            type: 'info',
+            text: t(
+              'تم تشغيل نغمة التنبيه داخل التطبيق ✅ — اسمح بالإشعارات من إعدادات الهاتف لشريط الإشعارات العلوي.',
+              'In-app chime active ✅ — enable Notifications in Android settings for top-bar alerts.'
+            ),
+          });
+          return;
+        }
+        setBellFeedback({
+          type: 'error',
+          text:
+            res.permission === 'denied'
+              ? t(
+                  'حالة الإذن: مرفوضة من إعدادات المتصفح أو الهاتف ❌ — يرجى فتح الإعدادات والسماح بالإشعارات.',
+                  'Permission denied in settings ❌ — allow notifications and retry.'
+                )
+              : res.error || t('تعذر تفعيل الإشعارات', 'Could not enable notifications'),
+        });
+        return;
+      }
+
+      if (session?.adminId && res.token) {
+        await saveAdminFcmTokenCloud(session.adminId, res.token, true);
+        setHasAdminFcmToken(true);
+      }
+
+      await showBrowserPushNotification({
+        title: 'مسارك للإنجاز السياحي',
+        body: t(
+          'تم تفعيل إشعارات الإدارة بنجاح ✅ ستصلك تنبيهات فورية في شريط الهاتف عند أي طلب أو رسالة.',
+          'Admin push notifications enabled ✅ Instant top-bar alerts are now active.'
+        ),
+        tag: `masarik-admin-welcome-${Date.now()}`,
+        data: { role: 'admin', action: 'live_chat' },
+      });
+
+      setBellFeedback({
+        type: 'success',
+        text: t('تم تفعيل إشعارات الهاتف بنجاح ✅', 'Phone push notifications enabled successfully ✅'),
+      });
+    } catch {
+      setBellFeedback({
+        type: 'error',
+        text: t('حدث خطأ أثناء حفظ إعدادات الإشعارات', 'Failed to save notification settings'),
+      });
+    } finally {
+      setIsActivatingBellPush(false);
+    }
+  };
+
+  const handleTestAdminBellPush = async () => {
+    if (isTestingBellPush) return;
+    setIsTestingBellPush(true);
+    setBellFeedback(null);
+    try {
+      playChatNotificationChime(true);
+      try {
+        if ('vibrate' in navigator && typeof navigator.vibrate === 'function') {
+          navigator.vibrate([240, 110, 240]);
+        }
+      } catch {}
+
+      let currentPerm = getBrowserNotificationPermission();
+      if (currentPerm === 'default') {
+        const res = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+        currentPerm = res.permission;
+        setBellPermission(res.permission);
+        if (res.ok && res.token && session?.adminId) {
+          await saveAdminFcmTokenCloud(session.adminId, res.token, true);
+          setHasAdminFcmToken(true);
+        }
+      }
+
+      const shown = await showBrowserPushNotification({
+        title: t('مسارك للإنجاز السياحي — اختبار الإشعار 🔔', 'Masarik Tourism — Test Alert 🔔'),
+        body: t('صوت وتنبيه الإشعارات يعمل بنجاح على هذا الجهاز! 🎉', 'Sound and notifications are working properly! 🎉'),
+        tag: `masarik-admin-test-${Date.now()}`,
+        data: { role: 'admin', action: 'live_chat' },
+      });
+
+      setBellFeedback({
+        type: 'success',
+        text: shown
+          ? t('تم إطلاق إشعار ونغمة الاختبار بنجاح 🔔', 'Test notification & chime sent successfully 🔔')
+          : t('تم تشغيل نغمة التنبيه بنجاح 🔔', 'Test alert chime played successfully 🔔'),
+      });
+    } catch {
+      setBellFeedback({
+        type: 'error',
+        text: t('تعذر إطلاق إشعار الاختبار', 'Failed to trigger test notification'),
+      });
+    } finally {
+      setIsTestingBellPush(false);
+    }
+  };
+
   const handleRefreshNativeBridgeToken = async () => {
     const tk = (await waitForNativeAndroidFcmToken(3500)).trim();
     if (tk) {
@@ -1525,106 +1688,192 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   return (
     <div className="min-h-screen bg-[#F1F5F9] pb-24 md:pb-16 text-[#0F2438]" dir={dir}>
       <div className="max-w-6xl mx-auto px-3 sm:px-6 pt-5 space-y-5">
-        {/* Full-Page Workspace Hero Header + Safe Edit Lock Control */}
-        <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white rounded-2xl p-4 sm:p-6 border border-[#C6A052]/60 shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="flex items-start sm:items-center gap-3.5">
-            <div className="w-12 h-12 rounded-2xl bg-[#C6A052]/20 border border-[#C6A052] text-[#E5C887] flex items-center justify-center shrink-0">
-              <ShieldCheck className="w-6 h-6" />
+        {/* Sleek Compact Manager Header Card (Calm Dark Navy with Delicate Gold Accents) */}
+        <div className="bg-gradient-to-r from-[#0A1926] via-[#0F2438] to-[#163B65] text-white rounded-2xl p-3.5 sm:p-5 border border-[#C6A052]/50 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-[#C6A052]/15 border border-[#C6A052]/60 text-[#E5C887] flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[11px] font-black">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-sm sm:text-base font-black text-white truncate">
+                  {t('لوحة التحكم والإدارة', 'Management & Control Panel')}
+                </h1>
+                <span className="px-2 py-0.5 rounded-full bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#E5C887] text-[10.5px] font-bold">
                   {isSuperAdmin
                     ? t('المدير العام', 'General Manager')
                     : t(`مدير مساعد · ${session?.name || ''}`, `Sub-Admin · ${session?.name || ''}`)}
                 </span>
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-black flex items-center gap-1 border ${
+                <button
+                  type="button"
+                  onClick={toggleEditLock}
+                  className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold flex items-center gap-1 border transition cursor-pointer ${
                     isEditUnlocked
-                      ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50'
-                      : 'bg-amber-500/20 text-amber-200 border-amber-400/50'
+                      ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50 hover:bg-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-200 border-amber-400/50 hover:bg-amber-500/30'
                   }`}
+                  title={
+                    isEditUnlocked
+                      ? t('وضع التعديل مفتوح — اضغط للقفل', 'Edit Mode Unlocked — Click to lock')
+                      : t('وضع المتابعة الآمن — اضغط لفتح التعديل', 'Safe Mode — Click to unlock')
+                  }
                 >
                   {isEditUnlocked ? (
                     <>
-                      <Unlock className="w-3 h-3" />
-                      <span>{t('وضع التعديل مفتوح', 'Edit Mode Unlocked')}</span>
+                      <Unlock className="w-2.5 h-2.5" />
+                      <span>{t('وضع التعديل', 'Edit Mode')}</span>
                     </>
                   ) : (
                     <>
-                      <Lock className="w-3 h-3" />
-                      <span>{t('وضع المتابعة الآمن · قفل التعديل مفعّل', 'Safe Mode · Edit Lock Active')}</span>
+                      <Lock className="w-2.5 h-2.5" />
+                      <span>{t('وضع آمن', 'Safe Mode')}</span>
                     </>
                   )}
-                </span>
+                </button>
               </div>
-
-              <h1 className="text-base sm:text-xl font-black text-white mt-1.5">
-                {t('منظومة إدارة العملاء والعمليات — مسارك للإنجاز السياحي', 'CRM & Operations Workspace — Masarik Tourism')}
-              </h1>
-
-              <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                {(session?.permissions || []).map((p) => (
-                  <span
-                    key={p}
-                    className="px-2 py-0.5 rounded-md bg-white/10 border border-white/15 text-[10.5px] font-bold text-[#E5C887]"
-                  >
-                    {lang === 'en' ? PERMISSION_LABELS[p].en : PERMISSION_LABELS[p].ar}
-                  </span>
-                ))}
-              </div>
+              <p className="text-[11px] text-slate-300 mt-0.5 truncate">
+                {t('منظومة مسارك للإنجاز السياحي — إدارة العمليات والعملاء', 'Masarik Tourism — Operations & Client Directory')}
+              </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {/* Prominent Safe Edit Lock Toggle */}
-            <button
-              type="button"
-              onClick={toggleEditLock}
-              className={`min-h-[44px] px-4 py-2 rounded-xl text-xs font-black flex items-center gap-2 shadow-sm transition cursor-pointer ${
-                isEditUnlocked
-                  ? 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-400'
-                  : 'bg-amber-400 hover:bg-amber-300 text-[#0A1926] border border-amber-200'
-              }`}
-            >
-              {isEditUnlocked ? (
-                <>
-                  <Lock className="w-4 h-4 shrink-0" />
-                  <span>{t('قفل وضع التعديل', 'Lock Edit Mode')}</span>
-                </>
-              ) : (
-                <>
-                  <Unlock className="w-4 h-4 shrink-0" />
-                  <span>{t('فتح وضع التعديل والإدارة', 'Unlock Edit & Management')}</span>
-                </>
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {/* Notifications Bell with Green Indicator & Floating Popover */}
+            <div className="relative" ref={bellPopoverRef}>
+              <button
+                type="button"
+                onClick={() => setShowBellPopover((v) => !v)}
+                className="relative w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 flex items-center justify-center transition cursor-pointer active:scale-95"
+                title={t('إعدادات إشعارات الهاتف والتنبيهات', 'Phone Notifications Settings')}
+                aria-label={t('إشعارات الإدارة', 'Admin Notifications')}
+              >
+                <Bell className="w-4 h-4" />
+                {(bellPermission === 'granted' || hasAdminFcmToken) && (
+                  <span className="absolute top-1.5 end-1.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#0F2438]" />
+                )}
+              </button>
+
+              {/* Compact Floating Notifications Card */}
+              {showBellPopover && (
+                <div className="absolute top-full mt-2 end-0 z-50 w-72 sm:w-80 rounded-2xl bg-[#0F2438] text-white border border-[#C6A052]/50 shadow-2xl p-4 space-y-3 backdrop-blur-md animate-in fade-in zoom-in-95">
+                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-2">
+                      <Bell className="w-4 h-4 text-[#E5C887]" />
+                      <span className="text-xs font-black text-white">
+                        {t('إشعارات الهاتف الفورية', 'Instant Push Notifications')}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowBellPopover(false)}
+                      className="w-6 h-6 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="text-[11px] text-slate-300 space-y-1">
+                    <div className="flex items-center gap-1.5 font-bold">
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          bellPermission === 'granted' || hasAdminFcmToken
+                            ? 'bg-emerald-400'
+                            : 'bg-amber-400'
+                        }`}
+                      />
+                      <span>
+                        {bellPermission === 'granted' || hasAdminFcmToken
+                          ? t('الإشعارات مفعّلة على هذا الجهاز ✅', 'Notifications enabled on this device ✅')
+                          : t('الإشعارات غير مفعّلة حالياً', 'Notifications not enabled yet')}
+                      </span>
+                    </div>
+                    <p className="text-slate-400 text-[10.5px]">
+                      {t('تنبيهات فورية في شريط الهاتف لأي طلب أو رسالة جديدة.', 'Top-bar phone alerts for any new request or chat.')}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={isActivatingBellPush}
+                      onClick={() => void handleEnableAdminBellPush()}
+                      className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-gradient-to-r from-[#C6A052] to-[#E5C887] text-[#0A1926] text-xs font-black flex items-center justify-center gap-2 transition cursor-pointer hover:brightness-105 active:scale-95 disabled:opacity-60"
+                    >
+                      {isActivatingBellPush ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Smartphone className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t('تفعيل إشعارات الهاتف', 'Enable Phone Alerts')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isTestingBellPush}
+                      onClick={() => void handleTestAdminBellPush()}
+                      className="w-full min-h-[38px] px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40 text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer active:scale-95 disabled:opacity-60"
+                    >
+                      {isTestingBellPush ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Volume2 className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t('اختبار الإشعار والصوت', 'Test Alert & Chime')}</span>
+                    </button>
+                  </div>
+
+                  {bellFeedback && (
+                    <div
+                      className={`p-2 rounded-lg text-[10.5px] font-bold text-center border ${
+                        bellFeedback.type === 'success'
+                          ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                          : 'bg-red-500/20 border-red-400/50 text-red-200'
+                      }`}
+                    >
+                      {bellFeedback.text}
+                    </div>
+                  )}
+                </div>
               )}
-            </button>
+            </div>
 
+            {/* Button 1: Full Admin Dashboard (Primary Gold Highlight) */}
             <button
               type="button"
-              onClick={() => setAdminMode('live_editor')}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center gap-2 shadow-sm transition cursor-pointer"
+              onClick={() => setAdminMode('dashboard')}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center gap-1.5 shadow-xs transition cursor-pointer active:scale-95"
             >
-              <Sparkles className="w-4 h-4" />
-              <span>
-                {isEditUnlocked && canEditContent
-                  ? t('معاينة الموقع والتعديل المباشر', 'Live Site Editor')
-                  : t('معاينة الموقع (وضع آمن)', 'Preview Site (Safe)')}
-              </span>
+              <LayoutDashboard className="w-3.5 h-3.5" />
+              <span>{t('لوحة الإدارة الشاملة', 'Full Admin Dashboard')}</span>
             </button>
 
+            {/* Button 2: Live Site Editor Mode */}
+            <button
+              type="button"
+              onClick={() => {
+                if (!isEditUnlocked && canEditContent) {
+                  unlockEditMode();
+                }
+                setAdminMode('live_editor');
+              }}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white border border-white/20 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[#E5C887]" />
+              <span>{t('وضع تعديل الموقع', 'Live Site Editor')}</span>
+            </button>
+
+            {/* Small Sleek Logout Button */}
             <button
               type="button"
               onClick={logoutAdmin}
-              className="min-h-[44px] px-3.5 py-2 rounded-xl bg-white/10 hover:bg-red-600/90 text-white border border-white/20 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-red-500/20 hover:bg-red-600 text-red-200 hover:text-white border border-red-500/40 text-xs font-bold flex items-center gap-1 transition cursor-pointer active:scale-95"
+              title={t('خروج من الإدارة', 'Logout')}
             >
-              <LogOut className="w-4 h-4" />
-              <span>{t('خروج', 'Logout')}</span>
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{t('خروج', 'Logout')}</span>
             </button>
           </div>
         </div>
-
-        <PushPermissionBanner role="admin" adminId={session?.adminId} />
 
         {/* Real-Time Instant Alert Toast for New Pending OTP Requests */}
         {realtimeAlert && (
@@ -1842,42 +2091,42 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {/* ===================================================================== */}
         {activeTab === 'individuals' && canManageClients && !selectedClient && (
           <div className="space-y-4">
-            {/* Compact Real-Time KPI Summary */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center tabular-nums">
-              <div className="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-xs">
-                <span className="text-[11px] text-slate-500 block font-bold">
+            {/* Compact Real-Time KPI Summary Strip (SaaS-Grade) */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-center tabular-nums">
+              <div className="bg-white border border-slate-200/90 rounded-xl p-2.5 sm:p-3 shadow-xs">
+                <span className="text-[10.5px] sm:text-[11px] text-slate-500 block font-medium">
                   {t('إجمالي الأفراد', 'Total Individuals')}
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-[#0F2438]">
+                <span className="text-lg sm:text-xl font-bold font-mono text-[#0F2438]">
                   {individualTravelers.length}
                 </span>
               </div>
-              <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3.5 shadow-xs">
-                <span className="text-[11px] text-emerald-900 block font-bold flex items-center justify-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
+                <span className="text-[10.5px] sm:text-[11px] text-emerald-900 block font-medium flex items-center justify-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   <span>{t('متصلون الآن', 'Online Now')}</span>
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-emerald-800">
+                <span className="text-lg sm:text-xl font-bold font-mono text-emerald-800">
                   {individualsOnlineCount}
                 </span>
               </div>
-              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-3.5 shadow-xs">
-                <span className="text-[11px] text-sky-900 block font-bold">
+              <div className="bg-sky-50/60 border border-sky-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
+                <span className="text-[10.5px] sm:text-[11px] text-sky-900 block font-medium">
                   {t('طلبات قيد التنفيذ', 'Active Orders')}
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-sky-900">{activeOrdersCount}</span>
+                <span className="text-lg sm:text-xl font-bold font-mono text-sky-900">{activeOrdersCount}</span>
               </div>
-              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 shadow-xs">
-                <span className="text-[11px] text-amber-900 block font-bold">
+              <div className="bg-amber-50/60 border border-amber-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
+                <span className="text-[10.5px] sm:text-[11px] text-amber-900 block font-medium">
                   {t('ملفات وإيصالات', 'With Files')}
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-amber-900">{withFilesCount}</span>
+                <span className="text-lg sm:text-xl font-bold font-mono text-amber-900">{withFilesCount}</span>
               </div>
-              <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-3.5 shadow-xs col-span-2 sm:col-span-1">
-                <span className="text-[11px] text-emerald-900 block font-bold">
+              <div className="bg-emerald-50/40 border border-emerald-200/70 rounded-xl p-2.5 sm:p-3 shadow-xs col-span-2 sm:col-span-1">
+                <span className="text-[10.5px] sm:text-[11px] text-emerald-900 block font-medium">
                   {t('طلبات مكتملة', 'Completed')}
                 </span>
-                <span className="text-xl sm:text-2xl font-black text-emerald-900">{completedCount}</span>
+                <span className="text-lg sm:text-xl font-bold font-mono text-emerald-900">{completedCount}</span>
               </div>
             </div>
 
