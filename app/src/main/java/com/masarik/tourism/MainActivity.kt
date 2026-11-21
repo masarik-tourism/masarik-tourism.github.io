@@ -654,6 +654,8 @@ fun MainWebViewScreen(
                         ): Boolean {
                             val requestUri = request?.url ?: return false
                             val url = requestUri.toString()
+                            val lowerUrl = url.lowercase()
+                            val scheme = requestUri.scheme?.lowercase() ?: ""
                             val host = requestUri.host?.lowercase() ?: ""
 
                             // Open .apk or GitHub download links in external browser
@@ -667,31 +669,64 @@ fun MainWebViewScreen(
                                 return true
                             }
 
-                            // Handle WhatsApp intents
-                            if (url.startsWith("https://wa.me/") ||
-                                url.startsWith("whatsapp://") ||
-                                url.contains("api.whatsapp.com")
+                            // Handle intent:// links safely with automatic browser_fallback_url recovery
+                            if (scheme == "intent" || lowerUrl.startsWith("intent:")) {
+                                try {
+                                    val parsedIntent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                                    parsedIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    try {
+                                        ctx.startActivity(parsedIntent)
+                                    } catch (_: Exception) {
+                                        val fallbackUrl = parsedIntent.getStringExtra("browser_fallback_url")
+                                        if (!fallbackUrl.isNullOrBlank()) {
+                                            if (fallbackUrl.startsWith("http://", ignoreCase = true) ||
+                                                fallbackUrl.startsWith("https://", ignoreCase = true)
+                                            ) {
+                                                view?.loadUrl(fallbackUrl)
+                                            } else {
+                                                openExternalBrowser(ctx, fallbackUrl)
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {
+                                }
+                                return true
+                            }
+
+                            // Handle SMS, MMS, Tel, Mailto & WhatsApp URIs cleanly outside WebView
+                            if (lowerUrl.startsWith("sms:") ||
+                                lowerUrl.startsWith("smsto:") ||
+                                lowerUrl.startsWith("mms:") ||
+                                lowerUrl.startsWith("tel:") ||
+                                lowerUrl.startsWith("mailto:") ||
+                                lowerUrl.startsWith("whatsapp:") ||
+                                lowerUrl.startsWith("https://wa.me/") ||
+                                lowerUrl.startsWith("http://wa.me/") ||
+                                lowerUrl.contains("api.whatsapp.com")
                             ) {
                                 try {
-                                    ctx.startActivity(Intent(Intent.ACTION_VIEW, requestUri))
+                                    val externalIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                    externalIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    ctx.startActivity(externalIntent)
                                 } catch (_: Exception) {
                                 }
                                 return true
                             }
 
-                            // Handle Phone Call intents
-                            if (url.startsWith("tel:")) {
+                            // Route any other custom external scheme outside WebView so onReceivedError never fires
+                            if (scheme.isNotEmpty() &&
+                                scheme != "http" &&
+                                scheme != "https" &&
+                                scheme != "about" &&
+                                scheme != "data" &&
+                                scheme != "blob" &&
+                                scheme != "javascript" &&
+                                scheme != "file"
+                            ) {
                                 try {
-                                    ctx.startActivity(Intent(Intent.ACTION_DIAL, requestUri))
-                                } catch (_: Exception) {
-                                }
-                                return true
-                            }
-
-                            // Handle Mail intents
-                            if (url.startsWith("mailto:")) {
-                                try {
-                                    ctx.startActivity(Intent(Intent.ACTION_SENDTO, requestUri))
+                                    val externalIntent = Intent(Intent.ACTION_VIEW, requestUri)
+                                    externalIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    ctx.startActivity(externalIntent)
                                 } catch (_: Exception) {
                                 }
                                 return true

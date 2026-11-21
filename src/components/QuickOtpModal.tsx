@@ -40,6 +40,7 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
 }) => {
   const { lang, dir, t } = useLanguage();
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
+  const [copiedSmsPhone, setCopiedSmsPhone] = useState<string | null>(null);
   const [activatingPhone, setActivatingPhone] = useState<string | null>(null);
   const [showAllClients, setShowAllClients] = useState(false);
 
@@ -55,6 +56,21 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
       await navigator.clipboard.writeText(msg);
       setCopiedPhone(client.phone);
       window.setTimeout(() => setCopiedPhone((prev) => (prev === client.phone ? null : prev)), 2200);
+    } catch {
+      // Clipboard unavailable
+    }
+  };
+
+  const handleCopySmsText = async (client: TravelerProfile) => {
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const msg = buildAdminForwardActivationMessage(displayName, client.phone, client.otp, lang);
+    try {
+      await navigator.clipboard.writeText(msg);
+      setCopiedSmsPhone(client.phone);
+      window.setTimeout(
+        () => setCopiedSmsPhone((prev) => (prev === client.phone ? null : prev)),
+        2200
+      );
     } catch {
       // Clipboard unavailable
     }
@@ -270,15 +286,35 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                       </button>
                     </div>
 
-                    <a
-                      href={smsUrl}
-                      className="w-full min-h-[38px] px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
-                    >
-                      <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
-                      <span>
-                        {t('إرسال الكود عبر رسالة نصية (SMS) 📱', 'Send OTP via SMS 📱')}
-                      </span>
-                    </a>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <a
+                        href={smsUrl}
+                        className="min-h-[38px] px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
+                      >
+                        <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          {t('إرسال الكود عبر رسالة نصية (SMS) 📱', 'Send OTP via SMS 📱')}
+                        </span>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleCopySmsText(client)}
+                        className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-[#0F2438] rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
+                      >
+                        {copiedSmsPhone === client.phone ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{t('تم نسخ النص!', 'Text Copied!')}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-sky-700 shrink-0" />
+                            <span>{t('نسخ نص الرسالة 📋', 'Copy SMS Text 📋')}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {!isVerified && (
