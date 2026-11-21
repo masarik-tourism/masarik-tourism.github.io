@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'masarik-cache-109-mwqcqp8h';
+const CACHE_VERSION = 'masarik-cache-110-mwqiqlzy';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
