@@ -23,6 +23,8 @@ import {
   MessageSquare,
   MessageCircle,
   Building2,
+  KeyRound,
+  RefreshCw,
 } from 'lucide-react';
 import { TravelRepository, getLocalizedTravelContent } from '../data/travelData';
 import {
@@ -67,6 +69,8 @@ interface NavbarProps {
   chatUnreadCount?: number;
   adminChatThreads?: Record<string, ChatThreadSummary>;
   onOpenAdminChat?: (phone?: string) => void;
+  pendingOtpCount?: number;
+  onOpenQuickOtp?: () => void;
   onOpenPrivacyPolicy?: () => void;
 }
 
@@ -82,6 +86,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   chatUnreadCount = 0,
   adminChatThreads,
   onOpenAdminChat,
+  pendingOtpCount = 0,
+  onOpenQuickOtp,
   onOpenPrivacyPolicy,
 }) => {
   const { lang, isAr, toggleLang, t } = useLanguage();
@@ -361,14 +367,14 @@ export const Navbar: React.FC<NavbarProps> = ({
       </div>
 
       {/* Main Decluttered Navbar */}
-      <div className="max-w-6xl mx-auto px-2.5 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-2">
+      <div className="max-w-6xl mx-auto px-2 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-1.5 sm:gap-2">
         {/* Start Side: Company Logo + Full Non-Truncating Company Name */}
         <div
           onClick={() => {
             onSecretAdminTap?.();
             handleTabClick(0);
           }}
-          className="flex items-center gap-1.5 min-[390px]:gap-2 sm:gap-2.5 cursor-pointer select-none group shrink-0"
+          className="flex items-center gap-1.5 sm:gap-2.5 cursor-pointer select-none group min-w-0"
         >
           <div className="relative shrink-0">
             {!logoError ? (
@@ -376,10 +382,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                 src={masarikLogoImg}
                 onError={() => setLogoError(true)}
                 alt={t('شعار مسارك للإنجاز السياحي', 'Masarik Tourism Logo')}
-                className="w-8 h-8 min-[390px]:w-9 min-[390px]:h-9 sm:w-11 sm:h-11 rounded-full border-2 border-[#C6A052] object-cover shadow-xs group-hover:scale-105 transition-transform bg-white"
+                className="w-8 h-8 sm:w-11 sm:h-11 rounded-full border-2 border-[#C6A052] object-cover shadow-xs group-hover:scale-105 transition-transform bg-white"
               />
             ) : (
-              <div className="w-8 h-8 min-[390px]:w-9 min-[390px]:h-9 sm:w-11 sm:h-11 rounded-full border-2 border-[#C6A052] bg-[#0F2438] flex items-center justify-center text-[#E5C887] shadow-xs group-hover:scale-105 transition-transform">
+              <div className="w-8 h-8 sm:w-11 sm:h-11 rounded-full border-2 border-[#C6A052] bg-[#0F2438] flex items-center justify-center text-[#E5C887] shadow-xs group-hover:scale-105 transition-transform">
                 <Compass className="w-4 h-4 sm:w-5 sm:h-5 text-[#E5C887]" />
               </div>
             )}
@@ -391,11 +397,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
           </div>
 
-          <div className="flex flex-col">
-            <span className="text-[clamp(0.85rem,3.8vw,1.15rem)] font-black text-[#0F2438] leading-tight whitespace-nowrap">
+          <div className="flex flex-col min-w-0">
+            <span className="text-[clamp(0.8rem,3.4vw,1.15rem)] font-black text-[#0F2438] leading-tight truncate">
               {t('مسارك للإنجاز السياحي', 'Masarik Tourism')}
             </span>
-            <span className="text-[8.5px] sm:text-[10px] font-bold text-[#0284C7] tracking-wider uppercase whitespace-nowrap">
+            <span className="text-[8px] sm:text-[10px] font-bold text-[#0284C7] tracking-wider uppercase truncate">
               {t(TravelRepository.COMPANY_NAME_EN, 'MASARIK LIL-INJAZ AL-SIYAHI LLC')}
             </span>
           </div>
@@ -484,25 +490,39 @@ export const Navbar: React.FC<NavbarProps> = ({
         </nav>
 
         {/* End Side: Admin Role Badge (when active) OR Traveler Account Button (with Avatar) + Hamburger Menu */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0" data-no-admin-edit="true">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0" data-no-admin-edit="true">
           {isAdminActive ? (
-            <button
-              type="button"
-              onClick={() => setAdminMode(isDashboardMode ? 'live_editor' : 'dashboard')}
-              className="bg-gradient-to-r from-[#0F2438] to-[#163B65] hover:brightness-110 text-[#E5C887] font-black text-[clamp(0.7rem,2.8vw,0.85rem)] px-2.5 sm:px-3.5 h-8 sm:h-9 rounded-full flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border-2 border-[#C6A052] shadow-sm leading-none"
-              title={
-                isSuperAdmin
-                  ? t('المدير العام — اضغط للتبديل', 'General Manager — Click to switch mode')
-                  : t('مدير مساعد — اضغط للتبديل', 'Sub-Admin — Click to switch mode')
-              }
-            >
-              <Crown className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
-              <span>
-                {isSuperAdmin
-                  ? t('المدير العام', 'General Manager')
-                  : t('مدير مساعد', 'Sub-Admin')}
-              </span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleHardRefresh}
+                disabled={isRefreshing}
+                data-testid="admin-header-refresh-btn"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full bg-slate-100 hover:bg-[#0F2438] text-[#0F2438] hover:text-[#E5C887] border border-[#C6A052]/60 shadow-xs flex items-center justify-center shrink-0 transition-all active:scale-95 cursor-pointer disabled:opacity-75"
+                title={t('تحديث الصفحة والبيانات', 'Refresh Page & Data')}
+                aria-label={t('تحديث الصفحة', 'Refresh Page')}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAdminMode(isDashboardMode ? 'live_editor' : 'dashboard')}
+                className="bg-gradient-to-r from-[#0F2438] to-[#163B65] hover:brightness-110 text-[#E5C887] font-black text-[clamp(0.68rem,2.6vw,0.85rem)] px-2 sm:px-3.5 h-8 sm:h-9 rounded-full flex items-center gap-1 sm:gap-1.5 transition-all active:scale-95 cursor-pointer whitespace-nowrap shrink-0 border-2 border-[#C6A052] shadow-sm leading-none"
+                title={
+                  isSuperAdmin
+                    ? t('المدير العام — اضغط للتبديل', 'General Manager — Click to switch mode')
+                    : t('مدير مساعد — اضغط للتبديل', 'Sub-Admin — Click to switch mode')
+                }
+              >
+                <Crown className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-[#E5C887] shrink-0" />
+                <span>
+                  {isSuperAdmin
+                    ? t('المدير العام', 'General Manager')
+                    : t('مدير مساعد', 'Sub-Admin')}
+                </span>
+              </button>
+            </>
           ) : (
             <button
               type="button"
@@ -866,6 +886,31 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </span>
               </button>
 
+              {hasPermission('activate_otp') && (
+                <button
+                  type="button"
+                  onClick={() => onOpenQuickOtp?.()}
+                  data-testid="admin-bar-quick-otp-btn"
+                  className={`px-2.5 py-1 rounded-lg font-black flex items-center gap-1.5 transition cursor-pointer ${
+                    pendingOtpCount > 0
+                      ? 'bg-red-600 hover:bg-red-700 text-white border border-red-300 shadow-md animate-pulse'
+                      : 'bg-white/10 hover:bg-white/20 text-[#E5C887] border border-[#C6A052]/40'
+                  }`}
+                  title={t(
+                    'أكواد التفعيل (OTP) — عرض ونسخ وإرسال وتفعيل فوري',
+                    'Activation Codes (OTP) — Quick view, copy, send & activate'
+                  )}
+                >
+                  <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                  <span>{t('أكواد OTP', 'OTP Codes')}</span>
+                  {pendingOtpCount > 0 && (
+                    <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-white text-red-700 text-[10px] font-black leading-none flex items-center justify-center tabular-nums shadow-xs">
+                      {pendingOtpCount > 99 ? '99+' : pendingOtpCount}
+                    </span>
+                  )}
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setAdminMode('dashboard')}
@@ -931,6 +976,33 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <Phone className="w-4 h-4" />
           </button>
+
+          {/* Floating Quick Access "أكواد OTP" Icon for Admin across Home & All Tabs */}
+          {isAdminActive && hasPermission('activate_otp') && (
+            <button
+              type="button"
+              onClick={() => onOpenQuickOtp?.()}
+              data-testid="admin-floating-quick-otp-btn"
+              className={`pointer-events-auto relative w-9 h-9 sm:w-10 sm:h-10 rounded-full border shadow-md backdrop-blur-md flex items-center justify-center transition-all active:scale-95 cursor-pointer ${
+                pendingOtpCount > 0
+                  ? 'bg-red-600 hover:bg-red-700 text-white border-red-200 animate-pulse'
+                  : 'bg-[#0F2438]/95 hover:bg-[#163B65] text-[#E5C887] border-[#C6A052]/80'
+              }`}
+              title={
+                pendingOtpCount > 0
+                  ? t(`أكواد OTP (${pendingOtpCount} بانتظار التفعيل)`, `OTP Codes (${pendingOtpCount} pending)`)
+                  : t('أكواد التفعيل (OTP)', 'OTP Activation Codes')
+              }
+              aria-label={t('أكواد التفعيل السريعة OTP', 'Quick OTP Codes')}
+            >
+              <KeyRound className="w-4 h-4" />
+              {pendingOtpCount > 0 && (
+                <span className="absolute -top-1 -end-1 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-black leading-none flex items-center justify-center border-2 border-white shadow-sm animate-pulse tabular-nums">
+                  {pendingOtpCount > 99 ? '99+' : pendingOtpCount}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Floating Quick Chat Widget — strictly visible ONLY to signed-in Clients, B2B Partners & Admin */}
           {(canAdminQuickChat || activeTraveler) && (() => {

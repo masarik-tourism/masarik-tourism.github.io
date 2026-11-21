@@ -69,6 +69,12 @@ import {
 } from './utils/deviceTrust';
 import { collectPendingApprovalRequests } from './utils/deviceApprovalHelpers';
 import { GlobalDeviceApprovalModal } from './components/GlobalDeviceApprovalModal';
+import { QuickOtpModal } from './components/QuickOtpModal';
+import {
+  PendingOtpSnapshotEntry,
+  findNewPendingOtpTrigger,
+  getPendingOtpClients,
+} from './utils/adminOtpHelpers';
 import {
   ChatThreadSummary,
   PendingDeviceRequest,
@@ -173,6 +179,14 @@ export const App: React.FC = () => {
     phone: string;
     nonce: number;
   } | null>(null);
+  const [adminRequestedTab, setAdminRequestedTab] = useState<{
+    tab: 'messages_otp';
+    nonce: number;
+  } | null>(null);
+  const [adminTravelers, setAdminTravelers] = useState<TravelerProfile[]>([]);
+  const [quickOtpModalOpen, setQuickOtpModalOpen] = useState(false);
+  const adminOtpSnapRef = useRef<Map<string, PendingOtpSnapshotEntry>>(new Map());
+  const adminOtpHydratedRef = useRef(false);
   const [globalDeviceApprovals, setGlobalDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
   const [dismissedGlobalReqIds, setDismissedGlobalReqIds] = useState<string[]>([]);
   const [respondingGlobalReqId, setRespondingGlobalReqId] = useState<string | null>(null);
@@ -541,10 +555,26 @@ export const App: React.FC = () => {
     prevAdminUnreadRef.current = null;
     prevAdminThreadsRef.current = null;
     prevAdminClientsSnapRef.current = null;
+    adminOtpSnapRef.current = new Map();
+    adminOtpHydratedRef.current = false;
     if (!isAdminActive) {
       setAdminChatThreads({});
+      setAdminTravelers([]);
+      setQuickOtpModalOpen(false);
       return;
     }
+
+    const initialList = Object.values(getAllTravelers());
+    setAdminTravelers(initialList);
+    if (initialList.length > 0) {
+      const initResult = findNewPendingOtpTrigger(new Map(), initialList, false);
+      adminOtpSnapRef.current = initResult.nextSnapshot;
+      adminOtpHydratedRef.current = true;
+    }
+    const hydrateTimer = window.setTimeout(() => {
+      adminOtpHydratedRef.current = true;
+    }, 2000);
+
     const unsubClients = subscribeAllClientsCloud();
     const unsubThreads = subscribeAllChatThreads((threadsMap) => {
       setAdminChatThreads(threadsMap);
@@ -582,6 +612,22 @@ export const App: React.FC = () => {
 
     const handleClientsChangeForAdminPush = () => {
       const allMap = getAllTravelers();
+      const allList = Object.values(allMap);
+      setAdminTravelers(allList);
+
+      const otpCheck = findNewPendingOtpTrigger(
+        adminOtpSnapRef.current,
+        allList,
+        adminOtpHydratedRef.current
+      );
+      adminOtpSnapRef.current = otpCheck.nextSnapshot;
+      if (!adminOtpHydratedRef.current && allList.length > 0) {
+        adminOtpHydratedRef.current = true;
+      }
+      if (otpCheck.triggeredClient) {
+        playChatNotificationChime(false);
+      }
+
       const nextSnap: Record<
         string,
         { docs: number; receipts: number; preferredVisa: string }
@@ -603,7 +649,7 @@ export const App: React.FC = () => {
         const prof = allMap[ph];
         const clientLabel = prof ? getTravelerDisplayNames(prof).fullDisplayName || ph : ph;
         if (!old) {
-          playChatNotificationChime(true);
+          playChatNotificationChime(false);
           void showBrowserPushNotification({
             title: t(`مسارك للإنجاز السياحي — عميل جديد: ${clientLabel}`, `Masarik Tourism — New Client: ${clientLabel}`),
             body: t(
@@ -620,7 +666,7 @@ export const App: React.FC = () => {
           counts.docs > old.docs ||
           (counts.preferredVisa && counts.preferredVisa !== old.preferredVisa)
         ) {
-          playChatNotificationChime(true);
+          playChatNotificationChime(false);
           void showBrowserPushNotification({
             title:
               counts.receipts > old.receipts
@@ -643,6 +689,7 @@ export const App: React.FC = () => {
     window.addEventListener(TRAVELERS_UPDATED_EVENT, handleClientsChangeForAdminPush);
 
     return () => {
+      window.clearTimeout(hydrateTimer);
       unsubClients();
       unsubThreads();
       window.removeEventListener(TRAVELERS_UPDATED_EVENT, handleClientsChangeForAdminPush);
@@ -953,6 +1000,8 @@ export const App: React.FC = () => {
     [setAdminMode]
   );
 
+  const adminPendingOtpClients = isAdminActive ? getPendingOtpClients(adminTravelers) : [];
+
   return (
     <div
       id="masarik-site-viewport"
@@ -973,6 +1022,8 @@ export const App: React.FC = () => {
         chatUnreadCount={chatUnreadCount}
         adminChatThreads={adminChatThreads}
         onOpenAdminChat={handleOpenAdminChatFromFloating}
+        pendingOtpCount={adminPendingOtpClients.length}
+        onOpenQuickOtp={() => setQuickOtpModalOpen(true)}
         onOpenPrivacyPolicy={() => setPrivacyModalOpen(true)}
       />
 
@@ -1002,6 +1053,7 @@ export const App: React.FC = () => {
           <AdminDashboardWorkspace
             requestedChat={adminRequestedChat}
             requestedFolder={adminRequestedFolder}
+            requestedTab={adminRequestedTab}
           />
         </main>
       ) : travelerSection ? (
@@ -1268,6 +1320,19 @@ export const App: React.FC = () => {
       <PrivacyPolicyModal
         isOpen={privacyModalOpen}
         onClose={() => setPrivacyModalOpen(false)}
+      />
+
+      {/* Global Quick OTP Activation Modal (Accessible by Admin from Home & All Tabs) */}
+      <QuickOtpModal
+        isOpen={quickOtpModalOpen && isAdminActive}
+        onClose={() => setQuickOtpModalOpen(false)}
+        travelers={adminTravelers}
+        pendingOtpClients={adminPendingOtpClients}
+        onOpenFullOtpTab={() => {
+          setAdminMode('dashboard');
+          setAdminRequestedTab({ tab: 'messages_otp', nonce: Date.now() });
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
       />
 
       {/* Global Centered Floating Device Approval Modal (works across all site/app tabs) */}

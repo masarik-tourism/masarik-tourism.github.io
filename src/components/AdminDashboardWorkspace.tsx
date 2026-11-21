@@ -36,6 +36,7 @@ import {
   QrCode,
   Inbox,
   MessageSquare,
+  MessageSquareText,
   Bell,
   BellRing,
   Plus,
@@ -139,7 +140,8 @@ import {
   useCmsState,
 } from '../utils/cmsStore';
 import { translateOrderStatus } from '../data/travelData';
-import { buildWhatsAppSendUrl, openWhatsApp } from '../utils/communication';
+import { buildSmsSendUrl, buildWhatsAppSendUrl, openWhatsApp } from '../utils/communication';
+import { getPendingOtpClients } from '../utils/adminOtpHelpers';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
@@ -155,11 +157,13 @@ type OrderFilter = 'all' | 'online' | 'active' | 'with_files' | 'completed';
 interface AdminDashboardWorkspaceProps {
   requestedChat?: { phone: string; nonce: number } | null;
   requestedFolder?: { phone: string; nonce: number } | null;
+  requestedTab?: { tab: DashboardTab; nonce: number } | null;
 }
 
 export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = ({
   requestedChat,
   requestedFolder,
+  requestedTab,
 }) => {
   const { lang, isAr, dir, t } = useLanguage();
   const {
@@ -438,6 +442,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setSelectedClientPhone(requestedFolder.phone);
     }
   }, [requestedFolder?.nonce]);
+
+  useEffect(() => {
+    if (!requestedTab) return;
+    setSelectedClientPhone(null);
+    setActiveTab(requestedTab.tab);
+  }, [requestedTab?.nonce]);
 
   useEffect(() => {
     setNativeBridgeToken(getNativeAndroidFcmToken());
@@ -1451,7 +1461,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     chatDirectoryClients[0] ||
     null;
 
-  const pendingOtpClients = travelers.filter((tr) => !tr.verified);
+  const pendingOtpClients = getPendingOtpClients(travelers);
   const otpQueueClients = showAllOtpClients ? travelers : pendingOtpClients;
 
   const clientMessagesAndReceipts = travelers.filter(
@@ -3924,36 +3934,65 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             {buildActivationMagicLink(client.phone, client.otp, displayName)}
                           </div>
 
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleCopyActivationMsg(client)}
-                              className="min-h-[38px] px-3 py-1.5 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
-                            >
-                              {copiedPhone === client.phone ? (
-                                <>
-                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                  <span>{t('تم النسخ!', 'Copied!')}</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3.5 h-3.5 text-[#E5C887]" />
-                                  <span>{t('نسخ رسالة الكود للواتساب', 'Copy WhatsApp Code Message')}</span>
-                                </>
-                              )}
-                            </button>
+                          {(() => {
+                            const phoneDigits =
+                              client.phoneNormalized || normalizePhone(client.phone);
+                            const activationMsg = buildAdminForwardActivationMessage(
+                              displayName,
+                              client.phone,
+                              client.otp,
+                              lang
+                            );
+                            const smsUrl = buildSmsSendUrl(phoneDigits, activationMsg);
 
-                            <button
-                              type="button"
-                              onClick={() => handleOneClickVerifyAndSendOtp(client)}
-                              className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
-                            >
-                              <Send className="w-3.5 h-3.5" />
-                              <span>{t('إرسال الكود عبر واتساب', 'Send OTP WhatsApp')}</span>
-                            </button>
-                          </div>
+                            return (
+                              <div className="space-y-2">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyActivationMsg(client)}
+                                    className="min-h-[38px] px-3 py-1.5 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                                  >
+                                    {copiedPhone === client.phone ? (
+                                      <>
+                                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                        <span>{t('تم النسخ!', 'Copied!')}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Copy className="w-3.5 h-3.5 text-[#E5C887]" />
+                                        <span>{t('نسخ رسالة الكود للواتساب', 'Copy WhatsApp Code Message')}</span>
+                                      </>
+                                    )}
+                                  </button>
 
-                          {!client.verified && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOneClickVerifyAndSendOtp(client)}
+                                    className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
+                                  >
+                                    <Send className="w-3.5 h-3.5" />
+                                    <span>{t('إرسال الكود عبر واتساب', 'Send OTP WhatsApp')}</span>
+                                  </button>
+                                </div>
+
+                                <a
+                                  href={smsUrl}
+                                  className="w-full min-h-[38px] px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
+                                >
+                                  <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
+                                  <span>
+                                    {t(
+                                      'إرسال الكود عبر رسالة نصية (SMS) 📱',
+                                      'Send OTP via SMS 📱'
+                                    )}
+                                  </span>
+                                </a>
+                              </div>
+                            );
+                          })()}
+
+                          {(!client.verified || client.accountStatus === 'pending_verification') && (
                             <button
                               type="button"
                               onClick={() => void handleAdminInstantActivate(client)}

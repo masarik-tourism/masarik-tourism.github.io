@@ -4,12 +4,13 @@ import {
   OFFICIAL_COMPANY_WHATSAPP_NUMBER,
   buildWhatsAppSendUrl,
 } from './whatsappHelpers';
+import { buildSmsSendUrl } from './adminOtpHelpers';
 
 // Unified Official Masarik Tourism WhatsApp Number (Customer Service, Orders & OTP Activation)
 export const CUSTOMER_SERVICE_WHATSAPP_NUMBER = OFFICIAL_COMPANY_WHATSAPP_NUMBER;
 export const CUSTOMER_SERVICE_PHONE_DISPLAY = '01128440008';
 
-export { buildWhatsAppSendUrl };
+export { buildSmsSendUrl, buildWhatsAppSendUrl };
 
 export function openCustomerServiceWhatsApp(message?: string): void {
   const url = buildWhatsAppSendUrl(CUSTOMER_SERVICE_WHATSAPP_NUMBER, message);
