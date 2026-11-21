@@ -1217,13 +1217,15 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       }
       setPendingApprovalReqId(res.request.requestId);
       setApprovalRequestState('waiting');
-    } catch {
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       setApprovalRequestState('error');
       setApprovalRequestError(
-        t(
-          'حدث خطأ في الاتصال أثناء إرسال طلب الموافقة. حاول مرة أخرى.',
-          'Connection error while sending approval request. Please try again.'
-        )
+        errMsg ||
+          t(
+            'حدث خطأ في الاتصال أثناء إرسال طلب الموافقة. حاول مرة أخرى.',
+            'Connection error while sending approval request. Please try again.'
+          )
       );
     } finally {
       setIsRequestingApproval(false);

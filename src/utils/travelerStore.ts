@@ -1094,6 +1094,24 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
         return;
       }
 
+      // Check if current device is recognized as trusted
+      const isCurrentlyTrusted = isDeviceInTrustedList(merged.trustedDevices, meta.deviceId);
+
+      // Rule: For trusted devices, guarantee permanent session mode (expiresAt: null) and never expire
+      if (isCurrentlyTrusted && (meta.mode !== 'trusted' || meta.expiresAt !== null)) {
+        meta.mode = 'trusted';
+        meta.expiresAt = null;
+        meta.persistInLocalStorage = true;
+        try {
+          window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
+          window.localStorage.setItem(ACTIVE_PHONE_STORAGE_KEY, normalized);
+        } catch {
+          // Ignore storage error
+        }
+        writeStoredSessionMeta(meta);
+        emitUpdateEvent();
+      }
+
       // 2. Real-time activeSessions tracking (remote kick-out, expiry sync & trust promotion)
       const cloudSessions = Array.isArray(cloudProfile.activeSessions)
         ? cloudProfile.activeSessions
@@ -1103,20 +1121,32 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
           ? cloudSessions.find((s) => s.sessionId === meta.sessionId)
           : undefined;
 
+      // If this device is NOT in trustedDevices, and its session was removed from activeSessions remotely -> log out
       if (
+        !isCurrentlyTrusted &&
         meta.sessionId &&
         meta.cloudRegistered &&
         cloudSessions !== null &&
-        Date.now() - meta.startedAt > 5000 &&
+        Date.now() - meta.startedAt > 8000 &&
         !cloudSession
       ) {
-        // Session was remotely kicked / logged out from another trusted device
         logoutTravelerSession('manual');
         return;
       }
 
+      // If this device IS trusted, but cloudSession is missing in activeSessions, re-register it automatically
+      if (isCurrentlyTrusted && !cloudSession && meta.sessionId) {
+        void upsertActiveSessionCloud(normalized, {
+          sessionId: meta.sessionId,
+          mode: 'trusted',
+          expiresAtMs: null,
+          authMethod: 'pin',
+          persistInLocalStorage: true,
+        });
+      }
+
       if (cloudSession) {
-        if (cloudSession.expiresAt) {
+        if (cloudSession.expiresAt && !isCurrentlyTrusted) {
           const cloudExpMs = Date.parse(cloudSession.expiresAt);
           if (Number.isFinite(cloudExpMs)) {
             if (Date.now() >= cloudExpMs) {
@@ -1140,7 +1170,8 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
                 ...meta,
                 mode: cloudSession.mode,
                 expiresAt: cloudExpMs,
-                persistInLocalStorage: cloudSession.mode === 'trusted' ? true : meta.persistInLocalStorage ?? true,
+                persistInLocalStorage:
+                  cloudSession.mode === 'trusted' ? true : meta.persistInLocalStorage ?? true,
                 cloudRegistered: true,
               };
               try {
@@ -1155,7 +1186,10 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
               emitUpdateEvent();
             }
           }
-        } else if (cloudSession.mode === 'trusted' && (meta.mode !== 'trusted' || meta.expiresAt !== null)) {
+        } else if (
+          (cloudSession.mode === 'trusted' || isCurrentlyTrusted) &&
+          (meta.mode !== 'trusted' || meta.expiresAt !== null)
+        ) {
           // Promoted remotely to Permanent Trusted Session
           const nextMeta: TravelerSessionMeta = {
             ...meta,
@@ -1179,8 +1213,8 @@ export function subscribeActiveTravelerCloud(phone: string | null): () => void {
       // 3. Fallback legacy revocation check when device has no sessionId registered yet
       if (
         meta.mode === 'trusted' &&
-        Date.now() - meta.startedAt > 6000 &&
-        !isDeviceInTrustedList(merged.trustedDevices, meta.deviceId)
+        Date.now() - meta.startedAt > 8000 &&
+        !isCurrentlyTrusted
       ) {
         logoutTravelerSession('manual');
       }
@@ -1287,7 +1321,26 @@ export function getTravelerSessionMeta(): TravelerSessionMeta | null {
   }
 
   if (!activePhone || meta.phone !== activePhone) return null;
-  if (meta.expiresAt && Date.now() >= meta.expiresAt) {
+
+  const all = getAllTravelers();
+  const isTrusted = isDeviceInTrustedList(all[meta.phone]?.trustedDevices, meta.deviceId);
+
+  if (isTrusted) {
+    if (meta.mode !== 'trusted' || meta.expiresAt !== null) {
+      meta.mode = 'trusted';
+      meta.expiresAt = null;
+      meta.persistInLocalStorage = true;
+      writeStoredSessionMeta(meta);
+    }
+    return meta;
+  }
+
+  // Only expire if expiresAt is a valid finite number and device is NOT trusted
+  if (
+    typeof meta.expiresAt === 'number' &&
+    Number.isFinite(meta.expiresAt) &&
+    Date.now() >= meta.expiresAt
+  ) {
     try {
       window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
@@ -1305,10 +1358,21 @@ export function getTravelerSessionMeta(): TravelerSessionMeta | null {
 export function getActivePhone(): string | null {
   if (typeof window === 'undefined') return null;
   const meta = readStoredSessionMeta();
+  const all = getAllTravelers();
+  const { deviceId } = getDeviceFingerprint();
+
   try {
     const tempPhone = window.sessionStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
     if (tempPhone) {
-      if (meta && meta.phone === tempPhone && meta.expiresAt && Date.now() >= meta.expiresAt) {
+      const isTrusted = isDeviceInTrustedList(all[tempPhone]?.trustedDevices, deviceId);
+      if (
+        !isTrusted &&
+        meta &&
+        meta.phone === tempPhone &&
+        typeof meta.expiresAt === 'number' &&
+        Number.isFinite(meta.expiresAt) &&
+        Date.now() >= meta.expiresAt
+      ) {
         window.sessionStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
         writeStoredSessionMeta(null);
         markSessionExpiredNotice();
@@ -1319,6 +1383,26 @@ export function getActivePhone(): string | null {
 
     const persistentPhone = window.localStorage.getItem(ACTIVE_PHONE_STORAGE_KEY);
     if (!persistentPhone) return null;
+
+    const isTrusted = isDeviceInTrustedList(all[persistentPhone]?.trustedDevices, deviceId);
+
+    // If device is in trusted devices for this phone, auto-heal session to trusted permanent!
+    if (isTrusted) {
+      if (
+        !meta ||
+        meta.phone !== persistentPhone ||
+        meta.mode !== 'trusted' ||
+        meta.expiresAt !== null
+      ) {
+        const healedMeta = startTravelerSession(persistentPhone, 'trusted', {
+          persistInLocalStorage: true,
+          cloudRegistered: false,
+        });
+        writeStoredSessionMeta(healedMeta);
+      }
+      return persistentPhone;
+    }
+
     if (
       !meta ||
       meta.phone !== persistentPhone ||
@@ -1327,7 +1411,12 @@ export function getActivePhone(): string | null {
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       return null;
     }
-    if (meta.expiresAt && Date.now() >= meta.expiresAt) {
+
+    if (
+      typeof meta.expiresAt === 'number' &&
+      Number.isFinite(meta.expiresAt) &&
+      Date.now() >= meta.expiresAt
+    ) {
       window.localStorage.removeItem(ACTIVE_PHONE_STORAGE_KEY);
       writeStoredSessionMeta(null);
       markSessionExpiredNotice();
@@ -2057,7 +2146,9 @@ export async function requestTrustedDeviceLoginApprovalCloud(rawPhone: string): 
       expiresAt: expiresIso,
     });
   } catch (err) {
-    console.warn('deviceApprovals create warning:', err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('deviceApprovals setDoc error:', err);
+    return { ok: false, error: errMsg };
   }
 
   // 2. Write pendingDevices & pendingLoginRequests onto clients/{phone}
@@ -2067,8 +2158,13 @@ export async function requestTrustedDeviceLoginApprovalCloud(rawPhone: string): 
       pendingDevices: nextPendingDevices,
       updatedAt: nowIso,
     });
-  } catch {
-    await syncTravelerToCloud(updated);
+  } catch (err) {
+    try {
+      await syncTravelerToCloud(updated);
+    } catch (syncErr) {
+      const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+      return { ok: false, error: errMsg };
+    }
   }
 
   // 3. Immediate Cloudflare Worker Push to all client FCM tokens
@@ -2239,8 +2335,33 @@ export async function respondToDeviceApprovalCloud(
         trustedEntry,
         ...nextTrustedDevices.filter((d) => d.deviceId !== reqDeviceId),
       ].slice(0, 15);
+
+      const approvedSession: ActiveSessionRecord = {
+        sessionId: `sess_${reqDeviceId.slice(0, 12)}_${nowMs}`,
+        deviceId: reqDeviceId,
+        deviceName: reqDeviceName.slice(0, 120),
+        mode: 'trusted',
+        loggedInAt: nowIso,
+        lastActiveAt: nowIso,
+        expiresAt: null,
+        authMethod: 'approval',
+      };
+      nextActiveSessions = buildNextActiveSessionsList(nextActiveSessions, approvedSession);
     } else if (opts.decision === 'approved_temporary') {
       nextBlockedDevices = nextBlockedDevices.filter((id) => id !== reqDeviceId);
+      const expMs = nowMs + (tempHours || 1) * 3600 * 1000;
+      const expIso = new Date(expMs).toISOString();
+      const approvedSession: ActiveSessionRecord = {
+        sessionId: `sess_${reqDeviceId.slice(0, 12)}_${nowMs}`,
+        deviceId: reqDeviceId,
+        deviceName: reqDeviceName.slice(0, 120),
+        mode: 'temporary',
+        loggedInAt: nowIso,
+        lastActiveAt: nowIso,
+        expiresAt: expIso,
+        authMethod: 'approval',
+      };
+      nextActiveSessions = buildNextActiveSessionsList(nextActiveSessions, approvedSession);
     } else if (opts.decision === 'blocked') {
       if (!nextBlockedDevices.includes(reqDeviceId)) {
         nextBlockedDevices = [reqDeviceId, ...nextBlockedDevices].slice(0, 25);
@@ -2574,10 +2695,17 @@ export async function kickActiveSessionCloud(
 
   const nowIso = new Date().toISOString();
   const prevSessions = Array.isArray(target.activeSessions) ? target.activeSessions : [];
+  const kickedSession = prevSessions.find((s) => s.sessionId === targetSessionId);
   const nextSessions = prevSessions.filter((s) => s.sessionId !== targetSessionId);
+
+  let nextTrustedDevices = Array.isArray(target.trustedDevices) ? [...target.trustedDevices] : [];
+  if (kickedSession?.deviceId) {
+    nextTrustedDevices = nextTrustedDevices.filter((d) => d.deviceId !== kickedSession.deviceId);
+  }
 
   const updated: TravelerProfile = {
     ...target,
+    trustedDevices: nextTrustedDevices,
     activeSessions: nextSessions,
     updatedAt: nowIso,
   };
@@ -2586,6 +2714,7 @@ export async function kickActiveSessionCloud(
 
   try {
     await updateDoc(doc(db, 'clients', phone), {
+      trustedDevices: nextTrustedDevices,
       activeSessions: nextSessions,
       updatedAt: nowIso,
     });

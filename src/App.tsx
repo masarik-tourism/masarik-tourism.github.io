@@ -179,14 +179,14 @@ export const App: React.FC = () => {
 
   // Notify if an earlier temporary 1-hour session had expired before page load
   useEffect(() => {
-    if (consumeSessionExpiredNotice()) {
+    if (!activeTravelerPhone && consumeSessionExpiredNotice()) {
       setSessionExpiredAlert(
         lang === 'en'
           ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
           : 'انتهت مدة الجلسة المؤقتة (ساعة واحدة) حرصاً على أمان حسابك. يرجى تسجيل الدخول مرة أخرى.'
       );
     }
-  }, [lang]);
+  }, [lang, activeTravelerPhone]);
 
   // Global real-time cloud subscriptions (site_config, cms, admins)
   useEffect(() => {
@@ -201,7 +201,7 @@ export const App: React.FC = () => {
       setActiveTraveler(nextTraveler);
       setSessionMeta(nextMeta);
 
-      if (consumeSessionExpiredNotice()) {
+      if (!nextPhone && consumeSessionExpiredNotice()) {
         setSessionExpiredAlert(
           lang === 'en'
             ? 'Your 1-hour temporary session has expired for security. Please sign in again.'
@@ -230,9 +230,17 @@ export const App: React.FC = () => {
 
   // Active Timed Session Auto-Logout Guard (handles 1h/24h/7d/30d live countdown & sleep/wake)
   useEffect(() => {
-    if (!sessionMeta || !sessionMeta.expiresAt) return;
+    if (
+      !sessionMeta ||
+      sessionMeta.mode === 'trusted' ||
+      typeof sessionMeta.expiresAt !== 'number' ||
+      !Number.isFinite(sessionMeta.expiresAt)
+    ) {
+      return;
+    }
 
     const triggerExpiry = () => {
+      if (sessionMeta.mode === 'trusted') return;
       logoutTravelerSession('expired');
       consumeSessionExpiredNotice();
       setTravelerDraft(buildDraftFromTraveler(null, lang));
@@ -255,12 +263,22 @@ export const App: React.FC = () => {
     // Cap single setTimeout safely under 2^31-1 ms (for 30-day sessions) and poll every 10s
     const safeTimeoutMs = Math.min(msRemaining + 50, 2_000_000_000);
     const timeoutId = window.setTimeout(() => {
-      if (sessionMeta.expiresAt && Date.now() >= sessionMeta.expiresAt) {
+      if (
+        sessionMeta.mode !== 'trusted' &&
+        typeof sessionMeta.expiresAt === 'number' &&
+        Number.isFinite(sessionMeta.expiresAt) &&
+        Date.now() >= sessionMeta.expiresAt
+      ) {
         triggerExpiry();
       }
     }, safeTimeoutMs);
     const intervalId = window.setInterval(() => {
-      if (sessionMeta.expiresAt && Date.now() >= sessionMeta.expiresAt) {
+      if (
+        sessionMeta.mode !== 'trusted' &&
+        typeof sessionMeta.expiresAt === 'number' &&
+        Number.isFinite(sessionMeta.expiresAt) &&
+        Date.now() >= sessionMeta.expiresAt
+      ) {
         triggerExpiry();
       }
     }, 10_000);
