@@ -70,6 +70,7 @@ import {
   isClientAccountVerified,
   resolveOtpCompanyWhatsAppNumber,
 } from './whatsappHelpers';
+import { buildAdminNewOtpPushNotification } from './adminOtpHelpers';
 
 const TRAVELERS_STORAGE_KEY = 'masarik_travelers_v1';
 const ACTIVE_PHONE_STORAGE_KEY = 'masarik_active_phone_v1';
@@ -2920,6 +2921,30 @@ export async function unblockDeviceCloud(
   return updated;
 }
 
+function notifyAdminsOfClientOtpRequest(profile: {
+  name?: string;
+  phone: string;
+  otp: string;
+}): void {
+  if (typeof window === 'undefined' || !profile.otp) return;
+  const payload = buildAdminNewOtpPushNotification({
+    name: profile.name,
+    phone: formatPhoneForDisplay(profile.phone),
+    otp: profile.otp,
+  });
+  void dispatchRemotePushNotification({
+    targetRole: 'admin',
+    targetPhone: profile.phone,
+    title: payload.title,
+    body: payload.body,
+    data: {
+      role: 'admin',
+      action: 'quick_otp',
+      phone: profile.phone,
+    },
+  });
+}
+
 /**
  * Step 1 of Zero-Leak Client Login:
  * Generates a brand-new random 6-digit OTP in Firestore (`clients/{phoneNormalized}`),
@@ -3009,6 +3034,13 @@ export async function initiateTravelerOtpLoginCloud(
     localAll[phone] = updated;
     saveAllTravelersLocalOnly(localAll);
     await syncTravelerToCloud(updated);
+    if (!existing.verified || options?.forceNew || !canKeepExistingOtp) {
+      notifyAdminsOfClientOtpRequest({
+        name: updated.name,
+        phone: updated.phone,
+        otp: updated.otp,
+      });
+    }
     return { ok: true, phone, isExisting: true, otpExpiresAt: activeExpiresAt, profile: updated };
   }
 
@@ -3035,6 +3067,11 @@ export async function initiateTravelerOtpLoginCloud(
   localAll[phone] = created;
   saveAllTravelersLocalOnly(localAll);
   await syncTravelerToCloud(created);
+  notifyAdminsOfClientOtpRequest({
+    name: created.name,
+    phone: created.phone,
+    otp: created.otp,
+  });
   return { ok: true, phone, isExisting: false, otpExpiresAt: nextExpiryIso, profile: created };
 }
 
@@ -3087,6 +3124,11 @@ export async function requestAccountSecurityOtpCloud(
   localAll[phone] = updated;
   saveAllTravelersLocalOnly(localAll);
   await syncTravelerToCloud(updated);
+  notifyAdminsOfClientOtpRequest({
+    name: updated.name,
+    phone: updated.phone,
+    otp: updated.otp,
+  });
   return { ok: true, phone, otpExpiresAt: nextExpAt };
 }
 
@@ -3710,6 +3752,13 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     all[phone] = updated;
     saveAllTravelersLocalOnly(all);
     void syncTravelerToCloud(updated);
+    if (!isVerified) {
+      notifyAdminsOfClientOtpRequest({
+        name: updated.name,
+        phone: updated.phone,
+        otp: updated.otp,
+      });
+    }
     return updated;
   }
 
@@ -3734,6 +3783,11 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
   all[phone] = created;
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(created);
+  notifyAdminsOfClientOtpRequest({
+    name: created.name,
+    phone: created.phone,
+    otp: created.otp,
+  });
   return created;
 }
 
@@ -3743,7 +3797,17 @@ export async function registerOrLoginTravelerCloud(
 ): Promise<TravelerProfile> {
   const split = splitPassportName(name);
   const created = await adminCreateClientCloud(split.firstName, split.lastName, rawPhone);
-  return created || registerOrLoginTraveler(name, rawPhone);
+  if (created) {
+    if (!isClientAccountVerified(created)) {
+      notifyAdminsOfClientOtpRequest({
+        name: created.name,
+        phone: created.phone,
+        otp: created.otp,
+      });
+    }
+    return created;
+  }
+  return registerOrLoginTraveler(name, rawPhone);
 }
 
 export function verifyManualOtp(

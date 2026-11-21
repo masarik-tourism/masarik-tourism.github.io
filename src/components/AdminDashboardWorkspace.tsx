@@ -219,7 +219,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [updatingDocStatusId, setUpdatingDocStatusId] = useState<string | null>(null);
   const [showAllOtpClients, setShowAllOtpClients] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
-  const [copiedSmsPhone, setCopiedSmsPhone] = useState<string | null>(null);
   const [newFirstName, setNewFirstName] = useState('');
   const [newLastName, setNewLastName] = useState('');
   const [newPhone, setNewPhone] = useState('');
@@ -693,21 +692,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       await navigator.clipboard.writeText(msg);
       setCopiedPhone(client.phone);
       setTimeout(() => setCopiedPhone(null), 2200);
-    } catch {
-      // Ignore clipboard permission errors
-    }
-  };
-
-  const handleCopySmsText = async (client: TravelerProfile) => {
-    const displayName = getTravelerDisplayNames(client).fullDisplayName;
-    const msg = buildAdminForwardActivationMessage(displayName, client.phone, client.otp, lang);
-    try {
-      await navigator.clipboard.writeText(msg);
-      setCopiedSmsPhone(client.phone);
-      setTimeout(
-        () => setCopiedSmsPhone((prev) => (prev === client.phone ? null : prev)),
-        2200
-      );
     } catch {
       // Ignore clipboard permission errors
     }
@@ -3962,68 +3946,48 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             const smsUrl = buildSmsSendUrl(phoneDigits, activationMsg);
 
                             return (
-                              <div className="space-y-2">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleCopyActivationMsg(client)}
-                                    className="min-h-[38px] px-3 py-1.5 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
-                                  >
-                                    {copiedPhone === client.phone ? (
-                                      <>
-                                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                        <span>{t('تم النسخ!', 'Copied!')}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Copy className="w-3.5 h-3.5 text-[#E5C887]" />
-                                        <span>{t('نسخ رسالة الكود للواتساب', 'Copy WhatsApp Code Message')}</span>
-                                      </>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyActivationMsg(client)}
+                                  className="min-h-[38px] px-3 py-1.5 bg-[#0F2438] hover:bg-[#163B65] text-white rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                                >
+                                  {copiedPhone === client.phone ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                      <span>{t('تم النسخ!', 'Copied!')}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
+                                      <span>
+                                        {t('نسخ رسالة التفعيل 📋', 'Copy Activation Message 📋')}
+                                      </span>
+                                    </>
+                                  )}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleOneClickVerifyAndSendOtp(client)}
+                                  className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
+                                >
+                                  <Send className="w-3.5 h-3.5 shrink-0" />
+                                  <span>{t('إرسال الكود عبر واتساب', 'Send OTP WhatsApp')}</span>
+                                </button>
+
+                                <a
+                                  href={smsUrl}
+                                  className="sm:col-span-2 min-h-[38px] px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
+                                >
+                                  <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
+                                  <span>
+                                    {t(
+                                      'إرسال الكود عبر رسالة نصية (SMS) 📱',
+                                      'Send OTP via SMS 📱'
                                     )}
-                                  </button>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOneClickVerifyAndSendOtp(client)}
-                                    className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
-                                  >
-                                    <Send className="w-3.5 h-3.5" />
-                                    <span>{t('إرسال الكود عبر واتساب', 'Send OTP WhatsApp')}</span>
-                                  </button>
-                                </div>
-
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  <a
-                                    href={smsUrl}
-                                    className="min-h-[38px] px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs"
-                                  >
-                                    <MessageSquareText className="w-3.5 h-3.5 shrink-0" />
-                                    <span>
-                                      {t(
-                                        'إرسال الكود عبر رسالة نصية (SMS) 📱',
-                                        'Send OTP via SMS 📱'
-                                      )}
-                                    </span>
-                                  </a>
-
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleCopySmsText(client)}
-                                    className="min-h-[38px] px-3 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-[#0F2438] rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
-                                  >
-                                    {copiedSmsPhone === client.phone ? (
-                                      <>
-                                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                        <span>{t('تم نسخ النص!', 'Text Copied!')}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Copy className="w-3.5 h-3.5 text-sky-700 shrink-0" />
-                                        <span>{t('نسخ نص الرسالة 📋', 'Copy SMS Text 📋')}</span>
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
+                                  </span>
+                                </a>
                               </div>
                             );
                           })()}

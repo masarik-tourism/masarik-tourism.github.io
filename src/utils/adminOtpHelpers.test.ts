@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { TravelerProfile } from '../types/travel';
 import {
+  buildAdminNewOtpPushNotification,
   buildPendingOtpSnapshot,
   buildSmsSendUrl,
   findNewPendingOtpTrigger,
@@ -106,3 +107,27 @@ test('findNewPendingOtpTrigger stays quiet during initial hydration and fires on
   const pass4 = findNewPendingOtpTrigger(prevWithBoth, [regeneratedClient, newClient], true);
   assert.equal(pass4.triggeredClient?.phoneNormalized, '201000000010');
 });
+
+test('buildAdminNewOtpPushNotification formats exact Arabic OTP push title and body', () => {
+  const res = buildAdminNewOtpPushNotification({
+    name: 'أحمد منصور',
+    phone: '01099887766',
+    otp: '741852',
+  });
+  assert.equal(res.title, 'طلب كود تفعيل جديد (OTP) 🔐');
+  assert.equal(
+    res.body,
+    'العميل أحمد منصور (رقم: 01099887766) سجل حساباً جديداً وبانتظار إرسال كود التفعيل: 741852.'
+  );
+
+  const fallbackRes = buildAdminNewOtpPushNotification({
+    name: '   ',
+    phone: '01128440008',
+    otp: '112233',
+  });
+  assert.equal(
+    fallbackRes.body,
+    'العميل عميل جديد (رقم: 01128440008) سجل حساباً جديداً وبانتظار إرسال كود التفعيل: 112233.'
+  );
+});
+

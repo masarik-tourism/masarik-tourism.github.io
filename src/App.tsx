@@ -72,9 +72,11 @@ import { GlobalDeviceApprovalModal } from './components/GlobalDeviceApprovalModa
 import { QuickOtpModal } from './components/QuickOtpModal';
 import {
   PendingOtpSnapshotEntry,
+  buildAdminNewOtpPushNotification,
   findNewPendingOtpTrigger,
   getPendingOtpClients,
 } from './utils/adminOtpHelpers';
+import { isClientAccountVerified } from './utils/whatsappHelpers';
 import {
   ChatThreadSummary,
   PendingDeviceRequest,
@@ -185,6 +187,7 @@ export const App: React.FC = () => {
   } | null>(null);
   const [adminTravelers, setAdminTravelers] = useState<TravelerProfile[]>([]);
   const [quickOtpModalOpen, setQuickOtpModalOpen] = useState(false);
+  const pendingAdminPushRef = useRef<PushDeepLinkPayload | null>(null);
   const adminOtpSnapRef = useRef<Map<string, PendingOtpSnapshotEntry>>(new Map());
   const adminOtpHydratedRef = useRef(false);
   const [globalDeviceApprovals, setGlobalDeviceApprovals] = useState<PendingDeviceRequest[]>([]);
@@ -650,15 +653,29 @@ export const App: React.FC = () => {
         const clientLabel = prof ? getTravelerDisplayNames(prof).fullDisplayName || ph : ph;
         if (!old) {
           playChatNotificationChime(false);
-          void showBrowserPushNotification({
-            title: t(`مسارك للإنجاز السياحي — عميل جديد: ${clientLabel}`, `Masarik Tourism — New Client: ${clientLabel}`),
-            body: t(
-              'تم تسجيل حساب أو طلب جديد — اضغط لفتح ملف العميل.',
-              'New client or order registered — tap to open client folder.'
-            ),
-            tag: `masarik-admin-folder-${ph}`,
-            data: { role: 'admin', action: 'client_folder', phone: ph },
-          });
+          if (prof && !isClientAccountVerified(prof)) {
+            const otpPush = buildAdminNewOtpPushNotification({
+              name: clientLabel,
+              phone: ph,
+              otp: prof.otp || '',
+            });
+            void showBrowserPushNotification({
+              title: otpPush.title,
+              body: otpPush.body,
+              tag: `masarik-quick-otp-${ph}`,
+              data: { role: 'admin', action: 'quick_otp', phone: ph },
+            });
+          } else {
+            void showBrowserPushNotification({
+              title: t(`مسارك للإنجاز السياحي — عميل جديد: ${clientLabel}`, `Masarik Tourism — New Client: ${clientLabel}`),
+              body: t(
+                'تم تسجيل حساب أو طلب جديد — اضغط لفتح ملف العميل.',
+                'New client or order registered — tap to open client folder.'
+              ),
+              tag: `masarik-admin-folder-${ph}`,
+              data: { role: 'admin', action: 'client_folder', phone: ph },
+            });
+          }
           break;
         }
         if (
@@ -700,14 +717,19 @@ export const App: React.FC = () => {
     (payload: PushDeepLinkPayload) => {
       if (payload.role === 'admin') {
         if (isAdminActive) {
+          pendingAdminPushRef.current = null;
           setAdminMode('dashboard');
+          if (payload.action === 'quick_otp') {
+            setAdminRequestedTab({ tab: 'messages_otp', nonce: Date.now() });
+            setQuickOtpModalOpen(true);
+          } else if (payload.action === 'client_folder' && payload.phone) {
+            setAdminRequestedFolder({ phone: payload.phone, nonce: Date.now() });
+          } else {
+            setAdminRequestedChat({ phone: payload.phone || '', nonce: Date.now() });
+          }
         } else {
+          pendingAdminPushRef.current = payload;
           openAdminLoginModal();
-        }
-        if (payload.action === 'client_folder' && payload.phone) {
-          setAdminRequestedFolder({ phone: payload.phone, nonce: Date.now() });
-        } else {
-          setAdminRequestedChat({ phone: payload.phone || '', nonce: Date.now() });
         }
         window.scrollTo({ top: 0, behavior: 'smooth' });
         return;
@@ -726,6 +748,15 @@ export const App: React.FC = () => {
     },
     [isAdminActive, openAdminLoginModal, setAdminMode]
   );
+
+  // Replay deferred Admin push navigation (e.g. Quick OTP modal) right after PIN unlock
+  useEffect(() => {
+    if (isAdminActive && pendingAdminPushRef.current) {
+      const queued = pendingAdminPushRef.current;
+      pendingAdminPushRef.current = null;
+      handlePushDeepLink(queued);
+    }
+  }, [isAdminActive, handlePushDeepLink]);
 
   // Register FCM background Service Worker, foreground message handler, and SW/custom deep-link listeners
   useEffect(() => {
@@ -843,6 +874,7 @@ export const App: React.FC = () => {
           const validActions: PushNotificationAction[] = [
             'live_chat',
             'client_folder',
+            'quick_otp',
             'chat',
             'documents',
             'orders',

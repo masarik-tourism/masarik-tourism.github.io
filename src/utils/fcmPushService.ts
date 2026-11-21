@@ -6,6 +6,7 @@ import { getSiteConfig } from './siteConfigStore';
 export type PushNotificationAction =
   | 'live_chat'
   | 'client_folder'
+  | 'quick_otp'
   | 'chat'
   | 'documents'
   | 'orders'
@@ -436,6 +437,7 @@ export function subscribeForegroundFcmMessages(
         const validActions: PushNotificationAction[] = [
           'live_chat',
           'client_folder',
+          'quick_otp',
           'chat',
           'documents',
           'orders',

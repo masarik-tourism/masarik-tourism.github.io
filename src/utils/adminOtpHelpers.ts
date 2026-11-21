@@ -99,3 +99,27 @@ export function findNewPendingOtpTrigger(
 
   return { nextSnapshot, triggeredClient: null };
 }
+
+export interface AdminOtpPushPayloadContent {
+  title: string;
+  body: string;
+}
+
+/**
+ * Formats the exact push notification title & body sent to Admins via Cloudflare Worker
+ * whenever a client registers or requests/regenerates a 6-digit OTP code.
+ */
+export function buildAdminNewOtpPushNotification(opts: {
+  name?: string | null;
+  phone: string;
+  otp: string;
+}): AdminOtpPushPayloadContent {
+  const cleanName = String(opts.name || '').trim() || 'عميل جديد';
+  const cleanPhone = String(opts.phone || '').trim();
+  const cleanOtp = String(opts.otp || '').trim();
+  return {
+    title: 'طلب كود تفعيل جديد (OTP) 🔐',
+    body: `العميل ${cleanName} (رقم: ${cleanPhone}) سجل حساباً جديداً وبانتظار إرسال كود التفعيل: ${cleanOtp}.`,
+  };
+}
+
