@@ -15,6 +15,7 @@ import {
   FileText,
   Copy,
   Check,
+  Users,
 } from 'lucide-react';
 import { PassportAiCheckResult } from '../types/travel';
 import {
@@ -894,39 +895,81 @@ I would like to proceed with reviewing my documents and completing the applicati
                       </h3>
                     </div>
 
-                    <div
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border ${
-                        aiResult.hasSixMonthsValidity
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                          : aiResult.validityStatus === 'expired' ||
-                            aiResult.validityStatus === 'warning_under_6m'
-                          ? 'bg-red-50 border-red-300 text-red-800'
-                          : 'bg-amber-50 border-amber-200 text-amber-800'
-                      }`}
-                    >
-                      {aiResult.hasSixMonthsValidity ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                      ) : (
-                        <AlertTriangle
-                          className={`w-4 h-4 ${
-                            aiResult.validityStatus === 'expired' ||
-                            aiResult.validityStatus === 'warning_under_6m'
-                              ? 'text-red-600'
-                              : 'text-amber-600'
+                    {(() => {
+                      const isVisaDoc = aiResult.detectedDocumentKind === 'saudi_visa';
+                      const todayIso = new Date().toISOString().slice(0, 10);
+                      const visaValidUntil = (aiResult.visaApplicationValidUntil || '').trim();
+                      const isVisaExpired = Boolean(
+                        isVisaDoc &&
+                        visaValidUntil &&
+                        /^\d{4}-\d{2}-\d{2}$/.test(visaValidUntil) &&
+                        visaValidUntil < todayIso
+                      );
+
+                      if (isVisaDoc) {
+                        return (
+                          <div
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border ${
+                              isVisaExpired
+                                ? 'bg-red-50 border-red-300 text-red-800'
+                                : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            }`}
+                          >
+                            {isVisaExpired ? (
+                              <AlertTriangle className="w-4 h-4 text-red-600" />
+                            ) : (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                            )}
+                            <span>
+                              {visaValidUntil
+                                ? t(
+                                    `صلاحية مستند التأشيرة للتقديم حتى: ${visaValidUntil}`,
+                                    `Visa Submission Valid Until: ${visaValidUntil}`
+                                  )
+                                : isVisaExpired
+                                ? t('مستند التأشيرة منتهي الصلاحية', 'Visa Document Expired')
+                                : t('مستند تأشيرة ساري وجاهز للتقديم', 'Valid Visa Document')}
+                            </span>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border ${
+                            aiResult.hasSixMonthsValidity
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                              : aiResult.validityStatus === 'expired' ||
+                                aiResult.validityStatus === 'warning_under_6m'
+                              ? 'bg-red-50 border-red-300 text-red-800'
+                              : 'bg-amber-50 border-amber-200 text-amber-800'
                           }`}
-                        />
-                      )}
-                      <span>
-                        {aiResult.hasSixMonthsValidity
-                          ? t(
-                              `صالح (+6 أشهر · ${aiResult.remainingDays} يوماً)`,
-                              `Valid (+6 Months · ${aiResult.remainingDays} days)`
-                            )
-                          : aiResult.validityStatus === 'expired'
-                          ? t('الجواز منتهي الصلاحية', 'Passport Expired')
-                          : t('صلاحية أقل من 6 أشهر', 'Under 6 Months Validity')}
-                      </span>
-                    </div>
+                        >
+                          {aiResult.hasSixMonthsValidity ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                          ) : (
+                            <AlertTriangle
+                              className={`w-4 h-4 ${
+                                aiResult.validityStatus === 'expired' ||
+                                aiResult.validityStatus === 'warning_under_6m'
+                                  ? 'text-red-600'
+                                  : 'text-amber-600'
+                              }`}
+                            />
+                          )}
+                          <span>
+                            {aiResult.hasSixMonthsValidity
+                              ? t(
+                                  `صالح (+6 أشهر · ${aiResult.remainingDays} يوماً)`,
+                                  `Valid (+6 Months · ${aiResult.remainingDays} days)`
+                                )
+                              : aiResult.validityStatus === 'expired'
+                              ? t('الجواز منتهي الصلاحية', 'Passport Expired')
+                              : t('صلاحية أقل من 6 أشهر', 'Under 6 Months Validity')}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Clarity Alert Banner if Blurry / Cropped / Unreadable */}
@@ -955,8 +998,60 @@ I would like to proceed with reviewing my documents and completing the applicati
                     </div>
                   )}
 
-                  {/* Prominent Red 6-Month Validity Rule Warning Banner */}
+                  {/* Prominent Validity Banner */}
                   {(() => {
+                    const todayIso = new Date().toISOString().slice(0, 10);
+                    const isVisaDoc = aiResult.detectedDocumentKind === 'saudi_visa';
+                    const visaValidUntil = (aiResult.visaApplicationValidUntil || '').trim();
+
+                    if (isVisaDoc) {
+                      const isVisaExpired = Boolean(
+                        visaValidUntil &&
+                        /^\d{4}-\d{2}-\d{2}$/.test(visaValidUntil) &&
+                        visaValidUntil < todayIso
+                      );
+                      if (isVisaExpired) {
+                        return (
+                          <div className="p-3.5 rounded-xl bg-red-50 border-2 border-red-300 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5">
+                            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                            <div>
+                              <span>
+                                {t(
+                                  'تنبيه: مستند التأشيرة / طلب الزيارة منتهي الصلاحية ولا يمكن التقديم به حالياً',
+                                  'Warning: The Visa / Visit document has expired and cannot be submitted'
+                                )}
+                              </span>
+                              {visaValidUntil && (
+                                <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                                  {t(`تاريخ انتهاء صلاحية المستند للتقديم: ${visaValidUntil}`, `Document expired on: ${visaValidUntil}`)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (visaValidUntil) {
+                        return (
+                          <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-300 text-xs sm:text-sm font-bold text-emerald-900 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                              <div>
+                                <span className="font-black text-emerald-950">
+                                  {t('صلاحية مستند التأشيرة للتقديم حتى:', 'Visa Document Valid For Submission Until:')}
+                                </span>{' '}
+                                <span className="font-black text-emerald-800 tabular-nums text-sm">{visaValidUntil}</span>
+                              </div>
+                            </div>
+                            <span className="px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[10.5px] font-black shrink-0">
+                              {t('ساري ومقبول للتقديم ✅', 'Valid For Application ✅')}
+                            </span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    }
+
+                    // STRICTLY FOR PASSPORTS: 6-month validity check
                     const validityEval = evaluatePassportValidity(aiResult.expiryDate);
                     const isUnder6Months =
                       validityEval.isUnderSixMonths ||
@@ -993,15 +1088,17 @@ I would like to proceed with reviewing my documents and completing the applicati
                   aiResult.visaDocumentNumber ||
                   aiResult.saudiSponsorId ||
                   aiResult.portOfEntry ? (
-                    <div className="space-y-2.5">
+                    <div className="space-y-3">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-black text-[#0F2438]">
-                          {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
+                          {t('بيانات التأشيرة والمستضيف المستخرجة', 'Extracted Visa & Host Details')}
                         </span>
                         <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-black text-emerald-800">
                           {t('مستند تأشيرة / زيارة سعودية', 'Saudi Visa / Visit Doc')}
                         </span>
                       </div>
+
+                      {/* Host & Application Summary Card */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
                         <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
                           <div className="min-w-0">
@@ -1023,10 +1120,11 @@ I would like to proceed with reviewing my documents and completing the applicati
                             </button>
                           )}
                         </div>
+
                         <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
                           <div className="min-w-0">
                             <span className="text-[11px] text-slate-400 block">
-                              {t('رقم الكفيل / الإقامة أو الهوية', 'Saudi Sponsor / Iqama ID')}
+                              {t('رقم سجل/إقامة المستضيف', 'Saudi Sponsor / Iqama ID')}
                             </span>
                             <span className="font-bold text-[#0F2438] tabular-nums">
                               {aiResult.saudiSponsorId || t('غير موجود', 'N/A')}
@@ -1043,23 +1141,158 @@ I would like to proceed with reviewing my documents and completing the applicati
                             </button>
                           )}
                         </div>
-                        <div className="bg-white border border-slate-200 rounded-xl p-3">
-                          <span className="text-[11px] text-slate-400 block">
-                            {t('اسم صاحب الطلب (عربي)', 'Applicant Name (AR)')}
-                          </span>
-                          <span className="font-bold text-[#0F2438]">
-                            {aiResult.applicantNameAr || t('غير موجود', 'N/A')}
-                          </span>
-                        </div>
-                        <div className="bg-white border border-slate-200 rounded-xl p-3">
-                          <span className="text-[11px] text-slate-400 block">
-                            {t('اسم صاحب الطلب (إنجليزي)', 'Applicant Name (EN)')}
-                          </span>
-                          <span className="font-bold text-[#0F2438]">
-                            {aiResult.applicantNameEn || t('غير موجود', 'N/A')}
-                          </span>
-                        </div>
+
                         <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('اسم المستضيف / صاحب الطلب', 'Host / Sponsor Name')}
+                            </span>
+                            <span className="font-bold text-[#0F2438]">
+                              {aiResult.sponsorName || aiResult.applicantNameAr || t('غير مسجل', 'N/A')}
+                            </span>
+                          </div>
+                          {(aiResult.sponsorName || aiResult.applicantNameAr) && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyValue('sponsorName', aiResult.sponsorName || aiResult.applicantNameAr || '')}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'sponsorName' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedAiKey === 'sponsorName' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('رقم جوال المستضيف', 'Host Phone')}
+                            </span>
+                            <span className="font-bold text-[#0F2438] tabular-nums">
+                              {aiResult.sponsorPhone || t('غير مسجل', 'N/A')}
+                            </span>
+                          </div>
+                          {aiResult.sponsorPhone && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyValue('sponsorPhone', aiResult.sponsorPhone || '')}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'sponsorPhone' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedAiKey === 'sponsorPhone' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="text-[11px] text-slate-400 block">
+                              {t('جهة القدوم', 'Port of Entry')}
+                            </span>
+                            <span className="font-bold text-[#0F2438]">
+                              {aiResult.portOfEntry || t('غير محدد', 'Unspecified')}
+                            </span>
+                          </div>
+                          {aiResult.portOfEntry && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyValue('portOfEntry', aiResult.portOfEntry || '')}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                            >
+                              {copiedAiKey === 'portOfEntry' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedAiKey === 'portOfEntry' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Visitors List Cards */}
+                      {Array.isArray(aiResult.visitorsList) && aiResult.visitorsList.length > 0 ? (
+                        <div className="space-y-2.5 mt-3 pt-3 border-t border-slate-200">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              <Users className="w-4 h-4 text-emerald-600" />
+                              <span className="text-xs font-black text-[#0F2438]">
+                                {t(
+                                  `بيانات المطلوبين للزيارة (${aiResult.visitorsList.length} أفراد)`,
+                                  `Required Visitors List (${aiResult.visitorsList.length} persons)`
+                                )}
+                              </span>
+                            </div>
+                            <span className="text-[10.5px] font-bold text-slate-500">
+                              {t('مستخرجة من جدول المستند', 'Extracted from document table')}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-2.5">
+                            {aiResult.visitorsList.map((visitor, idx) => (
+                              <div
+                                key={idx}
+                                className="bg-white border border-slate-200 rounded-xl p-3 shadow-xs space-y-2"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-black flex items-center justify-center">
+                                      {idx + 1}
+                                    </span>
+                                    <span className="text-xs font-black text-[#0F2438]">
+                                      {visitor.name || t('مسافر بدون اسم', 'Unnamed Traveler')}
+                                    </span>
+                                  </div>
+                                  {visitor.relationship && (
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 text-[#0F2438] text-[10.5px] font-bold">
+                                      {visitor.relationship}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                                  <div className="flex items-center justify-between gap-1.5 bg-slate-50 p-2 rounded-lg">
+                                    <div className="min-w-0">
+                                      <span className="text-slate-400 block text-[10px]">
+                                        {t('رقم الجواز', 'Passport No.')}
+                                      </span>
+                                      <span className="font-bold text-[#0F2438] tabular-nums truncate block">
+                                        {visitor.passportNumber || t('غير مسجل', 'N/A')}
+                                      </span>
+                                    </div>
+                                    {visitor.passportNumber && (
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleCopyValue(`visPass_${idx}`, visitor.passportNumber)}
+                                        className="p-1 rounded hover:bg-slate-200 text-[#0F2438] cursor-pointer shrink-0"
+                                        title={t('نسخ رقم الجواز', 'Copy Passport No')}
+                                      >
+                                        {copiedAiKey === `visPass_${idx}` ? (
+                                          <Check className="w-3 h-3 text-emerald-600" />
+                                        ) : (
+                                          <Copy className="w-3 h-3 text-slate-500" />
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="bg-slate-50 p-2 rounded-lg">
+                                    <span className="text-slate-400 block text-[10px]">
+                                      {t('جهة القدوم', 'Port of Entry')}
+                                    </span>
+                                    <span className="font-bold text-[#0F2438]">
+                                      {visitor.portOfEntry || aiResult.portOfEntry || t('غير محدد', 'Unspecified')}
+                                    </span>
+                                  </div>
+                                  <div className="bg-slate-50 p-2 rounded-lg">
+                                    <span className="text-slate-400 block text-[10px]">
+                                      {t('نوع التأشيرة', 'Visa Type')}
+                                    </span>
+                                    <span className="font-bold text-[#0F2438]">
+                                      {visitor.visaType || t('زيارة عائلية', 'Family Visit')}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-2 text-xs">
                           <div className="min-w-0">
                             <span className="text-[11px] text-slate-400 block">
                               {t('رقم الجواز المدوّن في المستند', 'Passport No. on Document')}
@@ -1088,15 +1321,7 @@ I would like to proceed with reviewing my documents and completing the applicati
                             </button>
                           )}
                         </div>
-                        <div className="bg-white border border-slate-200 rounded-xl p-3">
-                          <span className="text-[11px] text-slate-400 block">
-                            {t('جهة القدوم', 'Port of Entry')}
-                          </span>
-                          <span className="font-bold text-[#0F2438]">
-                            {aiResult.portOfEntry || t('غير محدد', 'Unspecified')}
-                          </span>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">

@@ -263,10 +263,14 @@ export interface TravelerProfile {
   nationality?: string;
   visaDocumentNumber?: string;
   saudiSponsorId?: string;
+  sponsorName?: string;
+  sponsorPhone?: string;
+  visaApplicationValidUntil?: string;
   applicantNameAr?: string;
   applicantNameEn?: string;
   documentPassportNumber?: string;
   portOfEntry?: string;
+  visitorsList?: SaudiVisaVisitor[];
   documents: TravelerDocument[];
   familyMembers?: FamilyMember[];
   issuedDocuments?: IssuedDocument[];
@@ -276,6 +280,31 @@ export interface TravelerProfile {
   fcmTokens?: string[];
   fcmUpdatedAt?: string;
   pushNotificationsEnabled?: boolean;
+}
+
+export interface SaudiVisaVisitor {
+  name: string;
+  passportNumber: string;
+  portOfEntry?: string;
+  relationship?: string;
+  visaType?: string;
+  nationality?: string;
+}
+
+export interface DailyAnalyticsRecord {
+  date: string;
+  total: number;
+  app: number;
+  web: number;
+  updatedAt?: string;
+}
+
+export interface AnalyticsSummaryTotals {
+  id: string;
+  total: number;
+  app: number;
+  web: number;
+  updatedAt?: string;
 }
 
 export type ChatSenderRole = 'admin' | 'client';
@@ -340,10 +369,14 @@ export interface PassportAiCheckResult {
   expiryDate: string;
   visaDocumentNumber?: string;
   saudiSponsorId?: string;
+  sponsorName?: string;
+  sponsorPhone?: string;
+  visaApplicationValidUntil?: string;
   applicantNameAr?: string;
   applicantNameEn?: string;
   documentPassportNumber?: string;
   portOfEntry?: string;
+  visitorsList?: SaudiVisaVisitor[];
   hasSixMonthsValidity: boolean;
   remainingDays: number;
   validityStatus: 'valid_6m' | 'warning_under_6m' | 'expired' | 'unclear';

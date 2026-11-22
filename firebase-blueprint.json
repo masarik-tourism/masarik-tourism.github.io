@@ -239,6 +239,21 @@
           "description": "Extracted Saudi host/sponsor National ID, Iqama ID, or Establishment number.",
           "maxLength": 64
         },
+        "sponsorName": {
+          "type": "string",
+          "description": "Extracted host or sponsor name from the visa/visit document.",
+          "maxLength": 200
+        },
+        "sponsorPhone": {
+          "type": "string",
+          "description": "Extracted host or sponsor phone number from the visa/visit document.",
+          "maxLength": 40
+        },
+        "visaApplicationValidUntil": {
+          "type": "string",
+          "description": "Expiration date of the Saudi visa document submission validity (YYYY-MM-DD).",
+          "maxLength": 32
+        },
         "applicantNameAr": {
           "type": "string",
           "description": "Extracted applicant Arabic name from visa/visit document.",
@@ -258,6 +273,10 @@
           "type": "string",
           "description": "Extracted arrival/consulate port of entry (e.g. Cairo, Alexandria).",
           "maxLength": 160
+        },
+        "visitorsList": {
+          "type": "array",
+          "description": "List of travelers/visitors requested in the Saudi visit visa application."
         },
         "documents": {
           "type": "array",
@@ -692,6 +711,62 @@
         "createdAt",
         "expiresAt"
       ]
+    },
+    "AnalyticsDaily": {
+      "title": "Daily Visitor Analytics",
+      "description": "Daily unique visitor analytics tracking total, app, and web counts.",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "app": {
+          "type": "number",
+          "minimum": 0
+        },
+        "web": {
+          "type": "number",
+          "minimum": 0
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["date", "total", "app", "web"]
+    },
+    "AnalyticsSummary": {
+      "title": "Overall Analytics Summary",
+      "description": "All-time visitor totals across platforms.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["totals"]
+        },
+        "total": {
+          "type": "number",
+          "minimum": 0
+        },
+        "app": {
+          "type": "number",
+          "minimum": 0
+        },
+        "web": {
+          "type": "number",
+          "minimum": 0
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "total", "app", "web"]
     }
   },
   "firestore": {
@@ -726,6 +801,14 @@
     "/chats/{phoneId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
       "description": "Subcollection of private real-time chat messages and Drive attachment references."
+    },
+    "/analytics_daily/{date}": {
+      "schema": { "$ref": "#/entities/AnalyticsDaily" },
+      "description": "Daily unique visitor tracking aggregated per calendar date."
+    },
+    "/analytics_summary/{summaryId}": {
+      "schema": { "$ref": "#/entities/AnalyticsSummary" },
+      "description": "All-time aggregate visitor counts across platforms."
     }
   }
 }

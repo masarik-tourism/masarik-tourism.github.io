@@ -85,10 +85,14 @@ service cloud.firestore {
         'nationality',
         'visaDocumentNumber',
         'saudiSponsorId',
+        'sponsorName',
+        'sponsorPhone',
+        'visaApplicationValidUntil',
         'applicantNameAr',
         'applicantNameEn',
         'documentPassportNumber',
         'portOfEntry',
+        'visitorsList',
         'documents',
         'familyMembers',
         'issuedDocuments',
@@ -156,10 +160,33 @@ service cloud.firestore {
       && isOptionalString(data, 'nationality', 100)
       && isOptionalString(data, 'visaDocumentNumber', 64)
       && isOptionalString(data, 'saudiSponsorId', 64)
+      && isOptionalString(data, 'sponsorName', 200)
+      && isOptionalString(data, 'sponsorPhone', 40)
+      && isOptionalString(data, 'visaApplicationValidUntil', 32)
       && isOptionalString(data, 'applicantNameAr', 200)
       && isOptionalString(data, 'applicantNameEn', 200)
       && isOptionalString(data, 'documentPassportNumber', 40)
       && isOptionalString(data, 'portOfEntry', 160)
+      && (
+        !('visitorsList' in data)
+        || (
+          data.visitorsList is list
+          && data.visitorsList.size() <= 30
+          && (
+            data.visitorsList.size() == 0
+            || (
+              data.visitorsList[0] is map
+              && data.visitorsList[0].name is string
+              && data.visitorsList[0].name.size() <= 200
+              && isOptionalString(data.visitorsList[0], 'passportNumber', 40)
+              && isOptionalString(data.visitorsList[0], 'portOfEntry', 160)
+              && isOptionalString(data.visitorsList[0], 'relationship', 100)
+              && isOptionalString(data.visitorsList[0], 'visaType', 100)
+              && isOptionalString(data.visitorsList[0], 'nationality', 100)
+            )
+          )
+        )
+      )
       && data.documents is list
       && data.documents.size() <= 30
       && (
@@ -601,10 +628,14 @@ service cloud.firestore {
           'nationality',
           'visaDocumentNumber',
           'saudiSponsorId',
+          'sponsorName',
+          'sponsorPhone',
+          'visaApplicationValidUntil',
           'applicantNameAr',
           'applicantNameEn',
           'documentPassportNumber',
           'portOfEntry',
+          'visitorsList',
           'documents',
           'familyMembers',
           'issuedDocuments',
@@ -930,6 +961,54 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly(['readByAdmin', 'readByClient']);
         allow delete: if isValidPhoneId(phoneId) && isValidId(messageId) && resource != null;
       }
+    }
+
+    // Validation Blueprint: AnalyticsDaily (/analytics_daily/{date})
+    function isValidAnalyticsDaily(data, date) {
+      return data.keys().hasAll(['date', 'total', 'app', 'web'])
+        && data.keys().hasOnly(['date', 'total', 'app', 'web', 'updatedAt'])
+        && data.date is string
+        && data.date == date
+        && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.total is int
+        && data.total >= 0
+        && data.app is int
+        && data.app >= 0
+        && data.web is int
+        && data.web >= 0
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    // Validation Blueprint: AnalyticsSummary (/analytics_summary/{summaryId})
+    function isValidAnalyticsSummary(data, summaryId) {
+      return data.keys().hasAll(['id', 'total', 'app', 'web'])
+        && data.keys().hasOnly(['id', 'total', 'app', 'web', 'updatedAt'])
+        && data.id is string
+        && data.id == summaryId
+        && data.id == 'totals'
+        && data.total is int
+        && data.total >= 0
+        && data.app is int
+        && data.app >= 0
+        && data.web is int
+        && data.web >= 0
+        && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    // Platform Visitor Analytics Collection
+    match /analytics_daily/{date} {
+      allow get, list: if true;
+      allow create, update: if date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && isValidAnalyticsDaily(incoming(), date);
+      allow delete: if false;
+    }
+
+    // Platform Visitor Analytics All-Time Summary
+    match /analytics_summary/{summaryId} {
+      allow get, list: if true;
+      allow create, update: if summaryId == 'totals'
+        && isValidAnalyticsSummary(incoming(), summaryId);
+      allow delete: if false;
     }
   }
 }

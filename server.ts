@@ -170,12 +170,22 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
    Set validityStatus: "valid_6m" | "warning_under_6m" | "expired" | "unclear".
 
 4. If it is a SAUDI VISA / VISIT INVITATION DOCUMENT (or contains visa fields), extract accurately:
+   - visaApplicationValidUntil: Gregorian date (YYYY-MM-DD) until which this visa document is valid for application (صلاحية هذا المستند للتقديم حتى), printed at the top/header of the document.
    - visaDocumentNumber: Document / Visa / Request Number (رقم المستند / رقم طلب الزيارة أو التأشيرة).
-   - saudiSponsorId: Saudi Sponsor / Host Iqama ID, National ID, or Establishment/Border Number (رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي).
-   - applicantNameAr: Applicant full name in Arabic (اسم صاحب الطلب / المطلوب بالزيارة بالعربية).
-   - applicantNameEn: Applicant full name in English if printed (else "").
-   - documentPassportNumber: Passport number printed on the visa/visit document (uppercase, no spaces, else "").
-   - portOfEntry: Arrival / Consulate / Embarkation port (جهة القدوم مثل القاهرة / الإسكندرية / الرياض, else "").
+   - saudiSponsorId: Saudi Sponsor / Host Iqama ID, National ID, or Establishment/Border Number (رقم سجل/إقامة المستضيف السعودي).
+   - sponsorName: Saudi Sponsor / Host full name (اسم المستضيف / صاحب الطلب).
+   - sponsorPhone: Saudi Sponsor / Host phone number if printed (رقم جوال المستضيف).
+   - applicantNameAr: Primary applicant name in Arabic (else "").
+   - applicantNameEn: Primary applicant name in English if printed (else "").
+   - documentPassportNumber: Primary applicant passport number (uppercase, no spaces, else "").
+   - portOfEntry: Primary arrival / consulate / embarkation port (جهة القدوم مثل القاهرة / الإسكندرية / الرياض, else "").
+   - visitorsList: Extract ALL persons listed in the "بيانات المطلوبين للزيارة" (List of Persons Requested for Visit) table. For each person extract:
+     * name: full name of the visitor.
+     * passportNumber: uppercase passport number.
+     * portOfEntry: arrival/consulate port (e.g. القاهرة / الإسكندرية).
+     * relationship: relation to sponsor (e.g. زوجة, ابن, ابنة, أم, أب, شقيق, etc.).
+     * visaType: visa type (e.g. زيارة عائلية, شخصية, تجارية).
+     * nationality: nationality.
    (Leave passport-specific fields empty "" if not present on the visa document, and visa fields empty "" if scanning a passport).
 
 5. Write a clear Arabic summary in summaryAr, missing/next requirements in missingRequirements, and confidenceNote.`
@@ -207,13 +217,22 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
    واحسب الأيام المتبقية من ${todayIso} وحدد hasSixMonthsValidity و validityStatus ("valid_6m" | "warning_under_6m" | "expired" | "unclear").
 
 4. عند قراءة مستند تأشيرة / زيارة سعودية، استخرج بدقة:
+   - visaApplicationValidUntil: تاريخ صلاحية مستند التأشيرة للتقديم حتى (YYYY-MM-DD) المدوّن في أعلى المستند.
    - visaDocumentNumber: رقم المستند (رقم مستند التأشيرة أو طلب الزيارة).
-   - saudiSponsorId: رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي (أو رقم المنشأة).
+   - saudiSponsorId: رقم سجل/إقامة المستضيف السعودي (أو رقم الهوية الوطنية/الإقامة).
+   - sponsorName: اسم المستضيف / صاحب الطلب بالكامل.
+   - sponsorPhone: رقم جوال المستضيف إن كان مدوّناً في المستند.
    - applicantNameAr: اسم صاحب الطلب / المطلوب بالزيارة باللغة العربية.
-   - applicantNameEn: اسم صاحب الطلب بالإنجليزية إن وجد في المستند.
+   - applicantNameEn: اسم صاحب الطلب بالإنجليزية إن وجد.
    - documentPassportNumber: رقم الجواز المدوّن داخل المستند (أحرف كبيرة بدون مسافات).
    - portOfEntry: جهة القدوم / القنصلية / مدينة الوصول (مثل: القاهرة، الإسكندرية، السويس، إلخ).
-   (اترك الحقول غير الموجودة في المستند فارغة "").
+   - visitorsList: قائمة بكافة الأشخاص الموجودين في جدول "بيانات المطلوبين للزيارة" (شخص واحد أو عدة أفراد عائلة). واستخرج لكل فرد:
+     * name: الاسم الكامل للشخص المطلوب بالزيارة.
+     * passportNumber: رقم جواز سفره بأحرف كبيرة.
+     * portOfEntry: جهة القدوم (مثل القاهرة / الإسكندرية).
+     * relationship: صلة القرابة بالمستضيف (مثل: زوجة، ابن، ابنة، أم، أب، إلخ).
+     * visaType: نوع التأشيرة (مثل: زيارة عائلية، شخصية، إلخ).
+     * nationality: الجنسية.
 
 5. اكتب ملخصاً عربياً واضحاً في summaryAr، وقائمة المتطلبات في missingRequirements، وملاحظة الثقة في confidenceNote.`;
 
@@ -249,10 +268,28 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
             expiryDate: { type: Type.STRING },
             visaDocumentNumber: { type: Type.STRING },
             saudiSponsorId: { type: Type.STRING },
+            sponsorName: { type: Type.STRING },
+            sponsorPhone: { type: Type.STRING },
+            visaApplicationValidUntil: { type: Type.STRING },
             applicantNameAr: { type: Type.STRING },
             applicantNameEn: { type: Type.STRING },
             documentPassportNumber: { type: Type.STRING },
             portOfEntry: { type: Type.STRING },
+            visitorsList: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  passportNumber: { type: Type.STRING },
+                  portOfEntry: { type: Type.STRING },
+                  relationship: { type: Type.STRING },
+                  visaType: { type: Type.STRING },
+                  nationality: { type: Type.STRING },
+                },
+                required: ['name', 'passportNumber'],
+              },
+            },
             hasSixMonthsValidity: { type: Type.BOOLEAN },
             remainingDays: { type: Type.INTEGER },
             validityStatus: { type: Type.STRING },
@@ -280,10 +317,14 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
             'expiryDate',
             'visaDocumentNumber',
             'saudiSponsorId',
+            'sponsorName',
+            'sponsorPhone',
+            'visaApplicationValidUntil',
             'applicantNameAr',
             'applicantNameEn',
             'documentPassportNumber',
             'portOfEntry',
+            'visitorsList',
             'hasSixMonthsValidity',
             'remainingDays',
             'validityStatus',
@@ -301,18 +342,50 @@ Analyze the attached file carefully (it can be an image OR a multi/single-page P
 
     const rawText = (response.text ?? '{}').trim();
     const parsed = JSON.parse(rawText) as Record<string, unknown>;
-    const evalResult = evaluatePassportValidity(String(parsed.expiryDate || ''));
-    if (evalResult.isValidFormat && evalResult.remainingDays !== null) {
-      parsed.remainingDays = evalResult.remainingDays;
-      parsed.hasSixMonthsValidity = !evalResult.isUnderSixMonths;
-      parsed.validityStatus = evalResult.isExpired
-        ? 'expired'
-        : evalResult.isUnderSixMonths
-        ? 'warning_under_6m'
-        : 'valid_6m';
-    } else if (parsed.detectedDocumentKind === 'saudi_visa') {
-      parsed.validityStatus = 'unclear';
+
+    const isSaudiVisa = parsed.detectedDocumentKind === 'saudi_visa';
+    if (isSaudiVisa) {
+      // 1. 6-Month passport validity rule NEVER applies to Saudi Visa / Visit documents
       parsed.hasSixMonthsValidity = true;
+      // 2. Validate visa application valid until date
+      const validUntil = String(parsed.visaApplicationValidUntil || '').trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(validUntil)) {
+        if (validUntil < todayIso) {
+          parsed.validityStatus = 'expired';
+          parsed.hasSixMonthsValidity = false;
+        } else {
+          parsed.validityStatus = 'valid_6m';
+          parsed.hasSixMonthsValidity = true;
+        }
+      } else {
+        parsed.validityStatus = 'unclear';
+      }
+
+      // 3. Fallback compatibility for primary applicant fields from visitorsList
+      const vList = Array.isArray(parsed.visitorsList) ? (parsed.visitorsList as Array<Record<string, unknown>>) : [];
+      if (vList.length > 0) {
+        if (!parsed.applicantNameAr && vList[0]?.name) {
+          parsed.applicantNameAr = String(vList[0].name);
+        }
+        if (!parsed.documentPassportNumber && vList[0]?.passportNumber) {
+          parsed.documentPassportNumber = String(vList[0].passportNumber);
+        }
+        if (!parsed.portOfEntry && vList[0]?.portOfEntry) {
+          parsed.portOfEntry = String(vList[0].portOfEntry);
+        }
+      }
+    } else {
+      // 4. For passports: apply standard 6-month validity check
+      const evalResult = evaluatePassportValidity(String(parsed.expiryDate || ''));
+      if (evalResult.isValidFormat && evalResult.remainingDays !== null) {
+        parsed.remainingDays = evalResult.remainingDays;
+        parsed.hasSixMonthsValidity = !evalResult.isUnderSixMonths;
+        parsed.validityStatus = evalResult.isExpired
+          ? 'expired'
+          : evalResult.isUnderSixMonths
+          ? 'warning_under_6m'
+          : 'valid_6m';
+      }
     }
     res.json({ result: parsed });
   } catch (err: unknown) {

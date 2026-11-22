@@ -1735,10 +1735,14 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
 
       const visaDocNo = (extracted.visaDocumentNumber || '').trim();
       const sponsorId = (extracted.saudiSponsorId || '').trim();
+      const sponsorName = (extracted.sponsorName || '').trim();
+      const sponsorPhone = (extracted.sponsorPhone || '').trim();
+      const visaValidUntil = (extracted.visaApplicationValidUntil || '').trim();
       const appNameAr = (extracted.applicantNameAr || '').trim();
       const appNameEn = (extracted.applicantNameEn || '').trim();
       const docPassNo = (extracted.documentPassportNumber || '').trim().toUpperCase();
       const portEntry = (extracted.portOfEntry || '').trim();
+      const visitors = Array.isArray(extracted.visitorsList) ? extracted.visitorsList : [];
 
       const passportPatch: Partial<TravelerProfileDraft> =
         !isSaudiVisaDoc || cleanPassportNo || cleanExpiryDate
@@ -1760,10 +1764,14 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       const visaPatch: Partial<TravelerProfileDraft> = {
         ...(visaDocNo ? { visaDocumentNumber: visaDocNo } : {}),
         ...(sponsorId ? { saudiSponsorId: sponsorId } : {}),
+        ...(sponsorName ? { sponsorName } : {}),
+        ...(sponsorPhone ? { sponsorPhone } : {}),
+        ...(visaValidUntil ? { visaApplicationValidUntil: visaValidUntil } : {}),
         ...(appNameAr ? { applicantNameAr: appNameAr } : {}),
         ...(appNameEn ? { applicantNameEn: appNameEn } : {}),
         ...(docPassNo ? { documentPassportNumber: docPassNo } : {}),
         ...(portEntry ? { portOfEntry: portEntry } : {}),
+        ...(visitors.length > 0 ? { visitorsList: visitors } : {}),
       };
 
       const combinedPatch = { ...passportPatch, ...visaPatch };
@@ -3794,8 +3802,10 @@ Please advise on the next steps for my application.`
           </div>
         )}
 
-        {evaluatePassportValidity(draft.passportExpiryDate || activeTraveler.passportExpiryDate)
-          .isUnderSixMonths && (
+        {/* Passport 6-Month Validity Warning Banner - ONLY when passportExpiryDate is present */}
+        {(draft.passportExpiryDate || activeTraveler.passportExpiryDate) &&
+          evaluatePassportValidity(draft.passportExpiryDate || activeTraveler.passportExpiryDate)
+            .isUnderSixMonths && (
           <div className="p-3.5 rounded-2xl border-2 border-red-300 bg-red-50 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5 shadow-xs">
             <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
             <div>
@@ -3824,6 +3834,50 @@ Please advise on the next steps for my application.`
             </div>
           </div>
         )}
+
+        {/* Saudi Visa Application Validity Banner */}
+        {(() => {
+          const visaValidUntil = (draft.visaApplicationValidUntil || activeTraveler.visaApplicationValidUntil || '').trim();
+          if (!visaValidUntil || !/^\d{4}-\d{2}-\d{2}$/.test(visaValidUntil)) return null;
+          const todayIso = new Date().toISOString().slice(0, 10);
+          const isExpired = visaValidUntil < todayIso;
+
+          if (isExpired) {
+            return (
+              <div className="p-3.5 rounded-2xl border-2 border-red-300 bg-red-50 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5 shadow-xs">
+                <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <span>
+                    {t(
+                      'تنبيه: مستند التأشيرة / طلب الزيارة منتهي الصلاحية ولا يمكن التقديم به حالياً',
+                      'Warning: Visa / Visit document has expired and cannot be submitted'
+                    )}
+                  </span>
+                  <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                    {t(`تاريخ انتهاء صلاحية المستند للتقديم: ${visaValidUntil}`, `Document expired on: ${visaValidUntil}`)}
+                  </span>
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div className="p-3.5 rounded-2xl border border-emerald-300 bg-emerald-50 text-xs sm:text-sm font-bold text-emerald-900 flex items-center justify-between gap-2 shadow-xs">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <span className="font-black text-emerald-950">
+                    {t('صلاحية مستند التأشيرة للتقديم حتى:', 'Visa Document Valid For Submission Until:')}
+                  </span>{' '}
+                  <span className="font-black text-emerald-800 tabular-nums text-sm">{visaValidUntil}</span>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[10.5px] font-black shrink-0">
+                {t('ساري ومقبول للتقديم ✅', 'Valid For Application ✅')}
+              </span>
+            </div>
+          );
+        })()}
 
         {/* SUB-TAB 1: ACCOUNT INFO & MANDATORY PASSPORT / AVATAR */}
         {subTab === 'account' && (
@@ -4451,7 +4505,7 @@ Please advise on the next steps for my application.`
 
                     <div>
                       <label className="block font-bold text-[#0F2438] mb-1">
-                        {t('رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي', 'Saudi Sponsor / Host Iqama or ID')}
+                        {t('رقم سجل/إقامة المستضيف السعودي', 'Saudi Sponsor / Host Iqama or ID')}
                       </label>
                       <div className="flex items-center gap-1.5">
                         <input
@@ -4486,38 +4540,174 @@ Please advise on the next steps for my application.`
 
                     <div>
                       <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('اسم المستضيف / صاحب الطلب', 'Host / Sponsor Full Name')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.sponsorName}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              sponsorName: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder={t('اسم الكفيل أو المستضيف', 'Host / Sponsor Name')}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.sponsorName && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('sponsorName', draft.sponsorName)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'sponsorName' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'sponsorName' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('رقم جوال المستضيف', 'Host Phone Number')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.sponsorPhone}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              sponsorPhone: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder="05xxxxxxxx / 9665xxxxxxxx"
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.sponsorPhone && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('sponsorPhone', draft.sponsorPhone)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'sponsorPhone' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'sponsorPhone' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
+                        {t('صلاحية مستند التأشيرة للتقديم حتى', 'Visa Submission Valid Until')}
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="date"
+                          value={draft.visaApplicationValidUntil}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              visaApplicationValidUntil: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.visaApplicationValidUntil && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('visaValidUntil', draft.visaApplicationValidUntil)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'visaValidUntil' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'visaValidUntil' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-[#0F2438] mb-1">
                         {t('اسم صاحب الطلب بالعربية', 'Applicant Name (Arabic)')}
                       </label>
-                      <input
-                        type="text"
-                        value={draft.applicantNameAr}
-                        onChange={(e) =>
-                          onUpdateDraft((prev) => ({
-                            ...prev,
-                            applicantNameAr: e.target.value,
-                            isDirty: true,
-                          }))
-                        }
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.applicantNameAr}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              applicantNameAr: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.applicantNameAr && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('appNameAr', draft.applicantNameAr)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'appNameAr' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'appNameAr' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     <div>
                       <label className="block font-bold text-[#0F2438] mb-1">
                         {t('اسم صاحب الطلب بالإنجليزية', 'Applicant Name (English)')}
                       </label>
-                      <input
-                        type="text"
-                        value={draft.applicantNameEn}
-                        onChange={(e) =>
-                          onUpdateDraft((prev) => ({
-                            ...prev,
-                            applicantNameEn: e.target.value,
-                            isDirty: true,
-                          }))
-                        }
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.applicantNameEn}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              applicantNameEn: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.applicantNameEn && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('appNameEn', draft.applicantNameEn)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'appNameEn' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'appNameEn' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     <div>
@@ -4563,21 +4753,130 @@ Please advise on the next steps for my application.`
                       <label className="block font-bold text-[#0F2438] mb-1">
                         {t('جهة القدوم', 'Port of Entry')}
                       </label>
-                      <input
-                        type="text"
-                        value={draft.portOfEntry}
-                        onChange={(e) =>
-                          onUpdateDraft((prev) => ({
-                            ...prev,
-                            portOfEntry: e.target.value,
-                            isDirty: true,
-                          }))
-                        }
-                        placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          value={draft.portOfEntry}
+                          onChange={(e) =>
+                            onUpdateDraft((prev) => ({
+                              ...prev,
+                              portOfEntry: e.target.value,
+                              isDirty: true,
+                            }))
+                          }
+                          placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                        />
+                        {draft.portOfEntry && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFieldValue('portOfEntry', draft.portOfEntry)}
+                            className="min-h-[38px] px-2.5 rounded-xl border border-[#C6A052]/50 bg-white hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black flex items-center gap-1 cursor-pointer shrink-0"
+                          >
+                            {copiedFieldKey === 'portOfEntry' ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            )}
+                            <span>{copiedFieldKey === 'portOfEntry' ? t('تم النسخ', 'Copied') : t('نسخ', 'Copy')}</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
+
+                  {/* Visitors List Table / Cards */}
+                  {(() => {
+                    const visitors = (draft.visitorsList && draft.visitorsList.length > 0)
+                      ? draft.visitorsList
+                      : (activeTraveler.visitorsList || []);
+                    if (!visitors || visitors.length === 0) return null;
+                    return (
+                      <div className="space-y-3 mt-4 pt-4 border-t border-slate-200">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Users className="w-4 h-4 text-emerald-600" />
+                            <span className="text-xs font-black text-[#0F2438]">
+                              {t(
+                                `بيانات المطلوبين للزيارة (${visitors.length} أفراد)`,
+                                `Required Visitors (${visitors.length} persons)`
+                              )}
+                            </span>
+                          </div>
+                          <span className="text-[10.5px] font-bold text-slate-500">
+                            {t('مستخرجة من جدول المستند بالذكاء الاصطناعي', 'AI-extracted from document table')}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {visitors.map((visitor, idx) => (
+                            <div
+                              key={idx}
+                              className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                                <div className="flex items-center gap-2">
+                                  <span className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-black flex items-center justify-center">
+                                    {idx + 1}
+                                  </span>
+                                  <span className="text-xs font-black text-[#0F2438]">
+                                    {visitor.name || t('مسافر بدون اسم', 'Unnamed Traveler')}
+                                  </span>
+                                </div>
+                                {visitor.relationship && (
+                                  <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-[#0F2438] text-[10.5px] font-bold">
+                                    {visitor.relationship}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                                <div className="flex items-center justify-between gap-1.5 bg-white border border-slate-200 p-2 rounded-lg">
+                                  <div className="min-w-0">
+                                    <span className="text-slate-400 block text-[10px]">
+                                      {t('رقم الجواز', 'Passport No.')}
+                                    </span>
+                                    <span className="font-bold text-[#0F2438] tabular-nums truncate block">
+                                      {visitor.passportNumber || t('غير مسجل', 'N/A')}
+                                    </span>
+                                  </div>
+                                  {visitor.passportNumber && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleCopyFieldValue(`visPass_${idx}`, visitor.passportNumber)}
+                                      className="p-1 rounded hover:bg-slate-100 text-[#0F2438] cursor-pointer shrink-0"
+                                      title={t('نسخ رقم الجواز', 'Copy Passport No')}
+                                    >
+                                      {copiedFieldKey === `visPass_${idx}` ? (
+                                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                      ) : (
+                                        <Copy className="w-3.5 h-3.5 text-slate-500" />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="bg-white border border-slate-200 p-2 rounded-lg">
+                                  <span className="text-slate-400 block text-[10px]">
+                                    {t('جهة القدوم', 'Port of Entry')}
+                                  </span>
+                                  <span className="font-bold text-[#0F2438]">
+                                    {visitor.portOfEntry || draft.portOfEntry || t('غير محدد', 'Unspecified')}
+                                  </span>
+                                </div>
+                                <div className="bg-white border border-slate-200 p-2 rounded-lg">
+                                  <span className="text-slate-400 block text-[10px]">
+                                    {t('نوع التأشيرة', 'Visa Type')}
+                                  </span>
+                                  <span className="font-bold text-[#0F2438]">
+                                    {visitor.visaType || t('زيارة عائلية', 'Family Visit')}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Action Bar: Save Data / Cancel Draft */}

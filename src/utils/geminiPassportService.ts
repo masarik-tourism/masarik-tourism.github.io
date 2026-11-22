@@ -52,7 +52,6 @@ function inferDetectedKind(raw: PassportAiCheckResult): DetectedDocumentKind {
 }
 
 function normalizePassportAiResult(raw: PassportAiCheckResult): PassportAiCheckResult {
-  const evalResult = evaluatePassportValidity(raw.expiryDate);
   const clarityStatus: DocumentClarityStatus =
     raw.clarityStatus === 'blurry' ||
     raw.clarityStatus === 'cropped' ||
@@ -66,6 +65,19 @@ function normalizePassportAiResult(raw: PassportAiCheckResult): PassportAiCheckR
   const cleanFullName = (raw.fullName || passportFullNameEn || passportFullNameAr).trim();
   const cleanDocPassportNo = (raw.documentPassportNumber || '').trim().toUpperCase();
   const cleanPassportNo = (raw.passportNumber || '').trim().toUpperCase();
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  const rawVisitors = Array.isArray(raw.visitorsList) ? raw.visitorsList : [];
+  const visitorsList = rawVisitors.map((v) => ({
+    name: String(v.name || '').trim(),
+    passportNumber: String(v.passportNumber || '').trim().toUpperCase(),
+    portOfEntry: String(v.portOfEntry || '').trim(),
+    relationship: String(v.relationship || '').trim(),
+    visaType: String(v.visaType || '').trim(),
+    nationality: String(v.nationality || '').trim(),
+  }));
+
+  const cleanVisaValidUntil = normalizeIsoDate(raw.visaApplicationValidUntil);
 
   const baseNormalized: PassportAiCheckResult = {
     ...raw,
@@ -80,14 +92,43 @@ function normalizePassportAiResult(raw: PassportAiCheckResult): PassportAiCheckR
     expiryDate: normalizeIsoDate(raw.expiryDate) || (raw.expiryDate || '').trim(),
     visaDocumentNumber: (raw.visaDocumentNumber || '').trim(),
     saudiSponsorId: (raw.saudiSponsorId || '').trim(),
-    applicantNameAr: (raw.applicantNameAr || '').trim(),
+    sponsorName: (raw.sponsorName || '').trim(),
+    sponsorPhone: (raw.sponsorPhone || '').trim(),
+    visaApplicationValidUntil: cleanVisaValidUntil,
+    applicantNameAr: (raw.applicantNameAr || (visitorsList[0]?.name ?? '')).trim(),
     applicantNameEn: (raw.applicantNameEn || '').trim(),
-    documentPassportNumber: cleanDocPassportNo,
-    portOfEntry: (raw.portOfEntry || '').trim(),
+    documentPassportNumber: (cleanDocPassportNo || (visitorsList[0]?.passportNumber ?? '')).trim().toUpperCase(),
+    portOfEntry: (raw.portOfEntry || (visitorsList[0]?.portOfEntry ?? '')).trim(),
+    visitorsList,
     clarityStatus,
     isReadable: raw.isReadable !== false,
   };
 
+  if (detectedDocumentKind === 'saudi_visa') {
+    // Saudi visa application validity check (never passport 6-month rule)
+    if (cleanVisaValidUntil) {
+      if (cleanVisaValidUntil < todayIso) {
+        return {
+          ...baseNormalized,
+          hasSixMonthsValidity: false,
+          validityStatus: 'expired',
+        };
+      }
+      return {
+        ...baseNormalized,
+        hasSixMonthsValidity: true,
+        validityStatus: 'valid_6m',
+      };
+    }
+    return {
+      ...baseNormalized,
+      hasSixMonthsValidity: true,
+      validityStatus: 'unclear',
+    };
+  }
+
+  // Passport 6-month validity check
+  const evalResult = evaluatePassportValidity(raw.expiryDate);
   if (evalResult.isValidFormat && evalResult.remainingDays !== null) {
     return {
       ...baseNormalized,
@@ -195,12 +236,22 @@ Analyze the attached file carefully (image or PDF):
    Check 6-month (180+ days) validity from ${todayIso}.
 
 4. Saudi Visa / Visit Invitation fields (extract when it is a Saudi visa/visit document, else ""):
+   - visaApplicationValidUntil: The "صلاحية هذا المستند للتقديم حتى: YYYY-MM-DD" date printed at the top of the document.
    - visaDocumentNumber (Document / Visa / Application Number)
    - saudiSponsorId (Saudi Host/Sponsor Iqama ID, National ID, or Establishment number)
-   - applicantNameAr (Applicant name in Arabic)
-   - applicantNameEn (Applicant name in English)
-   - documentPassportNumber (Passport number printed in the visa document, uppercase)
-   - portOfEntry (Arrival port / Consulate / City e.g. Cairo, Alexandria)
+   - sponsorName: Full name of the host/sponsor/applicant requester
+   - sponsorPhone: Host phone number if printed, else ""
+   - applicantNameAr: Applicant name in Arabic
+   - applicantNameEn: Applicant name in English if present
+   - documentPassportNumber: Passport number printed in the visa document, uppercase
+   - portOfEntry: Arrival port / Consulate / City e.g. Cairo, Alexandria
+   - visitorsList: Array of ALL individuals listed in the "بيانات المطلوبين للزيارة" table (one or entire family). Extract for each:
+     * name: Full name of visitor
+     * passportNumber: Passport number (uppercase, no spaces)
+     * portOfEntry: Port of entry / consulate
+     * relationship: Relationship to sponsor (e.g., زوجة, ابن, ابنة, أم, أب)
+     * visaType: Visa type (e.g. زيارة عائلية)
+     * nationality: Nationality
 
 5. Set validityStatus, summaryAr, missingRequirements, and confidenceNote.`
     : `أنت خبير تحليل جوازات السفر ومستندات التأشيرات والزيارات السعودية في شركة "مسارك للإنجاز السياحي".
@@ -228,12 +279,22 @@ Analyze the attached file carefully (image or PDF):
    تحقق من شرط صلاحية الـ 6 أشهر (180 يوماً) من ${todayIso}.
 
 4. استخراج بيانات مستند التأشيرة / الزيارة السعودية (إن كان مستند تأشيرة أو زيارة، وإلا ""):
+   - visaApplicationValidUntil: تاريخ "صلاحية هذا المستند للتقديم حتى" المدوّن في أعلى المستند بصيغة YYYY-MM-DD.
    - visaDocumentNumber: رقم المستند (رقم مستند التأشيرة أو طلب الزيارة).
-   - saudiSponsorId: رقم الكفيل / رقم إقامة أو هوية المستضيف السعودي.
-   - applicantNameAr: اسم صاحب الطلب بالعربية.
-   - applicantNameEn: اسم صاحب الطلب بالإنجليزية.
+   - saudiSponsorId: رقم سجل/إقامة المستضيف السعودي (رقم الهوية أو الإقامة).
+   - sponsorName: اسم المستضيف / صاحب الطلب بالكامل.
+   - sponsorPhone: رقم جوال المستضيف إن وجد.
+   - applicantNameAr: اسم المطلوب للزيارة بالعربية.
+   - applicantNameEn: اسم المطلوب للزيارة بالإنجليزية إن وجد.
    - documentPassportNumber: رقم الجواز المدوّن في المستند.
    - portOfEntry: جهة القدوم (مثل القاهرة / الإسكندرية / إلخ).
+   - visitorsList: قائمة بكافة الأشخاص المطلوبين للزيارة في جدول "بيانات المطلوبين للزيارة" (سواء فرد واحد أو عدة أفراد). واستخرج لكل فرد:
+     * name: الاسم الكامل.
+     * passportNumber: رقم الجواز.
+     * portOfEntry: جهة القدوم.
+     * relationship: صلة القرابة (زوجة، ابن، إلخ).
+     * visaType: نوع التأشيرة.
+     * nationality: الجنسية.
 
 5. حدد validityStatus و summaryAr و missingRequirements و confidenceNote.`;
 
@@ -274,10 +335,28 @@ Analyze the attached file carefully (image or PDF):
           expiryDate: { type: 'STRING' },
           visaDocumentNumber: { type: 'STRING' },
           saudiSponsorId: { type: 'STRING' },
+          sponsorName: { type: 'STRING' },
+          sponsorPhone: { type: 'STRING' },
+          visaApplicationValidUntil: { type: 'STRING' },
           applicantNameAr: { type: 'STRING' },
           applicantNameEn: { type: 'STRING' },
           documentPassportNumber: { type: 'STRING' },
           portOfEntry: { type: 'STRING' },
+          visitorsList: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                name: { type: 'STRING' },
+                passportNumber: { type: 'STRING' },
+                portOfEntry: { type: 'STRING' },
+                relationship: { type: 'STRING' },
+                visaType: { type: 'STRING' },
+                nationality: { type: 'STRING' },
+              },
+              required: ['name', 'passportNumber'],
+            },
+          },
           hasSixMonthsValidity: { type: 'BOOLEAN' },
           remainingDays: { type: 'INTEGER' },
           validityStatus: { type: 'STRING' },
@@ -302,10 +381,14 @@ Analyze the attached file carefully (image or PDF):
           'expiryDate',
           'visaDocumentNumber',
           'saudiSponsorId',
+          'sponsorName',
+          'sponsorPhone',
+          'visaApplicationValidUntil',
           'applicantNameAr',
           'applicantNameEn',
           'documentPassportNumber',
           'portOfEntry',
+          'visitorsList',
           'hasSixMonthsValidity',
           'remainingDays',
           'validityStatus',

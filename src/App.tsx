@@ -81,6 +81,7 @@ import { getSiteConfig, subscribeSiteConfigCloud, useSiteConfig } from './utils/
 import { subscribeCmsCloud } from './utils/cmsStore';
 import { saveAdminFcmTokenCloud, subscribeAdminsCloud } from './utils/adminAuthStore';
 import { useAdmin } from './contexts/AdminContext';
+import { recordUniqueDailyVisit } from './utils/analyticsStore';
 
 function buildDraftFromTraveler(
   traveler: TravelerProfile | null,
@@ -102,10 +103,14 @@ function buildDraftFromTraveler(
         lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية',
       visaDocumentNumber: '',
       saudiSponsorId: '',
+      sponsorName: '',
+      sponsorPhone: '',
+      visaApplicationValidUntil: '',
       applicantNameAr: '',
       applicantNameEn: '',
       documentPassportNumber: '',
       portOfEntry: '',
+      visitorsList: [],
       pendingAvatarPreviewUrl: '',
       pendingDocuments: [],
       removedDocIds: [],
@@ -129,10 +134,14 @@ function buildDraftFromTraveler(
       (lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية'),
     visaDocumentNumber: traveler.visaDocumentNumber || '',
     saudiSponsorId: traveler.saudiSponsorId || '',
+    sponsorName: traveler.sponsorName || '',
+    sponsorPhone: traveler.sponsorPhone || '',
+    visaApplicationValidUntil: traveler.visaApplicationValidUntil || '',
     applicantNameAr: traveler.applicantNameAr || '',
     applicantNameEn: traveler.applicantNameEn || '',
     documentPassportNumber: traveler.documentPassportNumber || '',
     portOfEntry: traveler.portOfEntry || '',
+    visitorsList: traveler.visitorsList || [],
     pendingAvatarPreviewUrl: '',
     pendingDocuments: [],
     removedDocIds: [],
@@ -204,6 +213,7 @@ export const App: React.FC = () => {
 
   // Restore OTP hold screen automatically if client registered as pending_verification and reopened the page
   useEffect(() => {
+    void recordUniqueDailyVisit();
     if (!getActivePhone() && getPendingVerificationPhone()) {
       setTravelerSection((curr) => curr || 'account');
     }

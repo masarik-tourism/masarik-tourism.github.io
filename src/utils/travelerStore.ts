@@ -27,6 +27,7 @@ import {
   PendingDeviceRequest,
   PendingLoginRequest,
   PublicOrderStatusSummary,
+  SaudiVisaVisitor,
   TravelerDocument,
   TravelerProfile,
   TravelerSessionMeta,
@@ -258,10 +259,14 @@ export interface TravelerProfileDraft {
   preferredVisaType: string;
   visaDocumentNumber: string;
   saudiSponsorId: string;
+  sponsorName: string;
+  sponsorPhone: string;
+  visaApplicationValidUntil: string;
   applicantNameAr: string;
   applicantNameEn: string;
   documentPassportNumber: string;
   portOfEntry: string;
+  visitorsList: SaudiVisaVisitor[];
   pendingAvatarPreviewUrl: string;
   pendingDocuments: StagedDraftDocument[];
   removedDocIds: string[];
@@ -774,6 +779,12 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     payload.visaDocumentNumber = String(profile.visaDocumentNumber).trim().slice(0, 64);
   if (profile.saudiSponsorId !== undefined)
     payload.saudiSponsorId = String(profile.saudiSponsorId).trim().slice(0, 64);
+  if (profile.sponsorName !== undefined)
+    payload.sponsorName = String(profile.sponsorName).trim().slice(0, 200);
+  if (profile.sponsorPhone !== undefined)
+    payload.sponsorPhone = String(profile.sponsorPhone).trim().slice(0, 40);
+  if (profile.visaApplicationValidUntil !== undefined)
+    payload.visaApplicationValidUntil = String(profile.visaApplicationValidUntil).trim().slice(0, 32);
   if (profile.applicantNameAr !== undefined)
     payload.applicantNameAr = String(profile.applicantNameAr).slice(0, 200);
   if (profile.applicantNameEn !== undefined)
@@ -785,6 +796,16 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       .slice(0, 40);
   if (profile.portOfEntry !== undefined)
     payload.portOfEntry = String(profile.portOfEntry).slice(0, 160);
+  if (Array.isArray(profile.visitorsList)) {
+    payload.visitorsList = profile.visitorsList.slice(0, 30).map((v) => ({
+      name: String(v.name || '').trim().slice(0, 200),
+      ...(v.passportNumber ? { passportNumber: String(v.passportNumber).trim().toUpperCase().slice(0, 40) } : {}),
+      ...(v.portOfEntry ? { portOfEntry: String(v.portOfEntry).trim().slice(0, 160) } : {}),
+      ...(v.relationship ? { relationship: String(v.relationship).trim().slice(0, 100) } : {}),
+      ...(v.visaType ? { visaType: String(v.visaType).trim().slice(0, 100) } : {}),
+      ...(v.nationality ? { nationality: String(v.nationality).trim().slice(0, 100) } : {}),
+    }));
+  }
   if (profile.avatarUrl && profile.avatarUrl.length <= 4096) {
     payload.avatarUrl = profile.avatarUrl;
   }
@@ -5188,10 +5209,14 @@ export async function commitTravelerProfileDraftCloud(
     preferredVisaType: draft.preferredVisaType.trim(),
     visaDocumentNumber: draft.visaDocumentNumber.trim(),
     saudiSponsorId: draft.saudiSponsorId.trim(),
+    sponsorName: draft.sponsorName.trim(),
+    sponsorPhone: draft.sponsorPhone.trim(),
+    visaApplicationValidUntil: draft.visaApplicationValidUntil.trim(),
     applicantNameAr: draft.applicantNameAr.trim(),
     applicantNameEn: draft.applicantNameEn.trim(),
     documentPassportNumber: draft.documentPassportNumber.trim().toUpperCase(),
     portOfEntry: draft.portOfEntry.trim(),
+    visitorsList: draft.visitorsList || [],
     ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
     ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
     ...(typeof nextAvatarSizeBytes === 'number' ? { avatarSizeBytes: nextAvatarSizeBytes } : {}),
