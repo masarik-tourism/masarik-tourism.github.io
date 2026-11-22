@@ -46,7 +46,10 @@ import {
   LayoutDashboard,
   EyeOff,
   Upload,
+  TrendingUp,
+  BarChart3,
 } from 'lucide-react';
+import { subscribePlatformAnalytics, AnalyticsDashboardState } from '../utils/analyticsStore';
 import {
   AdminPermission,
   AppointmentDetails,
@@ -246,6 +249,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [newFirstName, setNewFirstName] = useState('');
   const [newLastName, setNewLastName] = useState('');
   const [newPhone, setNewPhone] = useState('');
+  const [platformAnalytics, setPlatformAnalytics] = useState<AnalyticsDashboardState | null>(null);
+  const [showDailyAnalyticsModal, setShowDailyAnalyticsModal] = useState(false);
 
   // Client Folder Detail
   const [selectedClientPhone, setSelectedClientPhone] = useState<string | null>(null);
@@ -529,6 +534,13 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       window.clearInterval(tickId);
     };
   }, [alertSoundEnabled]);
+
+  useEffect(() => {
+    const unsub = subscribePlatformAnalytics((state) => {
+      setPlatformAnalytics(state);
+    });
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     if (!requestedChat || !canManageClients) return;
@@ -2581,6 +2593,180 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {/* ===================================================================== */}
         {activeTab === 'individuals' && canManageClients && !selectedClient && (
           <div className="space-y-4">
+            {/* Platform Visitor Analytics Summary Card (General Manager Only) */}
+            <div className="bg-gradient-to-l from-[#0F2438] via-[#163B65] to-[#0F2438] border-2 border-[#C6A052]/60 rounded-2xl p-4 sm:p-5 text-white shadow-lg space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#E5C887] flex items-center justify-center">
+                    <TrendingUp className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-black text-white">
+                      {t('إحصائيات وسجل زوار المنصة 📊', 'Platform Visitor Analytics & Daily Logs')}
+                    </h3>
+                    <p className="text-[11px] text-slate-300">
+                      {t(
+                        'متابعة الزيارات الفريدة اليومية عبر التطبيق والمتصفح (باستثناء جلسة المدير العام)',
+                        'Unique daily visits from Android App and Web browser (excluding admin sessions)'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowDailyAnalyticsModal(true)}
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-xs font-black flex items-center gap-1.5 transition cursor-pointer active:scale-95 shadow-xs"
+                >
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>{t('عرض السجل اليومي بالتاريخ 📅', 'View Daily Log Table 📅')}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
+                {/* Today */}
+                <div className="bg-white/10 border border-white/15 rounded-xl p-3">
+                  <span className="text-[11px] text-slate-300 block font-bold mb-1">
+                    {t('زوار اليوم', "Today's Visitors")}
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black font-mono text-[#E5C887]">
+                    {platformAnalytics?.today?.total || 0}
+                  </div>
+                  <div className="flex items-center justify-center gap-2 mt-1.5 text-[10.5px] font-bold">
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      📱 تطبيق: {platformAnalytics?.today?.app || 0}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-200 border border-sky-500/40">
+                      🌐 متصفح: {platformAnalytics?.today?.web || 0}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Last 7 Days */}
+                <div className="bg-white/10 border border-white/15 rounded-xl p-3">
+                  <span className="text-[11px] text-slate-300 block font-bold mb-1">
+                    {t('آخر 7 أيام (أسبوع)', 'Last 7 Days')}
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black font-mono text-white">
+                    {platformAnalytics?.last7Days?.total || 0}
+                  </div>
+                  <div className="text-[10px] text-slate-300 mt-1.5">
+                    📱 {platformAnalytics?.last7Days?.app || 0} | 🌐 {platformAnalytics?.last7Days?.web || 0}
+                  </div>
+                </div>
+
+                {/* Last 30 Days */}
+                <div className="bg-white/10 border border-white/15 rounded-xl p-3">
+                  <span className="text-[11px] text-slate-300 block font-bold mb-1">
+                    {t('آخر 30 يوماً (شهر)', 'Last 30 Days')}
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black font-mono text-white">
+                    {platformAnalytics?.last30Days?.total || 0}
+                  </div>
+                  <div className="text-[10px] text-slate-300 mt-1.5">
+                    📱 {platformAnalytics?.last30Days?.app || 0} | 🌐 {platformAnalytics?.last30Days?.web || 0}
+                  </div>
+                </div>
+
+                {/* All-Time Total */}
+                <div className="bg-white/10 border border-white/15 rounded-xl p-3">
+                  <span className="text-[11px] text-slate-300 block font-bold mb-1">
+                    {t('الإجمالي الكلي منذ الافتتاح', 'All-Time Total Visits')}
+                  </span>
+                  <div className="text-xl sm:text-2xl font-black font-mono text-[#E5C887]">
+                    {platformAnalytics?.allTime?.total || 0}
+                  </div>
+                  <div className="text-[10px] text-slate-300 mt-1.5">
+                    📱 {platformAnalytics?.allTime?.app || 0} | 🌐 {platformAnalytics?.allTime?.web || 0}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Daily Records Modal */}
+            {showDailyAnalyticsModal && (
+              <div
+                className="fixed inset-0 flex items-center justify-center z-50 bg-[#0A1926]/75 backdrop-blur-xs p-4"
+                onClick={() => setShowDailyAnalyticsModal(false)}
+                dir={dir}
+              >
+                <div
+                  className="w-full max-w-2xl max-h-[85vh] rounded-3xl bg-white text-[#0F2438] border-2 border-[#C6A052]/50 shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95"
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={t('سجل زوار المنصة اليومي', 'Platform Daily Visitor Log')}
+                >
+                  <div className="p-5 bg-[#0F2438] text-white flex items-center justify-between border-b border-[#C6A052]/30">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#E5C887] flex items-center justify-center">
+                        <BarChart3 className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black text-white">
+                          {t('سجل زوار المنصة اليومي بالتاريخ 📅', 'Daily Platform Visitor Log Table')}
+                        </h3>
+                        <p className="text-[11px] text-slate-300">
+                          {t('أحدث 30 سجلاً يومياً للزيارات الفريدة للمنصة', 'Latest 30 daily unique visit records')}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDailyAnalyticsModal(false)}
+                      className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white flex items-center justify-center transition cursor-pointer"
+                      aria-label={t('إغلاق', 'Close')}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="p-5 overflow-y-auto space-y-3">
+                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 bg-[#FAF8F2] border border-[#C6A052]/30 rounded-2xl p-3.5 text-xs text-center font-black text-[#0F2438]">
+                      <div>{t('التاريخ', 'Date')}</div>
+                      <div>{t('الإجمالي', 'Total Visits')}</div>
+                      <div>{t('التطبيق 📱', 'App 📱')}</div>
+                      <div className="hidden sm:block">{t('المتصفح 🌐', 'Web 🌐')}</div>
+                    </div>
+
+                    <div className="space-y-2">
+                      {platformAnalytics?.dailyRecords && platformAnalytics.dailyRecords.length > 0 ? (
+                        platformAnalytics.dailyRecords.map((record, i) => (
+                          <div
+                            key={i}
+                            className="grid grid-cols-3 sm:grid-cols-4 gap-2 bg-white border border-slate-200 rounded-xl p-3 text-xs text-center font-bold text-[#0F2438] items-center shadow-xs hover:border-[#C6A052] transition"
+                          >
+                            <div className="font-mono font-black text-[#0284C7]">{record.date}</div>
+                            <div className="font-mono text-base font-black text-[#0F2438]">{record.total}</div>
+                            <div className="font-mono text-emerald-700 bg-emerald-50 py-1 rounded-lg">
+                              {record.app}
+                            </div>
+                            <div className="hidden sm:block font-mono text-sky-700 bg-sky-50 py-1 rounded-lg">
+                              {record.web}
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="py-12 text-center text-slate-400 text-xs font-bold">
+                          {t('لا توجد سجلات زيارات يومية بعد', 'No daily visitor records yet')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setShowDailyAnalyticsModal(false)}
+                      className="min-h-[40px] px-5 py-2 rounded-xl bg-[#0F2438] text-[#E5C887] text-xs font-black cursor-pointer hover:bg-[#163B65] transition"
+                    >
+                      {t('إغلاق السجل', 'Close Log')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Compact Real-Time KPI Summary Strip (SaaS-Grade) */}
             <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-center tabular-nums">
               <div className="bg-white border border-slate-200/90 rounded-xl p-2.5 sm:p-3 shadow-xs">
