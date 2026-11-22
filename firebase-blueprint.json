@@ -577,7 +577,8 @@
         "lastSenderRole": { "type": "string", "enum": ["admin", "client"] },
         "unreadAdminCount": { "type": "number" },
         "unreadClientCount": { "type": "number" },
-        "updatedAt": { "type": "string", "maxLength": 64 }
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "adminClearedAt": { "type": "string", "maxLength": 64 }
       },
       "required": [
         "phoneId",

@@ -847,7 +847,8 @@ service cloud.firestore {
         'lastSenderRole',
         'unreadAdminCount',
         'unreadClientCount',
-        'updatedAt'
+        'updatedAt',
+        'adminClearedAt'
       ])
       && data.phoneId is string
       && data.phoneId == phoneId
@@ -868,7 +869,8 @@ service cloud.firestore {
       && data.unreadClientCount >= 0
       && data.unreadClientCount <= 9999
       && data.updatedAt is string
-      && data.updatedAt.size() <= 64;
+      && data.updatedAt.size() <= 64
+      && isOptionalString(data, 'adminClearedAt', 64);
     }
 
     // Validation Blueprint: ChatMessage (/chats/{phoneId}/messages/{messageId})

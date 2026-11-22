@@ -463,6 +463,14 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
   const chatUnreadBaselineRef = useRef(false);
   const prevTotalUnreadChatRef = useRef(0);
+  const individualsListRef = useRef<HTMLDivElement>(null);
+
+  const handleKpiFilterClick = (filter: OrderFilter) => {
+    setOrderFilter(filter);
+    window.setTimeout(() => {
+      individualsListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 40);
+  };
 
   useEffect(() => {
     loadTravelers();
@@ -2767,62 +2775,109 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               </div>
             )}
 
-            {/* Compact Real-Time KPI Summary Strip (SaaS-Grade) */}
+            {/* Compact Real-Time KPI Summary Strip (SaaS-Grade, Interactive Filters) */}
             <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 text-center tabular-nums">
-              <div className="bg-white border border-slate-200/90 rounded-xl p-2.5 sm:p-3 shadow-xs">
+              <button
+                type="button"
+                onClick={() => handleKpiFilterClick('all')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'all'
+                    ? 'bg-white border-[#0F2438] ring-2 ring-[#0F2438]/20 shadow-md'
+                    : 'bg-white border-slate-200/90 hover:border-slate-300 hover:bg-slate-50 shadow-xs'
+                }`}
+              >
                 <span className="text-[10.5px] sm:text-[11px] text-slate-500 block font-medium">
                   {t('إجمالي الأفراد', 'Total Individuals')}
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-[#0F2438]">
                   {individualTravelers.length}
                 </span>
-              </div>
-              <div className="bg-emerald-50/60 border border-emerald-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
-                <span className="text-[10.5px] sm:text-[11px] text-emerald-900 block font-medium flex items-center justify-center gap-1">
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleKpiFilterClick('online')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'online'
+                    ? 'bg-emerald-50 border-emerald-600 ring-2 ring-emerald-500/25 shadow-md'
+                    : 'bg-emerald-50/60 border-emerald-200/80 hover:bg-emerald-100/70 shadow-xs'
+                }`}
+              >
+                <span className="text-[10.5px] sm:text-[11px] text-emerald-900 font-medium flex items-center justify-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   <span>{t('متصلون الآن', 'Online Now')}</span>
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-emerald-800">
                   {individualsOnlineCount}
                 </span>
-              </div>
-              <div className="bg-sky-50/60 border border-sky-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleKpiFilterClick('active')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'active'
+                    ? 'bg-sky-50 border-sky-600 ring-2 ring-sky-500/25 shadow-md'
+                    : 'bg-sky-50/60 border-sky-200/80 hover:bg-sky-100/70 shadow-xs'
+                }`}
+              >
                 <span className="text-[10.5px] sm:text-[11px] text-sky-900 block font-medium">
                   {t('طلبات قيد التنفيذ', 'Active Orders')}
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-sky-900">{activeOrdersCount}</span>
-              </div>
-              <div className="bg-amber-50/60 border border-amber-200/80 rounded-xl p-2.5 sm:p-3 shadow-xs">
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleKpiFilterClick('with_files')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'with_files'
+                    ? 'bg-amber-50 border-amber-600 ring-2 ring-amber-500/25 shadow-md'
+                    : 'bg-amber-50/60 border-amber-200/80 hover:bg-amber-100/70 shadow-xs'
+                }`}
+              >
                 <span className="text-[10.5px] sm:text-[11px] text-amber-900 block font-medium">
                   {t('ملفات وإيصالات', 'With Files')}
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-amber-900">{withFilesCount}</span>
-              </div>
-              <div className="bg-emerald-50/40 border border-emerald-200/70 rounded-xl p-2.5 sm:p-3 shadow-xs">
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleKpiFilterClick('completed')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'completed'
+                    ? 'bg-emerald-50 border-emerald-600 ring-2 ring-emerald-500/25 shadow-md'
+                    : 'bg-emerald-50/40 border-emerald-200/70 hover:bg-emerald-100/60 shadow-xs'
+                }`}
+              >
                 <span className="text-[10.5px] sm:text-[11px] text-emerald-900 block font-medium">
                   {t('طلبات مكتملة', 'Completed')}
                 </span>
                 <span className="text-lg sm:text-xl font-bold font-mono text-emerald-900">{completedCount}</span>
-              </div>
+              </button>
+
               <button
                 type="button"
-                onClick={() => setOrderFilter('expiring_passports')}
-                className={`rounded-xl p-2.5 sm:p-3 shadow-xs border text-center transition cursor-pointer ${
-                  expiringPassportCount > 0
-                    ? 'bg-red-50 border-red-300 hover:bg-red-100'
-                    : 'bg-slate-50 border-slate-200/90 hover:bg-slate-100'
+                onClick={() => handleKpiFilterClick('expiring_passports')}
+                className={`rounded-xl p-2.5 sm:p-3 border text-center transition cursor-pointer ${
+                  orderFilter === 'expiring_passports'
+                    ? 'bg-red-50 border-red-600 ring-2 ring-red-500/30 shadow-md'
+                    : expiringPassportCount > 0
+                    ? 'bg-red-50 border-red-300 hover:bg-red-100 shadow-xs'
+                    : 'bg-slate-50 border-slate-200/90 hover:bg-slate-100 shadow-xs'
                 }`}
               >
                 <span
                   className={`text-[10.5px] sm:text-[11px] block font-bold ${
-                    expiringPassportCount > 0 ? 'text-red-800' : 'text-slate-600'
+                    expiringPassportCount > 0 || orderFilter === 'expiring_passports' ? 'text-red-800' : 'text-slate-600'
                   }`}
                 >
                   {t('جوازات تنتهي قريباً', 'Expiring Passports')}
                 </span>
                 <span
                   className={`text-lg sm:text-xl font-bold font-mono ${
-                    expiringPassportCount > 0 ? 'text-red-700' : 'text-slate-700'
+                    expiringPassportCount > 0 || orderFilter === 'expiring_passports' ? 'text-red-700' : 'text-slate-700'
                   }`}
                 >
                   {expiringPassportCount}
@@ -2831,7 +2886,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
             </div>
 
             {/* Search & Order Filter Pills */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-3 shadow-xs">
+            <div ref={individualsListRef} className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-3 shadow-xs scroll-mt-4">
               <div className="relative">
                 <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -3581,8 +3636,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           </div>
                           <div className="flex items-center justify-between gap-1.5 mt-0.5">
                             <span className="text-[11px] text-slate-500 truncate">
-                              {thread?.lastMessageText ||
-                                formatLastSeenRelative(cl.lastSeenAt, isOnline, lang)}
+                              {thread?.adminClearedAt &&
+                              thread?.lastMessageAt &&
+                              thread.lastMessageAt <= thread.adminClearedAt
+                                ? t('تم مسح السجل من الإدارة', 'Cleared from admin')
+                                : thread?.lastMessageText ||
+                                  formatLastSeenRelative(cl.lastSeenAt, isOnline, lang)}
                             </span>
                             {cl.accountType === 'b2b_partner' && (
                               <span className="px-1.5 py-0.2 rounded bg-[#C6A052]/25 text-[#0F2438] text-[9px] font-black shrink-0">

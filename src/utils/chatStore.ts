@@ -287,6 +287,7 @@ export async function sendChatMessageCloud(params: {
   let prevAccountType = params.accountType;
   let prevClientName = params.clientName;
   let prevCompanyName = params.companyName;
+  let prevAdminClearedAt: string | undefined;
 
   try {
     const existingSnap = await getDoc(doc(db, 'chats', phone));
@@ -297,6 +298,7 @@ export async function sendChatMessageCloud(params: {
       prevAccountType = params.accountType || prev.accountType;
       prevClientName = params.clientName || prev.clientName;
       prevCompanyName = params.companyName || prev.companyName;
+      prevAdminClearedAt = prev.adminClearedAt;
     }
   } catch {
     // Proceed with defaults
@@ -321,6 +323,7 @@ export async function sendChatMessageCloud(params: {
     unreadClientCount:
       params.senderRole === 'admin' ? Math.min(9999, prevUnreadClient + 1) : 0,
     updatedAt: nowIso,
+    ...(prevAdminClearedAt ? { adminClearedAt: prevAdminClearedAt } : {}),
   };
 
   try {
@@ -418,8 +421,16 @@ export async function clearAdminChatHistoryCloud(
   }
   try {
     const threadRef = doc(db, 'chats', phone);
+    const snap = await getDoc(threadRef);
+    if (!snap.exists()) {
+      return { ok: true };
+    }
     const nowIso = new Date().toISOString();
-    await setDoc(threadRef, { adminClearedAt: nowIso, updatedAt: nowIso }, { merge: true });
+    await updateDoc(threadRef, {
+      adminClearedAt: nowIso,
+      unreadAdminCount: 0,
+      updatedAt: nowIso,
+    });
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -447,7 +458,11 @@ export async function permanentlyDeleteChatHistoryCloud(
     if (deletes.length > 0) {
       await Promise.all(deletes);
     }
-    await deleteDoc(doc(db, 'chats', phone));
+    const threadRef = doc(db, 'chats', phone);
+    const threadSnap = await getDoc(threadRef);
+    if (threadSnap.exists()) {
+      await deleteDoc(threadRef);
+    }
     return { ok: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
