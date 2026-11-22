@@ -343,6 +343,7 @@ export interface ChatThreadSummary {
   unreadAdminCount: number;
   unreadClientCount: number;
   updatedAt: string;
+  adminClearedAt?: string;
 }
 
 export interface PublicOrderStatusSummary {

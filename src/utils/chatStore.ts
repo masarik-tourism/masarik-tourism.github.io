@@ -1,5 +1,6 @@
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -407,3 +408,52 @@ export const ADMIN_CHAT_QUICK_REPLIES = [
   'تم إنجاز طلبك ومرفق المستند',
   'تم حجز الموعد بنجاح وإرفاق التفاصيل',
 ] as const;
+
+export async function clearAdminChatHistoryCloud(
+  rawPhone: string
+): Promise<{ ok: boolean; error?: string }> {
+  const phone = cleanDigits(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, error: 'رقم الهاتف غير صالح' };
+  }
+  try {
+    const threadRef = doc(db, 'chats', phone);
+    const nowIso = new Date().toISOString();
+    await setDoc(threadRef, { adminClearedAt: nowIso, updatedAt: nowIso }, { merge: true });
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(err as Error, OperationType.WRITE, `chats/${phone}`);
+    }
+    return { ok: false, error: 'تعذر مسح المحادثة من لوحة الإدارة' };
+  }
+}
+
+export async function permanentlyDeleteChatHistoryCloud(
+  rawPhone: string
+): Promise<{ ok: boolean; error?: string }> {
+  const phone = cleanDigits(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, error: 'رقم الهاتف غير صالح' };
+  }
+  try {
+    const messagesRef = collection(db, 'chats', phone, 'messages');
+    const msgSnaps = await getDocs(messagesRef);
+    const deletes: Promise<void>[] = [];
+    msgSnaps.forEach((docSnap) => {
+      deletes.push(deleteDoc(docSnap.ref));
+    });
+    if (deletes.length > 0) {
+      await Promise.all(deletes);
+    }
+    await deleteDoc(doc(db, 'chats', phone));
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(err as Error, OperationType.DELETE, `chats/${phone}`);
+    }
+    return { ok: false, error: 'تعذر الحذف النهائي للمحادثة' };
+  }
+}

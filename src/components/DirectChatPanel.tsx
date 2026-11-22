@@ -14,15 +14,21 @@ import {
   Image as ImageIcon,
   Zap,
   MessageSquare,
+  Trash2,
 } from 'lucide-react';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase';
 import {
   AccountType,
   ChatMessage,
   ChatSenderRole,
+  ChatThreadSummary,
 } from '../types/travel';
 import {
   ADMIN_CHAT_QUICK_REPLIES,
+  clearAdminChatHistoryCloud,
   markChatThreadReadCloud,
+  permanentlyDeleteChatHistoryCloud,
   playChatNotificationChime,
   sendChatMessageCloud,
   subscribeChatMessages,
@@ -73,11 +79,28 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
   const [isSending, setIsSending] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string } | null>(null);
+  const [adminClearedAt, setAdminClearedAt] = useState<string | null>(null);
+  const [showClearModal, setShowClearModal] = useState(false);
+  const [clearingAction, setClearingAction] = useState(false);
+  const [clearFeedback, setClearFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastSeenMsgIdRef = useRef<string | null>(null);
   const initializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!phone) return;
+    const unsubThread = onSnapshot(doc(db, 'chats', phone), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data() as ChatThreadSummary;
+        setAdminClearedAt(data.adminClearedAt || null);
+      } else {
+        setAdminClearedAt(null);
+      }
+    });
+    return () => unsubThread();
+  }, [phone]);
 
   // Subscribe to isolated live chat thread messages
   useEffect(() => {
@@ -110,6 +133,13 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
 
     return () => unsub();
   }, [phone, senderRole]);
+
+  const displayedMessages = messages.filter((m) => {
+    if (senderRole === 'admin' && adminClearedAt) {
+      if (m.createdAt <= adminClearedAt) return false;
+    }
+    return true;
+  });
 
   // Smooth scroll to bottom on new messages
   useEffect(() => {
