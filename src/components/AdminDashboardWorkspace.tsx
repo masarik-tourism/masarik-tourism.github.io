@@ -113,6 +113,7 @@ import {
   uploadAndAddDocumentToTravelerCloud,
 } from '../utils/travelerStore';
 import {
+  getLocalAdminClearedAt,
   playChatNotificationChime,
   subscribeAllChatThreads,
 } from '../utils/chatStore';
@@ -3636,12 +3637,26 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           </div>
                           <div className="flex items-center justify-between gap-1.5 mt-0.5">
                             <span className="text-[11px] text-slate-500 truncate">
-                              {thread?.adminClearedAt &&
-                              thread?.lastMessageAt &&
-                              thread.lastMessageAt <= thread.adminClearedAt
-                                ? t('تم مسح السجل من الإدارة', 'Cleared from admin')
-                                : thread?.lastMessageText ||
-                                  formatLastSeenRelative(cl.lastSeenAt, isOnline, lang)}
+                              {(() => {
+                                const localClr = getLocalAdminClearedAt(cl.phone);
+                                const effectiveClr =
+                                  thread?.adminClearedAt && localClr
+                                    ? thread.adminClearedAt >= localClr
+                                      ? thread.adminClearedAt
+                                      : localClr
+                                    : thread?.adminClearedAt || localClr;
+                                if (
+                                  effectiveClr &&
+                                  thread?.lastMessageAt &&
+                                  thread.lastMessageAt <= effectiveClr
+                                ) {
+                                  return t('تم مسح السجل من الإدارة', 'Cleared from admin');
+                                }
+                                return (
+                                  thread?.lastMessageText ||
+                                  formatLastSeenRelative(cl.lastSeenAt, isOnline, lang)
+                                );
+                              })()}
                             </span>
                             {cl.accountType === 'b2b_partner' && (
                               <span className="px-1.5 py-0.2 rounded bg-[#C6A052]/25 text-[#0F2438] text-[9px] font-black shrink-0">

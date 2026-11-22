@@ -412,63 +412,147 @@ export const ADMIN_CHAT_QUICK_REPLIES = [
   'تم حجز الموعد بنجاح وإرفاق التفاصيل',
 ] as const;
 
+const ADMIN_CLEARED_STORAGE_PREFIX = 'masarik_admin_chat_cleared_';
+
+export function getLocalAdminClearedAt(rawPhone: string): string | null {
+  if (typeof window === 'undefined') return null;
+  const phone = cleanDigits(rawPhone);
+  if (!phone) return null;
+  try {
+    return window.localStorage.getItem(`${ADMIN_CLEARED_STORAGE_PREFIX}${phone}`);
+  } catch {
+    return null;
+  }
+}
+
+export function setLocalAdminClearedAt(rawPhone: string, iso: string | null): void {
+  if (typeof window === 'undefined') return;
+  const phone = cleanDigits(rawPhone);
+  if (!phone) return;
+  try {
+    const key = `${ADMIN_CLEARED_STORAGE_PREFIX}${phone}`;
+    if (iso) {
+      window.localStorage.setItem(key, iso);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage quota / privacy mode errors
+  }
+}
+
+export function clearLocalChatCache(rawPhone: string): void {
+  if (typeof window === 'undefined') return;
+  const phone = cleanDigits(rawPhone);
+  if (!phone) return;
+  try {
+    window.localStorage.removeItem(`${ADMIN_CLEARED_STORAGE_PREFIX}${phone}`);
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && (k.includes(`chat_${phone}`) || k.includes(`messages_${phone}`))) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export async function clearAdminChatHistoryCloud(
   rawPhone: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; clearedAt: string; cloudSynced: boolean; error?: string }> {
   const phone = cleanDigits(rawPhone);
+  const nowIso = new Date().toISOString();
   if (!/^[0-9]{8,20}$/.test(phone)) {
-    return { ok: false, error: 'رقم الهاتف غير صالح' };
+    return { ok: false, clearedAt: nowIso, cloudSynced: false, error: 'رقم الهاتف غير صالح' };
   }
+
+  // Always update local admin clear timestamp immediately so UI responds even if no cloud doc exists
+  setLocalAdminClearedAt(phone, nowIso);
+
   try {
     const threadRef = doc(db, 'chats', phone);
     const snap = await getDoc(threadRef);
     if (!snap.exists()) {
-      return { ok: true };
+      return { ok: true, clearedAt: nowIso, cloudSynced: true };
     }
-    const nowIso = new Date().toISOString();
     await updateDoc(threadRef, {
       adminClearedAt: nowIso,
       unreadAdminCount: 0,
       updatedAt: nowIso,
     });
-    return { ok: true };
+    return { ok: true, clearedAt: nowIso, cloudSynced: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.toLowerCase().includes('permission')) {
-      handleFirestoreError(err as Error, OperationType.WRITE, `chats/${phone}`);
-    }
-    return { ok: false, error: 'تعذر مسح المحادثة من لوحة الإدارة' };
+    console.warn('clearAdminChatHistoryCloud warning (local hide preserved):', err);
+    return {
+      ok: true,
+      clearedAt: nowIso,
+      cloudSynced: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
 export async function permanentlyDeleteChatHistoryCloud(
-  rawPhone: string
-): Promise<{ ok: boolean; error?: string }> {
+  rawPhone: string,
+  knownMessageIds: string[] = []
+): Promise<{ ok: boolean; deletedCount: number; error?: string }> {
   const phone = cleanDigits(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) {
-    return { ok: false, error: 'رقم الهاتف غير صالح' };
+    return { ok: false, deletedCount: 0, error: 'رقم الهاتف غير صالح' };
   }
+
+  // Always clean any local cache immediately
+  clearLocalChatCache(phone);
+
+  let deletedCount = 0;
   try {
-    const messagesRef = collection(db, 'chats', phone, 'messages');
-    const msgSnaps = await getDocs(messagesRef);
+    const messagesQuery = query(
+      collection(db, 'chats', phone, 'messages'),
+      where('phoneId', '==', phone)
+    );
+    const msgSnaps = await getDocs(messagesQuery);
+    const idsToDelete = new Set<string>(knownMessageIds.filter(Boolean));
     const deletes: Promise<void>[] = [];
+
     msgSnaps.forEach((docSnap) => {
-      deletes.push(deleteDoc(docSnap.ref));
+      idsToDelete.delete(docSnap.id);
+      deletes.push(
+        deleteDoc(docSnap.ref).then(() => {
+          deletedCount += 1;
+        })
+      );
     });
+
+    idsToDelete.forEach((msgId) => {
+      deletes.push(
+        deleteDoc(doc(db, 'chats', phone, 'messages', msgId))
+          .then(() => {
+            deletedCount += 1;
+          })
+          .catch(() => {})
+      );
+    });
+
     if (deletes.length > 0) {
       await Promise.all(deletes);
     }
+
     const threadRef = doc(db, 'chats', phone);
     const threadSnap = await getDoc(threadRef);
     if (threadSnap.exists()) {
       await deleteDoc(threadRef);
     }
-    return { ok: true };
+
+    return { ok: true, deletedCount };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.toLowerCase().includes('permission')) {
-      handleFirestoreError(err as Error, OperationType.DELETE, `chats/${phone}`);
-    }
-    return { ok: false, error: 'تعذر الحذف النهائي للمحادثة' };
+    console.warn('permanentlyDeleteChatHistoryCloud error:', err);
+    return {
+      ok: false,
+      deletedCount,
+      error: 'تعذر إكمال الحذف السحابي من Firestore. يرجى التحقق من قواعد الأمان أو الاتصال.',
+    };
   }
 }

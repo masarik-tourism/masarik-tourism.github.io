@@ -940,8 +940,10 @@ service cloud.firestore {
     match /chats/{phoneId} {
       allow get: if isValidPhoneId(phoneId);
       allow list: if resource.data.lastSenderRole in ['admin', 'client'];
-      allow create, update: if isValidPhoneId(phoneId)
+      allow create: if isValidPhoneId(phoneId)
         && exists(/databases/$(database)/documents/clients/$(phoneId))
+        && isValidChatThread(incoming(), phoneId);
+      allow update: if isValidPhoneId(phoneId)
         && isValidChatThread(incoming(), phoneId);
       allow delete: if isValidPhoneId(phoneId) && resource != null;
 

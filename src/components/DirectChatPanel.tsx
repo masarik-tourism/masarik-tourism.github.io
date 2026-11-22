@@ -16,22 +16,22 @@ import {
   MessageSquare,
   Trash2,
 } from 'lucide-react';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
 import {
   AccountType,
   ChatMessage,
   ChatSenderRole,
-  ChatThreadSummary,
 } from '../types/travel';
 import {
   ADMIN_CHAT_QUICK_REPLIES,
   clearAdminChatHistoryCloud,
+  clearLocalChatCache,
+  getLocalAdminClearedAt,
   markChatThreadReadCloud,
   permanentlyDeleteChatHistoryCloud,
   playChatNotificationChime,
   sendChatMessageCloud,
   subscribeChatMessages,
+  subscribeChatThread,
 } from '../utils/chatStore';
 import {
   downloadCloudFile,
@@ -90,13 +90,20 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
   const initializedRef = useRef(false);
 
   useEffect(() => {
-    if (!phone) return;
-    const unsubThread = onSnapshot(doc(db, 'chats', phone), (snap) => {
-      if (snap.exists()) {
-        const data = snap.data() as ChatThreadSummary;
-        setAdminClearedAt(data.adminClearedAt || null);
+    if (!phone) {
+      setAdminClearedAt(null);
+      return;
+    }
+    const localCleared = getLocalAdminClearedAt(phone);
+    setAdminClearedAt(localCleared);
+
+    const unsubThread = subscribeChatThread(phone, (thread) => {
+      const cloudCleared = thread?.adminClearedAt || null;
+      const latestLocal = getLocalAdminClearedAt(phone);
+      if (cloudCleared && latestLocal) {
+        setAdminClearedAt(cloudCleared >= latestLocal ? cloudCleared : latestLocal);
       } else {
-        setAdminClearedAt(null);
+        setAdminClearedAt(cloudCleared || latestLocal || null);
       }
     });
     return () => unsubThread();
@@ -150,11 +157,9 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
     if (clearingAction) return;
     setClearingAction(true);
     setClearFeedback(null);
-    const res = await clearAdminChatHistoryCloud(phone);
-    setClearingAction(false);
-    setShowClearModal(false);
-    if (res.ok) {
-      setAdminClearedAt(new Date().toISOString());
+    try {
+      const res = await clearAdminChatHistoryCloud(phone);
+      setAdminClearedAt(res.clearedAt || new Date().toISOString());
       setClearFeedback({
         ok: true,
         text: t(
@@ -162,11 +167,17 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
           'Chat history hidden from admin view only (still visible to client).'
         ),
       });
-    } else {
+    } catch (err) {
       setClearFeedback({
         ok: false,
-        text: res.error || t('تعذر مسح المحادثة.', 'Failed to clear chat.'),
+        text:
+          err instanceof Error
+            ? err.message
+            : t('تعذر مسح المحادثة.', 'Failed to clear chat.'),
       });
+    } finally {
+      setClearingAction(false);
+      setShowClearModal(false);
     }
   };
 
@@ -174,24 +185,40 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
     if (clearingAction) return;
     setClearingAction(true);
     setClearFeedback(null);
-    const res = await permanentlyDeleteChatHistoryCloud(phone);
-    setClearingAction(false);
-    setShowClearModal(false);
-    if (res.ok) {
+    try {
+      const knownIds = messages.map((m) => m.id).filter(Boolean);
+      const res = await permanentlyDeleteChatHistoryCloud(phone, knownIds);
+      clearLocalChatCache(phone);
+      setMessages([]);
+      setAdminClearedAt(null);
+      if (res.ok) {
+        setClearFeedback({
+          ok: true,
+          text: t(
+            'تم حذف المحادثة بالكامل نهائياً من الإدارة ومن عند العميل.',
+            'Chat history permanently deleted for both admin and client.'
+          ),
+        });
+      } else {
+        setClearFeedback({
+          ok: false,
+          text: res.error || t('تعذر الحذف النهائي للمحادثة.', 'Failed to delete chat.'),
+        });
+      }
+    } catch (err) {
+      clearLocalChatCache(phone);
       setMessages([]);
       setAdminClearedAt(null);
       setClearFeedback({
-        ok: true,
-        text: t(
-          'تم حذف المحادثة بالكامل نهائياً من الإدارة ومن عند العميل.',
-          'Chat history permanently deleted for both admin and client.'
-        ),
-      });
-    } else {
-      setClearFeedback({
         ok: false,
-        text: res.error || t('تعذر الحذف النهائي للمحادثة.', 'Failed to delete chat.'),
+        text:
+          err instanceof Error
+            ? err.message
+            : t('تعذر الحذف النهائي للمحادثة.', 'Failed to delete chat.'),
       });
+    } finally {
+      setClearingAction(false);
+      setShowClearModal(false);
     }
   };
 
