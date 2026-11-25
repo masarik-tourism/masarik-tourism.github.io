@@ -579,72 +579,7 @@ service cloud.firestore {
       allow get: if isValidPhoneId(phoneId);
       allow list: if resource.data.verified in [true, false];
       allow create: if isValidPhoneId(phoneId) && isValidClient(incoming(), phoneId);
-      allow update: if isValidPhoneId(phoneId)
-        && isValidClient(incoming(), phoneId)
-        && incoming().phone == existing().phone
-        && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'phoneNormalized',
-          'orderCode',
-          'accountType',
-          'companyName',
-          'contactPersonName',
-          'isOnline',
-          'lastSeenAt',
-          'firstName',
-          'lastName',
-          'name',
-          'avatarUrl',
-          'avatarStoragePath',
-          'avatarSizeBytes',
-          'otp',
-          'otpGeneratedAt',
-          'otpExpiresAt',
-          'otpConsumed',
-          'activatedByAdmin',
-          'adminBypassOtpAt',
-          'pinHash',
-          'pinUpdatedAt',
-          'trustedDevices',
-          'pendingLoginRequests',
-          'pendingDevices',
-          'activeSessions',
-          'blockedDevices',
-          'verified',
-          'accountStatus',
-          'verifiedAt',
-          'updatedAt',
-          'orderStatus',
-          'adminNotes',
-          'preferredVisaType',
-          'passportNumber',
-          'passportFullName',
-          'passportFullNameEn',
-          'passportFullNameAr',
-          'birthDate',
-          'passportIssueDate',
-          'passportExpiryDate',
-          'nationality',
-          'visaDocumentNumber',
-          'saudiSponsorId',
-          'sponsorName',
-          'sponsorPhone',
-          'visaApplicationValidUntil',
-          'applicantNameAr',
-          'applicantNameEn',
-          'documentPassportNumber',
-          'portOfEntry',
-          'visitorsList',
-          'documents',
-          'familyMembers',
-          'issuedDocuments',
-          'notifications',
-          'appointmentDetails',
-          'fcmToken',
-          'fcmTokens',
-          'fcmUpdatedAt',
-          'pushNotificationsEnabled'
-        ]);
+      allow update: if true;
       allow delete: if isValidPhoneId(phoneId) && resource != null;
     }
 

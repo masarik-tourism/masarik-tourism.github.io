@@ -1,6 +1,7 @@
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocFromServer,
@@ -3657,10 +3658,12 @@ export async function adminInstantActivateClientCloud(
   const path = `clients/${phone}`;
   const all = getAllTravelers();
   let existing: TravelerProfile | undefined = all[phone];
+  let cloudExists = false;
 
   try {
     const snap = await getDoc(doc(db, 'clients', phone));
     if (snap.exists()) {
+      cloudExists = true;
       existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
     }
   } catch (error) {
@@ -3673,24 +3676,50 @@ export async function adminInstantActivateClientCloud(
   if (!existing) return null;
 
   const nowIso = new Date().toISOString();
+  const nextOtp = generateSixDigitOtp();
+  const nextVerifiedAt = existing.verifiedAt || nowIso;
+  const nextOtpExpiresAt = new Date(0).toISOString();
   const updated: TravelerProfile = {
     ...existing,
     phone,
     phoneNormalized: phone,
     verified: true,
     accountStatus: 'verified',
-    verifiedAt: existing.verifiedAt || nowIso,
+    verifiedAt: nextVerifiedAt,
     activatedByAdmin: true,
     adminBypassOtpAt: nowIso,
-    otp: generateSixDigitOtp(),
+    otp: nextOtp,
     otpConsumed: true,
-    otpExpiresAt: new Date(0).toISOString(),
+    otpExpiresAt: nextOtpExpiresAt,
     updatedAt: nowIso,
   };
 
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
-  await syncTravelerToCloud(updated);
+
+  if (cloudExists) {
+    try {
+      await updateDoc(doc(db, 'clients', phone), {
+        verified: true,
+        accountStatus: 'verified',
+        verifiedAt: nextVerifiedAt,
+        activatedByAdmin: true,
+        adminBypassOtpAt: nowIso,
+        otp: nextOtp,
+        otpConsumed: true,
+        otpExpiresAt: nextOtpExpiresAt,
+        updatedAt: nowIso,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+      await syncTravelerToCloud(updated);
+    }
+  } else {
+    await syncTravelerToCloud(updated);
+  }
   return updated;
 }
 
@@ -3707,10 +3736,12 @@ export async function adminRevertClientUnverifiedCloud(
   const path = `clients/${phone}`;
   const all = getAllTravelers();
   let existing: TravelerProfile | undefined = all[phone];
+  let cloudExists = false;
 
   try {
     const snap = await getDoc(doc(db, 'clients', phone));
     if (snap.exists()) {
+      cloudExists = true;
       existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
     }
   } catch (error) {
@@ -3724,6 +3755,8 @@ export async function adminRevertClientUnverifiedCloud(
 
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
+  const nextOtp = generateFourDigitVerificationCode();
+  const nextOtpExpiresAt = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
   const updated: TravelerProfile = {
     ...existing,
     phone,
@@ -3733,16 +3766,40 @@ export async function adminRevertClientUnverifiedCloud(
     verifiedAt: undefined,
     activatedByAdmin: false,
     adminBypassOtpAt: undefined,
-    otp: generateFourDigitVerificationCode(),
+    otp: nextOtp,
     otpGeneratedAt: nowIso,
-    otpExpiresAt: new Date(nowMs + OTP_VALIDITY_MS).toISOString(),
+    otpExpiresAt: nextOtpExpiresAt,
     otpConsumed: false,
     updatedAt: nowIso,
   };
 
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
-  await syncTravelerToCloud(updated);
+
+  if (cloudExists) {
+    try {
+      await updateDoc(doc(db, 'clients', phone), {
+        verified: false,
+        accountStatus: 'pending_verification',
+        verifiedAt: deleteField(),
+        activatedByAdmin: false,
+        adminBypassOtpAt: deleteField(),
+        otp: nextOtp,
+        otpGeneratedAt: nowIso,
+        otpExpiresAt: nextOtpExpiresAt,
+        otpConsumed: false,
+        updatedAt: nowIso,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.toLowerCase().includes('permission')) {
+        handleFirestoreError(error, OperationType.UPDATE, path);
+      }
+      await syncTravelerToCloud(updated);
+    }
+  } else {
+    await syncTravelerToCloud(updated);
+  }
   return updated;
 }
 
