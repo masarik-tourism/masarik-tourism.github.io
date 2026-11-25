@@ -55,7 +55,7 @@ export function buildPendingOtpSnapshot(
     const key = tr.phoneNormalized || tr.phone;
     if (!key) continue;
     map.set(key, {
-      verified: Boolean(tr.verified),
+      verified: tr.verified === true,
       accountStatus: tr.accountStatus,
       otpGeneratedAt: tr.otpGeneratedAt || '',
       otp: tr.otp || '',

@@ -959,9 +959,11 @@ function mergeCloudClientWithLocal(
     isOnline:
       typeof cloudData.isOnline === 'boolean' ? cloudData.isOnline : localExisting?.isOnline,
     lastSeenAt: cloudData.lastSeenAt || localExisting?.lastSeenAt,
+    verified: cloudData.verified === true,
     accountStatus:
-      cloudData.accountStatus ||
-      (cloudData.verified ? 'verified' : 'pending_verification'),
+      cloudData.verified === true && cloudData.accountStatus !== 'pending_verification'
+        ? 'verified'
+        : 'pending_verification',
     firstName: cloudData.firstName || split.firstName,
     lastName: cloudData.lastName || split.lastName,
     otpGeneratedAt: cloudData.otpGeneratedAt || localExisting?.otpGeneratedAt,
@@ -3683,6 +3685,58 @@ export async function adminInstantActivateClientCloud(
     otp: generateSixDigitOtp(),
     otpConsumed: true,
     otpExpiresAt: new Date(0).toISOString(),
+    updatedAt: nowIso,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
+}
+
+/**
+ * Admin Action: Independently reverts an individual client's account back to unverified (verified: false)
+ * in Firestore without affecting any other clients.
+ */
+export async function adminRevertClientUnverifiedCloud(
+  rawPhone: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!existing) return null;
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const updated: TravelerProfile = {
+    ...existing,
+    phone,
+    phoneNormalized: phone,
+    verified: false,
+    accountStatus: 'pending_verification',
+    verifiedAt: undefined,
+    activatedByAdmin: false,
+    adminBypassOtpAt: undefined,
+    otp: generateFourDigitVerificationCode(),
+    otpGeneratedAt: nowIso,
+    otpExpiresAt: new Date(nowMs + OTP_VALIDITY_MS).toISOString(),
+    otpConsumed: false,
     updatedAt: nowIso,
   };
 

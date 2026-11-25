@@ -82,6 +82,7 @@ import {
   adminCreateClientCloud,
   adminCreateOrUpgradeB2BPartnerCloud,
   adminInstantActivateClientCloud,
+  adminRevertClientUnverifiedCloud,
   adminSendVerificationCodeNotificationCloud,
   approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
@@ -251,6 +252,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [updatingDocStatusId, setUpdatingDocStatusId] = useState<string | null>(null);
   const [showAllOtpClients, setShowAllOtpClients] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
+  const [togglingVerifyPhone, setTogglingVerifyPhone] = useState<string | null>(null);
   const [sendingVerifyNotifPhone, setSendingVerifyNotifPhone] = useState<string | null>(null);
   const [verifyActionFeedback, setVerifyActionFeedback] = useState<{
     phone: string;
@@ -635,7 +637,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     const nextMap = new Map<string, { verified: boolean; otpGeneratedAt: string }>();
     for (const tr of travelers) {
       nextMap.set(tr.phone, {
-        verified: Boolean(tr.verified),
+        verified: isClientAccountVerified(tr),
         otpGeneratedAt: tr.otpGeneratedAt || '',
       });
     }
@@ -654,7 +656,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       const isNewClient = !prev;
       const isFreshOtpRequest =
         Boolean(prev) &&
-        !tr.verified &&
+        !isClientAccountVerified(tr) &&
         Boolean(tr.otpGeneratedAt) &&
         prev?.otpGeneratedAt !== tr.otpGeneratedAt;
 
@@ -672,8 +674,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         phone: triggeredClient.phone,
         name: displayName || triggeredClient.phone,
         otp: triggeredClient.otp || '',
-        isPendingVerification:
-          !triggeredClient.verified || triggeredClient.accountStatus === 'pending_verification',
+        isPendingVerification: !isClientAccountVerified(triggeredClient),
         timestamp: new Date().toLocaleTimeString(isAr ? 'ar-EG' : 'en-US', {
           hour: '2-digit',
           minute: '2-digit',
@@ -880,14 +881,47 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   };
 
   const handleAdminInstantActivate = async (client: TravelerProfile) => {
-    if (!canActivateOtp) return;
-    await adminInstantActivateClientCloud(client.phone);
-    setVerifyActionFeedback({
-      phone: client.phone,
-      ok: true,
-      text: t('تم توثيق وتفعيل حساب العميل بنجاح ✅', 'Client account verified instantly ✅'),
-    });
-    loadTravelers();
+    if (!canActivateOtp || togglingVerifyPhone) return;
+    setTogglingVerifyPhone(client.phone);
+    try {
+      await adminInstantActivateClientCloud(client.phone);
+      setVerifyActionFeedback({
+        phone: client.phone,
+        ok: true,
+        text: t('تم توثيق وتفعيل هذا الحساب بنجاح ✅', 'Account verified & activated ✅'),
+      });
+      loadTravelers();
+    } catch {
+      setVerifyActionFeedback({
+        phone: client.phone,
+        ok: false,
+        text: t('تعذر توثيق الحساب حالياً. حاول مرة أخرى.', 'Could not verify account.'),
+      });
+    } finally {
+      setTogglingVerifyPhone(null);
+    }
+  };
+
+  const handleAdminRevertUnverified = async (client: TravelerProfile) => {
+    if (!canActivateOtp || togglingVerifyPhone) return;
+    setTogglingVerifyPhone(client.phone);
+    try {
+      await adminRevertClientUnverifiedCloud(client.phone);
+      setVerifyActionFeedback({
+        phone: client.phone,
+        ok: true,
+        text: t('تم تحويل هذا الحساب إلى غير موثق ↩️', 'Account reverted to unverified ↩️'),
+      });
+      loadTravelers();
+    } catch {
+      setVerifyActionFeedback({
+        phone: client.phone,
+        ok: false,
+        text: t('تعذر تحديث حالة الحساب حالياً.', 'Could not update account status.'),
+      });
+    } finally {
+      setTogglingVerifyPhone(null);
+    }
   };
 
   // Option 2: Open WhatsApp with client's name + 4-digit verification code
@@ -905,6 +939,21 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     const msg = buildAdminVerificationCodeWhatsAppMessage(displayName, code, lang);
     openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
     loadTravelers();
+  };
+
+  // Send 4-digit verification code via SMS
+  const handleSendVerificationSms = async (client: TravelerProfile) => {
+    if (!canActivateOtp) return;
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
+    let code = String(client.otp || '');
+    if (!/^\d{4}$/.test(code) || !isOtpActiveAndUnexpired(client)) {
+      const ensured = await ensureClientFourDigitCodeCloud(client.phone);
+      code = ensured.code || code;
+      loadTravelers();
+    }
+    const msg = buildAdminVerificationCodeWhatsAppMessage(displayName, code, lang);
+    window.location.href = buildSmsSendUrl(phoneDigits, msg);
   };
 
   // Option 3: Automatically push the 4-digit verification code to the client's app + notifications
@@ -933,21 +982,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     } finally {
       setSendingVerifyNotifPhone(null);
     }
-  };
-
-  const handleToggleVerified = (client: TravelerProfile) => {
-    if (!canActivateOtp) return;
-    if (!client.verified) {
-      void handleAdminInstantActivate(client);
-      return;
-    }
-    if (!isEditUnlocked) return;
-    updateTravelerProfileDetails(client.phone, {
-      verified: false,
-      verifiedAt: undefined,
-      activatedByAdmin: false,
-    });
-    loadTravelers();
   };
 
   const handleOneClickOrderStageUpdate = (
@@ -2188,7 +2222,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const messagesBadgeCount =
     pendingCount +
     travelers.filter(
-      (tr) => !tr.verified || (tr.documents || []).some((d) => d.docType === 'receipt')
+      (tr) => !isClientAccountVerified(tr) || (tr.documents || []).some((d) => d.docType === 'receipt')
     ).length;
   const overrideTextCount = Object.keys(cmsState.textOverrides).length;
   const storageStats = computeStorageUsageStats(travelers);
@@ -3167,6 +3201,108 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       </div>
 
                       <div className="space-y-2 pt-2 border-t border-slate-100">
+                        {canActivateOtp && !isClientAccountVerified(client) && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="bg-orange-50/85 border border-orange-200 rounded-xl p-2.5 space-y-2"
+                          >
+                            <button
+                              type="button"
+                              disabled={togglingVerifyPhone === client.phone}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleAdminInstantActivate(client);
+                              }}
+                              className="w-full px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs flex items-center justify-center gap-1.5"
+                            >
+                              <span>
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التوثيق...', 'Verifying...')
+                                  : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                              </span>
+                            </button>
+
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleSendVerificationWhatsApp(client);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                              >
+                                {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={sendingVerifyNotifPhone === client.phone}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleSendVerificationAppPush(client);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                              >
+                                {sendingVerifyNotifPhone === client.phone
+                                  ? t('جاري الإرسال...', 'Sending...')
+                                  : t('🔔 إشعار التطبيق', '🔔 App Push')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleSendVerificationSms(client);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                              >
+                                {t('📱 SMS', '📱 SMS')}
+                              </button>
+                            </div>
+
+                            {verifyActionFeedback?.phone === client.phone && (
+                              <p
+                                className={`text-[11px] font-bold px-1 ${
+                                  verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                                }`}
+                              >
+                                {verifyActionFeedback.text}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {canActivateOtp && isClientAccountVerified(client) && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2 space-y-1.5"
+                          >
+                            <button
+                              type="button"
+                              disabled={togglingVerifyPhone === client.phone}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleAdminRevertUnverified(client);
+                              }}
+                              className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition flex items-center justify-center gap-1.5"
+                            >
+                              <span>
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التحديث...', 'Updating...')
+                                  : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                              </span>
+                            </button>
+
+                            {verifyActionFeedback?.phone === client.phone && (
+                              <p
+                                className={`text-[11px] font-bold px-1 ${
+                                  verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                                }`}
+                              >
+                                {verifyActionFeedback.text}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
                         <div
                           onClick={(e) => e.stopPropagation()}
                           className="bg-slate-50 border border-slate-200/90 rounded-xl p-2 space-y-1.5"
@@ -3210,61 +3346,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             })}
                           </div>
                         </div>
-
-                        {canActivateOtp && !isClientAccountVerified(client) && (
-                          <div
-                            onClick={(e) => e.stopPropagation()}
-                            className="bg-orange-50/80 border border-orange-200 rounded-xl p-2 space-y-1.5"
-                          >
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleAdminInstantActivate(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleSendVerificationWhatsApp(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={sendingVerifyNotifPhone === client.phone}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleSendVerificationAppPush(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {sendingVerifyNotifPhone === client.phone
-                                  ? t('جاري الإرسال...', 'Sending...')
-                                  : t(
-                                      '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                                      '🔔 Push Code to App'
-                                    )}
-                              </button>
-                            </div>
-                            {verifyActionFeedback?.phone === client.phone && (
-                              <p
-                                className={`text-[11px] font-bold px-1 ${
-                                  verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
-                                }`}
-                              >
-                                {verifyActionFeedback.text}
-                              </p>
-                            )}
-                          </div>
-                        )}
 
                         <div className="flex flex-wrap items-center gap-2">
                           <button
@@ -3593,44 +3674,100 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       {canActivateOtp && !isClientAccountVerified(partner) && (
                         <div
                           onClick={(e) => e.stopPropagation()}
-                          className="bg-orange-50/80 border border-orange-200 rounded-xl p-2 flex flex-wrap items-center gap-1.5"
+                          className="bg-orange-50/85 border border-orange-200 rounded-xl p-2.5 space-y-2"
                         >
                           <button
                             type="button"
+                            disabled={togglingVerifyPhone === partner.phone}
                             onClick={(e) => {
                               e.stopPropagation();
                               void handleAdminInstantActivate(partner);
                             }}
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black cursor-pointer transition"
+                            className="w-full px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs flex items-center justify-center gap-1.5"
                           >
-                            {t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}
+                            <span>
+                              {togglingVerifyPhone === partner.phone
+                                ? t('جاري التوثيق...', 'Verifying...')
+                                : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                            </span>
                           </button>
+
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleSendVerificationWhatsApp(partner);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
+                            >
+                              {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={sendingVerifyNotifPhone === partner.phone}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleSendVerificationAppPush(partner);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition"
+                            >
+                              {sendingVerifyNotifPhone === partner.phone
+                                ? t('جاري الإرسال...', 'Sending...')
+                                : t('🔔 إشعار التطبيق', '🔔 App Push')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleSendVerificationSms(partner);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition"
+                            >
+                              {t('📱 SMS', '📱 SMS')}
+                            </button>
+                          </div>
+
+                          {verifyActionFeedback?.phone === partner.phone && (
+                            <p
+                              className={`text-[11px] font-bold px-1 ${
+                                verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                              }`}
+                            >
+                              {verifyActionFeedback.text}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {canActivateOtp && isClientAccountVerified(partner) && (
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2 space-y-1.5"
+                        >
                           <button
                             type="button"
+                            disabled={togglingVerifyPhone === partner.phone}
                             onClick={(e) => {
                               e.stopPropagation();
-                              void handleSendVerificationWhatsApp(partner);
+                              void handleAdminRevertUnverified(partner);
                             }}
-                            className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
+                            className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition"
                           >
-                            {t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}
+                            {togglingVerifyPhone === partner.phone
+                              ? t('جاري التحديث...', 'Updating...')
+                              : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
                           </button>
-                          <button
-                            type="button"
-                            disabled={sendingVerifyNotifPhone === partner.phone}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleSendVerificationAppPush(partner);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition"
-                          >
-                            {sendingVerifyNotifPhone === partner.phone
-                              ? t('جاري الإرسال...', 'Sending...')
-                              : t(
-                                  '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                                  '🔔 Push Code to App'
-                                )}
-                          </button>
+
+                          {verifyActionFeedback?.phone === partner.phone && (
+                            <p
+                              className={`text-[11px] font-bold px-1 ${
+                                verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                              }`}
+                            >
+                              {verifyActionFeedback.text}
+                            </p>
+                          )}
                         </div>
                       )}
 
@@ -3872,21 +4009,25 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     </div>
 
                     {canActivateOtp && !isClientAccountVerified(activeChatClient) && (
-                      <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                      <div className="pt-2 border-t border-slate-100 space-y-2">
+                        <button
+                          type="button"
+                          disabled={togglingVerifyPhone === activeChatClient.phone}
+                          onClick={() => void handleAdminInstantActivate(activeChatClient)}
+                          className="w-full sm:w-auto px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs"
+                        >
+                          {togglingVerifyPhone === activeChatClient.phone
+                            ? t('جاري التوثيق...', 'Verifying...')
+                            : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                        </button>
+
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => void handleAdminInstantActivate(activeChatClient)}
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black cursor-pointer transition"
-                          >
-                            {t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}
-                          </button>
                           <button
                             type="button"
                             onClick={() => void handleSendVerificationWhatsApp(activeChatClient)}
                             className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
                           >
-                            {t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}
+                            {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
                           </button>
                           <button
                             type="button"
@@ -3896,12 +4037,40 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           >
                             {sendingVerifyNotifPhone === activeChatClient.phone
                               ? t('جاري الإرسال...', 'Sending...')
-                              : t(
-                                  '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                                  '🔔 Push Code to App'
-                                )}
+                              : t('🔔 إشعار التطبيق', '🔔 App Push')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSendVerificationSms(activeChatClient)}
+                            className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition"
+                          >
+                            {t('📱 SMS', '📱 SMS')}
                           </button>
                         </div>
+                        {verifyActionFeedback?.phone === activeChatClient.phone && (
+                          <p
+                            className={`text-[11px] font-bold ${
+                              verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                            }`}
+                          >
+                            {verifyActionFeedback.text}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {canActivateOtp && isClientAccountVerified(activeChatClient) && (
+                      <div className="pt-2 border-t border-slate-100 space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={togglingVerifyPhone === activeChatClient.phone}
+                          onClick={() => void handleAdminRevertUnverified(activeChatClient)}
+                          className="px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition"
+                        >
+                          {togglingVerifyPhone === activeChatClient.phone
+                            ? t('جاري التحديث...', 'Updating...')
+                            : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                        </button>
                         {verifyActionFeedback?.phone === activeChatClient.phone && (
                           <p
                             className={`text-[11px] font-bold ${
@@ -4058,11 +4227,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 {canActivateOtp && isClientAccountVerified(selectedClient) && (
                   <button
                     type="button"
-                    disabled={!isEditUnlocked}
-                    onClick={() => handleToggleVerified(selectedClient)}
-                    className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100"
+                    disabled={togglingVerifyPhone === selectedClient.phone}
+                    onClick={() => void handleAdminRevertUnverified(selectedClient)}
+                    className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60 bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100"
                   >
-                    {t('✅ موثق', '✅ Verified')}
+                    <span>
+                      {togglingVerifyPhone === selectedClient.phone
+                        ? t('جاري التحديث...', 'Updating...')
+                        : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                    </span>
                   </button>
                 )}
 
@@ -4070,17 +4243,22 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   <>
                     <button
                       type="button"
+                      disabled={togglingVerifyPhone === selectedClient.phone}
                       onClick={() => void handleAdminInstantActivate(selectedClient)}
-                      className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 bg-emerald-600 border-emerald-700 text-white hover:bg-emerald-700 shadow-xs"
+                      className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 bg-emerald-600 border-emerald-700 text-white hover:bg-emerald-700 disabled:opacity-60 shadow-xs"
                     >
-                      <span>{t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}</span>
+                      <span>
+                        {togglingVerifyPhone === selectedClient.phone
+                          ? t('جاري التوثيق...', 'Verifying...')
+                          : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                      </span>
                     </button>
                     <button
                       type="button"
                       onClick={() => void handleSendVerificationWhatsApp(selectedClient)}
                       className="px-3 py-2 rounded-xl text-xs font-black border border-[#128C7E]/30 transition cursor-pointer flex items-center gap-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white shadow-xs"
                     >
-                      <span>{t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}</span>
+                      <span>{t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}</span>
                     </button>
                     <button
                       type="button"
@@ -4091,11 +4269,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       <span>
                         {sendingVerifyNotifPhone === selectedClient.phone
                           ? t('جاري الإرسال...', 'Sending...')
-                          : t(
-                              '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                              '🔔 Push Code to App'
-                            )}
+                          : t('🔔 إشعار التطبيق', '🔔 App Push')}
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSendVerificationSms(selectedClient)}
+                      className="px-3 py-2 rounded-xl text-xs font-black border border-sky-700 transition cursor-pointer flex items-center gap-1.5 bg-sky-600 hover:bg-sky-700 text-white shadow-xs"
+                    >
+                      <span>{t('📱 SMS', '📱 SMS')}</span>
                     </button>
                   </>
                 )}
@@ -5591,6 +5773,35 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             {buildActivationMagicLink(client.phone, client.otp, displayName)}
                           </div>
 
+                          {!clientVerified ? (
+                            <button
+                              type="button"
+                              disabled={togglingVerifyPhone === client.phone}
+                              onClick={() => void handleAdminInstantActivate(client)}
+                              className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 disabled:opacity-60 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
+                            >
+                              <CheckCircle2 className="w-4 h-4 shrink-0" />
+                              <span>
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التوثيق...', 'Verifying...')
+                                  : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={togglingVerifyPhone === client.phone}
+                              onClick={() => void handleAdminRevertUnverified(client)}
+                              className="w-full min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                            >
+                              <span>
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التحديث...', 'Updating...')
+                                  : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                              </span>
+                            </button>
+                          )}
+
                           {(() => {
                             const phoneDigits =
                               client.phoneNormalized || normalizePhone(client.phone);
@@ -5630,7 +5841,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                   className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
                                 >
                                   <Send className="w-3.5 h-3.5 shrink-0" />
-                                  <span>{t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}</span>
+                                  <span>{t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}</span>
                                 </button>
 
                                 <button
@@ -5643,10 +5854,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                   <span>
                                     {sendingVerifyNotifPhone === client.phone
                                       ? t('جاري الإرسال...', 'Sending...')
-                                      : t(
-                                          '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                                          '🔔 Push Code to App'
-                                        )}
+                                      : t('🔔 إرسال الكود أوتوماتيك للتطبيق', '🔔 Push Code to App')}
                                   </span>
                                 </button>
 
@@ -5676,19 +5884,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             >
                               {verifyActionFeedback.text}
                             </div>
-                          )}
-
-                          {!clientVerified && (
-                            <button
-                              type="button"
-                              onClick={() => void handleAdminInstantActivate(client)}
-                              className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
-                            >
-                              <CheckCircle2 className="w-4 h-4 shrink-0" />
-                              <span>
-                                {t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}
-                              </span>
-                            </button>
                           )}
                         </div>
                       );
@@ -5791,33 +5986,57 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           </div>
 
                           {canActivateOtp && !clientVerified && (
-                            <div className="pt-2 border-t border-orange-200/80 flex flex-wrap items-center gap-1.5">
+                            <div className="pt-2 border-t border-orange-200/80 space-y-2">
                               <button
                                 type="button"
+                                disabled={togglingVerifyPhone === client.phone}
                                 onClick={() => void handleAdminInstantActivate(client)}
-                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black cursor-pointer transition"
+                                className="w-full sm:w-auto px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs"
                               >
-                                {t('✅ توثيق فوري بيدي', '✅ Verify Instantly')}
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التوثيق...', 'Verifying...')
+                                  : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
                               </button>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleSendVerificationWhatsApp(client)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
+                                >
+                                  {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={sendingVerifyNotifPhone === client.phone}
+                                  onClick={() => void handleSendVerificationAppPush(client)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition"
+                                >
+                                  {sendingVerifyNotifPhone === client.phone
+                                    ? t('جاري الإرسال...', 'Sending...')
+                                    : t('🔔 إشعار التطبيق', '🔔 App Push')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleSendVerificationSms(client)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition"
+                                >
+                                  {t('📱 SMS', '📱 SMS')}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {canActivateOtp && clientVerified && (
+                            <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => void handleSendVerificationWhatsApp(client)}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
+                                disabled={togglingVerifyPhone === client.phone}
+                                onClick={() => void handleAdminRevertUnverified(client)}
+                                className="px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition"
                               >
-                                {t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={sendingVerifyNotifPhone === client.phone}
-                                onClick={() => void handleSendVerificationAppPush(client)}
-                                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition"
-                              >
-                                {sendingVerifyNotifPhone === client.phone
-                                  ? t('جاري الإرسال...', 'Sending...')
-                                  : t(
-                                      '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
-                                      '🔔 Push Code to App'
-                                    )}
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التحديث...', 'Updating...')
+                                  : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
                               </button>
                             </div>
                           )}

@@ -14,6 +14,7 @@ import type { TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
 import {
   adminInstantActivateClientCloud,
+  adminRevertClientUnverifiedCloud,
   adminSendVerificationCodeNotificationCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
@@ -105,6 +106,16 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
     setActivatingPhone(client.phone);
     try {
       await adminInstantActivateClientCloud(client.phone);
+    } finally {
+      setActivatingPhone(null);
+    }
+  };
+
+  const handleRevertUnverified = async (client: TravelerProfile) => {
+    if (activatingPhone) return;
+    setActivatingPhone(client.phone);
+    try {
+      await adminRevertClientUnverifiedCloud(client.phone);
     } finally {
       setActivatingPhone(null);
     }
@@ -271,6 +282,35 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                     {buildActivationMagicLink(client.phone, client.otp, displayName)}
                   </div>
 
+                  {!isVerified ? (
+                    <button
+                      type="button"
+                      disabled={activatingPhone === client.phone}
+                      onClick={() => void handleInstantActivate(client)}
+                      className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 disabled:opacity-60 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
+                    >
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>
+                        {activatingPhone === client.phone
+                          ? t('جاري التوثيق...', 'Verifying...')
+                          : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={activatingPhone === client.phone}
+                      onClick={() => void handleRevertUnverified(client)}
+                      className="w-full min-h-[40px] px-3.5 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <span>
+                        {activatingPhone === client.phone
+                          ? t('جاري التحديث...', 'Updating...')
+                          : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                      </span>
+                    </button>
+                  )}
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       type="button"
@@ -296,7 +336,7 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                       className="min-h-[38px] px-3 py-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer transition"
                     >
                       <Send className="w-3.5 h-3.5 shrink-0" />
-                      <span>{t('📲 إرسال كود التوثيق واتساب', '📲 Send Code WhatsApp')}</span>
+                      <span>{t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}</span>
                     </button>
 
                     <button
@@ -310,7 +350,7 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                         {pushingPhone === client.phone
                           ? t('جاري إرسال الإشعار...', 'Sending Notification...')
                           : t(
-                              '🔔 إرسال كود التوثيق أوتوماتيك للتطبيق',
+                              '🔔 إرسال الكود أوتوماتيك للتطبيق',
                               '🔔 Send Verification Code to App'
                             )}
                       </span>
@@ -331,22 +371,6 @@ export const QuickOtpModal: React.FC<QuickOtpModalProps> = ({
                     <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-1.5 text-[11px] font-bold text-emerald-900">
                       {pushFeedback.text}
                     </div>
-                  )}
-
-                  {!isVerified && (
-                    <button
-                      type="button"
-                      disabled={activatingPhone === client.phone}
-                      onClick={() => void handleInstantActivate(client)}
-                      className="w-full min-h-[42px] px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#C6A052] via-emerald-600 to-emerald-700 hover:brightness-105 disabled:opacity-60 text-white border border-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shadow-sm transition active:scale-[0.99] cursor-pointer"
-                    >
-                      <CheckCircle2 className="w-4 h-4 shrink-0" />
-                      <span>
-                        {activatingPhone === client.phone
-                          ? t('جاري التوثيق...', 'Verifying...')
-                          : t('✅ توثيق فوري بيدي', '✅ Verify Instantly Now')}
-                      </span>
-                    </button>
                   )}
                 </div>
               );

@@ -1,20 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { isRunningInApp } from '../utils/appEnvironment';
+import {
+  APP_BUILD_ID,
+  clearAllCachesAndWorkers,
+  performFullCacheAndUiCleanup,
+  waitForStartupBuildCleanup,
+} from '../utils/cacheCleanup';
 
-const CURRENT_BUILD_VERSION =
-  typeof __APP_BUILD_VERSION__ !== 'undefined' ? __APP_BUILD_VERSION__ : '';
 const AUTO_RELOAD_SESSION_KEY = 'masarik_auto_synced_build_v1';
-
-async function clearAllBrowserCaches() {
-  if ('caches' in window) {
-    try {
-      const names = await caches.keys();
-      await Promise.all(names.map((name) => caches.delete(name)));
-    } catch {
-      // Ignore cache clear failures
-    }
-  }
-}
 
 export function useSiteUpdate() {
   const [hasUpdate, setHasUpdate] = useState(false);
@@ -27,14 +20,18 @@ export function useSiteUpdate() {
     isApplyingRef.current = true;
     setIsUpdating(true);
 
-    await clearAllBrowserCaches();
-
     if (waitingWorkerRef.current) {
-      waitingWorkerRef.current.postMessage({ type: 'CLEAR_ALL_CACHES' });
-      waitingWorkerRef.current.postMessage({ type: 'SKIP_WAITING' });
-    } else if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_ALL_CACHES' });
+      try {
+        waitingWorkerRef.current.postMessage({ type: 'CLEAR_ALL_CACHES' });
+        waitingWorkerRef.current.postMessage({ type: 'SKIP_WAITING' });
+      } catch {
+        // Ignore SW messaging error
+      }
     }
+
+    await performFullCacheAndUiCleanup({
+      unregisterServiceWorkers: !waitingWorkerRef.current,
+    });
 
     setTimeout(() => {
       try {
@@ -44,7 +41,7 @@ export function useSiteUpdate() {
       } catch {
         window.location.reload();
       }
-    }, 300);
+    }, 250);
   }, []);
 
   const checkForSiteVersionChange = useCallback(async () => {
@@ -61,10 +58,10 @@ export function useSiteUpdate() {
       if (
         data?.version &&
         data.version !== '1.0.1-dev' &&
-        CURRENT_BUILD_VERSION &&
-        data.version !== CURRENT_BUILD_VERSION
+        APP_BUILD_ID &&
+        data.version !== APP_BUILD_ID
       ) {
-        await clearAllBrowserCaches();
+        await performFullCacheAndUiCleanup({ unregisterServiceWorkers: true });
 
         // Auto-sync immediately once per remote build so installed APK & browsers reflect live site updates without an APK rebuild
         let alreadyAutoSynced = false;
@@ -92,6 +89,7 @@ export function useSiteUpdate() {
   useEffect(() => {
     let registrationRef: ServiceWorkerRegistration | null = null;
     let refreshing = false;
+    let cancelled = false;
 
     const handleControllerChange = () => {
       if (refreshing) return;
@@ -101,50 +99,42 @@ export function useSiteUpdate() {
 
     if (import.meta.env.DEV) {
       // In dev mode, ensure no stale Service Worker intercepts /src/*.ts Vite modules (keep FCM SW intact)
-      void clearAllBrowserCaches();
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker
-          .getRegistrations()
-          .then((regs) => {
-            regs.forEach((reg) => {
-              if (!reg.scope.includes('firebase-cloud-messaging-push-scope')) {
-                void reg.unregister();
-              }
-            });
-          })
-          .catch(() => {});
-      }
+      void clearAllCachesAndWorkers({ unregisterServiceWorkers: true });
     } else if ('serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
 
-      navigator.serviceWorker
-        .register('/sw.js', { updateViaCache: 'none' })
-        .then((registration) => {
-          registrationRef = registration;
+      void waitForStartupBuildCleanup().then(() => {
+        if (cancelled) return;
+        navigator.serviceWorker
+          .register('/sw.js', { updateViaCache: 'none' })
+          .then((registration) => {
+            if (cancelled) return;
+            registrationRef = registration;
 
-          if (registration.waiting) {
-            waitingWorkerRef.current = registration.waiting;
-            void clearAllBrowserCaches();
-            setHasUpdate(true);
-          }
+            if (registration.waiting) {
+              waitingWorkerRef.current = registration.waiting;
+              void clearAllCachesAndWorkers();
+              setHasUpdate(true);
+            }
 
-          registration.addEventListener('updatefound', () => {
-            const newWorker = registration.installing;
-            if (!newWorker) return;
+            registration.addEventListener('updatefound', () => {
+              const newWorker = registration.installing;
+              if (!newWorker) return;
 
-            newWorker.addEventListener('statechange', () => {
-              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                waitingWorkerRef.current = newWorker;
-                void clearAllBrowserCaches();
-                setHasUpdate(true);
-              }
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  waitingWorkerRef.current = newWorker;
+                  void clearAllCachesAndWorkers();
+                  setHasUpdate(true);
+                }
+              });
             });
-          });
 
-          // Trigger background SW check
-          registration.update().catch(() => {});
-        })
-        .catch(() => {});
+            // Trigger background SW check
+            registration.update().catch(() => {});
+          })
+          .catch(() => {});
+      });
     }
 
     // Initial version.json check + periodic checks + tab focus checks
@@ -165,6 +155,7 @@ export function useSiteUpdate() {
     window.addEventListener('focus', handleVisibilityOrFocus);
 
     return () => {
+      cancelled = true;
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       window.removeEventListener('focus', handleVisibilityOrFocus);

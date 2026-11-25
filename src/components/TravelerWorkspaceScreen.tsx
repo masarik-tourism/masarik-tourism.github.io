@@ -534,7 +534,8 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       }
 
       if (
-        cloudProfile.verified &&
+        cloudProfile.verified === true &&
+        cloudProfile.accountStatus !== 'pending_verification' &&
         (cloudProfile.activatedByAdmin || cloudProfile.adminBypassOtpAt) &&
         otpPurpose !== 'forgot_pin'
       ) {

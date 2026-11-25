@@ -47,6 +47,8 @@ import {
 } from '../utils/fcmPushService';
 import { saveAdminFcmTokenCloud } from '../utils/adminAuthStore';
 import { getDisplayableDriveImageUrl } from '../utils/firebaseStorageHelper';
+import { performFullCacheAndUiCleanup } from '../utils/cacheCleanup';
+import { isClientAccountVerified } from '../utils/whatsappHelpers';
 import { ChatThreadSummary, TravelerProfile } from '../types/travel';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
@@ -248,38 +250,26 @@ export const Navbar: React.FC<NavbarProps> = ({
     }
   }, [canAdminQuickChat, totalAdminUnreadCount, latestUnreadAt]);
 
-  const handleHardRefresh = () => {
+  const handleHardRefresh = async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
     setShowRefreshToast(true);
 
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      try {
-        navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_ALL_CACHES' });
-      } catch {}
-    }
-    if ('caches' in window) {
-      try {
-        caches
-          .keys()
-          .then((names) => {
-            names.forEach((name) => {
-              caches.delete(name);
-            });
-          })
-          .catch(() => {});
-      } catch {}
+    try {
+      await performFullCacheAndUiCleanup({ unregisterServiceWorkers: true });
+    } catch {
+      // Ignore cleanup errors and continue forced reload
     }
 
     setTimeout(() => {
       try {
         const url = new URL(window.location.href);
-        url.searchParams.set('t', Date.now().toString());
-        window.location.href = url.toString();
+        url.searchParams.set('v', Date.now().toString());
+        window.location.replace(url.toString());
       } catch {
         window.location.reload();
       }
-    }, 600);
+    }, 250);
   };
 
   useEffect(() => {
@@ -553,7 +543,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 />
               ) : activeTraveler?.accountType === 'b2b_partner' ? (
                 <Building2 className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
-              ) : activeTraveler?.verified ? (
+              ) : isClientAccountVerified(activeTraveler) ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
               ) : (
                 <UserCheck className="w-3.5 h-3.5 text-[#9E7B33] shrink-0" />
@@ -1137,13 +1127,13 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
             <span
               className={`text-[11px] font-bold ${
-                activeTraveler?.verified ? 'text-emerald-800' : 'text-amber-800'
+                isClientAccountVerified(activeTraveler) ? 'text-emerald-800' : 'text-orange-700'
               }`}
             >
               {activeTraveler
-                ? activeTraveler.verified
-                  ? t('حساب موثق ✓', 'Verified ✓')
-                  : t('غير موثق', 'Unverified')
+                ? isClientAccountVerified(activeTraveler)
+                  ? t('✅ موثق', '✅ Verified')
+                  : t('⚠️ غير موثق', '⚠️ Unverified')
                 : t('دخول', 'Sign In')}
             </span>
           </button>
