@@ -2,6 +2,16 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Shared Platform Rules: Teb Al-Hajayzah (طب الحجايزة)
+    match /teb_alhajayzah_accounts/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_clinics/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_appointments/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_messages/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_settings/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_fcm_tokens/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah_records/{docId} { allow read, write: if true; }
+    match /teb_alhajayzah/{document=**} { allow read, write: if true; }
+
     // Global Default-Deny Catch-All
     match /{document=**} {
       allow read, write: if false;
