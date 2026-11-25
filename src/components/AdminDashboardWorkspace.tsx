@@ -64,6 +64,7 @@ import {
   VisaOrderStatus,
 } from '../types/travel';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
+import { B2cVisasPanel } from './B2cVisasPanel';
 import { DirectChatPanel } from './DirectChatPanel';
 import {
   NATIVE_FCM_TOKEN_EVENT,
@@ -177,11 +178,16 @@ import {
   isClientAccountVerified,
   isClientOrderCompleted,
 } from '../utils/whatsappHelpers';
+import {
+  evaluateB2cExitCountdown,
+  isB2cUrgentOrWarning,
+} from '../utils/b2cVisaHelpers';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
 type DashboardTab =
   | 'individuals'
+  | 'b2c_visas'
   | 'b2b_partners'
   | 'live_chat'
   | 'messages_otp'
@@ -189,8 +195,12 @@ type DashboardTab =
   | 'settings';
 type OrderFilter =
   | 'all'
-  | 'online'
+  | 'verified'
+  | 'unverified'
   | 'active'
+  | 'no_orders'
+  | 'b2c'
+  | 'online'
   | 'with_files'
   | 'completed'
   | 'expiring_passports';
@@ -2159,12 +2169,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     individualTravelers.filter((tr) => {
       const hasActive = hasClientActiveOrder(tr);
       const isCompleted = isClientOrderCompleted(tr);
+      const isVerified = isClientAccountVerified(tr);
+      const hasB2c = Boolean(tr.b2cVisa);
       const hasFiles = (tr.documents?.length || 0) > 0;
       const online = isUserCurrentlyOnline(tr);
       const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
 
       if (orderFilter === 'online' && !online) return false;
+      if (orderFilter === 'verified' && !isVerified) return false;
+      if (orderFilter === 'unverified' && isVerified) return false;
       if (orderFilter === 'active' && (!hasActive || isCompleted)) return false;
+      if (orderFilter === 'no_orders' && hasActive) return false;
+      if (orderFilter === 'b2c' && !hasB2c) return false;
       if (orderFilter === 'with_files' && !hasFiles) return false;
       if (orderFilter === 'completed' && !isCompleted) return false;
       if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
@@ -2255,6 +2271,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   );
 
   const pendingCount = pendingOtpClients.length;
+  const verifiedClientsCount = individualTravelers.filter((tr) =>
+    isClientAccountVerified(tr)
+  ).length;
+  const unverifiedClientsCount = individualTravelers.length - verifiedClientsCount;
+  const noOrdersClientsCount = individualTravelers.filter(
+    (tr) => !hasClientActiveOrder(tr)
+  ).length;
+  const b2cIndividualCount = individualTravelers.filter((tr) => Boolean(tr.b2cVisa)).length;
+  const b2cActiveTravelers = travelers.filter(
+    (tr) => tr.b2cVisa && tr.b2cVisa.status !== 'exited'
+  );
+  const b2cUrgentAlertsCount = b2cActiveTravelers.filter((tr) =>
+    isB2cUrgentOrWarning(tr.b2cVisa)
+  ).length;
   const activeOrdersCount = individualTravelers.filter(
     (tr) => hasClientActiveOrder(tr) && !isClientOrderCompleted(tr)
   ).length;
@@ -2583,7 +2613,149 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           </div>
         )}
 
-        {/* Organized 6-Tab CRM, B2B Partners & Live Chat Navigation */}
+        {/* Urgent B2C Visa Exit Deadline Alert Banner (Always Visible at Top When Active Alerts Exist) */}
+        {canManageClients && b2cUrgentAlertsCount > 0 && (
+          <div className="bg-gradient-to-l from-red-50 via-white to-amber-50 border-2 border-red-300 rounded-2xl p-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-black text-red-900 text-sm">
+                    {t(
+                      `تنبيه عاجل: ${b2cUrgentAlertsCount} مسافر B2C اقترب أو تجاوز أقصى موعد للخروج!`,
+                      `Urgent B2C Alert: ${b2cUrgentAlertsCount} traveler(s) near or past max departure date!`
+                    )}
+                  </span>
+                </div>
+                <p className="text-slate-700 font-bold mt-0.5">
+                  {t(
+                    'يرجى مراجعة قسم تأشيرات B2C وإرسال تذكير واتساب للمسافرين لتجنب غرامات التأخير.',
+                    'Review the B2C Visas tab and send WhatsApp exit reminders to avoid overstay penalties.'
+                  )}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('b2c_visas');
+                setSelectedClientPhone(null);
+              }}
+              className="min-h-[38px] px-4 py-2 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-black flex items-center justify-center gap-1.5 shrink-0 cursor-pointer transition shadow-xs"
+            >
+              <span>{t('🕋 مراجعة تنبيهات B2C الآن', '🕋 Review B2C Alerts')}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Executive Top KPI Strip */}
+        {canManageClients && !selectedClient && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('individuals');
+                handleKpiFilterClick('all');
+              }}
+              className="bg-white border border-slate-200 hover:border-[#0F2438] rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+            >
+              <div>
+                <span className="text-[11px] font-bold text-slate-500 block">
+                  {t('إجمالي العملاء', 'Total Clients')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-[#0F2438] font-mono">
+                  {individualTravelers.length}
+                </span>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-slate-100 text-[#0F2438] flex items-center justify-center shrink-0">
+                <Users className="w-4 h-4" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('individuals');
+                handleKpiFilterClick('verified');
+              }}
+              className="bg-emerald-50/75 border border-emerald-200 hover:border-emerald-400 rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+            >
+              <div>
+                <span className="text-[11px] font-bold text-emerald-900 block">
+                  {t('الحسابات الموثقة', 'Verified Accounts')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-emerald-800 font-mono">
+                  {verifiedClientsCount}
+                </span>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('individuals');
+                handleKpiFilterClick('active');
+              }}
+              className="bg-sky-50/75 border border-sky-200 hover:border-sky-400 rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+            >
+              <div>
+                <span className="text-[11px] font-bold text-sky-900 block">
+                  {t('الطلبات الجارية', 'Active Orders')}
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-sky-900 font-mono">
+                  {activeOrdersCount}
+                </span>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0">
+                <Inbox className="w-4 h-4" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('b2c_visas');
+                setSelectedClientPhone(null);
+              }}
+              className={`border rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start ${
+                b2cUrgentAlertsCount > 0
+                  ? 'bg-red-50 border-red-300 hover:border-red-500'
+                  : 'bg-[#FAF8F2] border-[#C6A052]/50 hover:border-[#C6A052]'
+              }`}
+            >
+              <div>
+                <span
+                  className={`text-[11px] font-bold block ${
+                    b2cUrgentAlertsCount > 0 ? 'text-red-900' : 'text-[#0F2438]'
+                  }`}
+                >
+                  {t('تنبيهات خروج B2C العاجلة', 'Urgent B2C Exits')}
+                </span>
+                <span
+                  className={`text-xl sm:text-2xl font-black font-mono ${
+                    b2cUrgentAlertsCount > 0 ? 'text-red-700' : 'text-[#0F2438]'
+                  }`}
+                >
+                  {b2cUrgentAlertsCount}
+                </span>
+              </div>
+              <div
+                className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-base ${
+                  b2cUrgentAlertsCount > 0 ? 'bg-red-100 text-red-700' : 'bg-[#0F2438] text-[#E5C887]'
+                }`}
+              >
+                🕋
+              </div>
+            </button>
+          </div>
+        )}
+
+        {/* Organized CRM, B2C Visas, B2B Partners & Live Chat Navigation */}
         <div className="bg-white rounded-2xl p-2 border border-slate-200 shadow-xs flex items-center gap-2 overflow-x-auto">
           {canManageClients && (
             <button
@@ -2607,6 +2779,31 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 <span className="px-1.5 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] tabular-nums font-black flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
                   <span>{individualsOnlineCount}</span>
+                </span>
+              )}
+            </button>
+          )}
+
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('b2c_visas');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'b2c_visas'
+                  ? 'bg-[#0F2438] text-[#E5C887] ring-1 ring-[#C6A052] shadow-xs'
+                  : 'text-slate-700 hover:bg-[#FAF8F2]'
+              }`}
+            >
+              <span>{t('🕋 تأشيرات B2C', '🕋 B2C Visas')}</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-[#C6A052]/20 text-[10.5px] tabular-nums font-black border border-[#C6A052]/40">
+                {b2cActiveTravelers.length}
+              </span>
+              {b2cUrgentAlertsCount > 0 && (
+                <span className="min-w-[20px] h-[20px] px-1.5 rounded-full bg-red-600 text-white text-[10.5px] font-black flex items-center justify-center tabular-nums">
+                  {b2cUrgentAlertsCount}
                 </span>
               )}
             </button>
@@ -3038,12 +3235,28 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       label: t(`الكل (${individualTravelers.length})`, `All (${individualTravelers.length})`),
                     },
                     {
-                      id: 'online',
-                      label: t(`متصلون الآن (${individualsOnlineCount})`, `Online (${individualsOnlineCount})`),
+                      id: 'verified',
+                      label: t(`موثق (${verifiedClientsCount})`, `Verified (${verifiedClientsCount})`),
+                    },
+                    {
+                      id: 'unverified',
+                      label: t(`غير موثق (${unverifiedClientsCount})`, `Unverified (${unverifiedClientsCount})`),
                     },
                     {
                       id: 'active',
-                      label: t(`جارية (${activeOrdersCount})`, `Active (${activeOrdersCount})`),
+                      label: t(`طلبات نشطة (${activeOrdersCount})`, `Active Orders (${activeOrdersCount})`),
+                    },
+                    {
+                      id: 'no_orders',
+                      label: t(`بدون طلبات (${noOrdersClientsCount})`, `No Orders (${noOrdersClientsCount})`),
+                    },
+                    {
+                      id: 'b2c',
+                      label: t(`🕋 B2C (${b2cIndividualCount})`, `🕋 B2C (${b2cIndividualCount})`),
+                    },
+                    {
+                      id: 'online',
+                      label: t(`متصلون الآن (${individualsOnlineCount})`, `Online (${individualsOnlineCount})`),
                     },
                     {
                       id: 'with_files',
@@ -3073,6 +3286,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           : 'bg-[#0F2438] text-[#E5C887]'
                         : f.id === 'expiring_passports' && expiringPassportCount > 0
                         ? 'bg-red-50 border border-red-200 text-red-800 hover:bg-red-100'
+                        : f.id === 'b2c' && b2cIndividualCount > 0
+                        ? 'bg-[#FAF8F2] border border-[#C6A052]/50 text-[#0F2438] hover:bg-[#F3ECE0]'
                         : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
@@ -3091,7 +3306,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 {t('لا توجد طلبات أو ملفات عملاء تطابق البحث حالياً.', 'No client requests match your filter.')}
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
                 {orderedRequests.map((client) => {
                   const docsCount = client.documents?.length || 0;
                   const receiptsCount = (client.documents || []).filter((d) => d.docType === 'receipt').length;
@@ -3183,6 +3398,32 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                       : t('⚠️ غير موثق / غير مفعل', '⚠️ Unverified')}
                                   </span>
                                 </span>
+                                {client.b2cVisa && (() => {
+                                  const b2cEval = evaluateB2cExitCountdown(client.b2cVisa);
+                                  const isExited = client.b2cVisa.status === 'exited';
+                                  return (
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                                        isExited
+                                          ? 'bg-slate-100 border-slate-300 text-slate-600'
+                                          : b2cEval?.alertLevel === 'urgent'
+                                          ? 'bg-red-50 border-red-300 text-red-800'
+                                          : b2cEval?.alertLevel === 'warning'
+                                          ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                          : 'bg-[#FAF8F2] border-[#C6A052]/60 text-[#0F2438]'
+                                      }`}
+                                    >
+                                      {client.b2cVisa.visaType === 'umrah_b2c'
+                                        ? t('🕋 عمرة B2C', '🕋 Umrah B2C')
+                                        : t('🌍 B2C حرة', '🌍 Free B2C')}
+                                      {!isExited && b2cEval
+                                        ? ` · ${b2cEval.remainingDays}${t('ي', 'd')}`
+                                        : isExited
+                                        ? ` · ${t('خرج', 'Exited')}`
+                                        : ''}
+                                    </span>
+                                  );
+                                })()}
                               </div>
 
                               {/* Quick WhatsApp Contact Bar + Copy */}
@@ -4001,6 +4242,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               </div>
             )}
           </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* TAB 1.5: B2C VISAS (UMRAH & FREE B2C STAY TRACKER + EXIT ALERTS)       */}
+        {/* ===================================================================== */}
+        {activeTab === 'b2c_visas' && canManageClients && !selectedClient && (
+          <B2cVisasPanel
+            travelers={travelers}
+            canManageClients={canManageClients}
+            onRefreshTravelers={loadTravelers}
+            onOpenClientFolder={handleOpenClientFromAnyTab}
+            onCopyValue={(key, val) => void handleAdminCopyValue(key, val)}
+            copiedKey={adminCopiedKey}
+          />
         )}
 
         {/* ===================================================================== */}

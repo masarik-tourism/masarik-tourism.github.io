@@ -279,10 +279,25 @@ export interface TravelerProfile {
   issuedDocuments?: IssuedDocument[];
   notifications?: ClientNotification[];
   appointmentDetails?: AppointmentDetails;
+  b2cVisa?: B2cVisaRecord;
   fcmToken?: string;
   fcmTokens?: string[];
   fcmUpdatedAt?: string;
   pushNotificationsEnabled?: boolean;
+}
+
+export type B2cVisaType = 'umrah_b2c' | 'free_b2c';
+export type B2cVisaStatus = 'active' | 'exited';
+
+export interface B2cVisaRecord {
+  visaType: B2cVisaType;
+  entryDate: string;
+  stayDays: number;
+  expectedExitDate: string;
+  status: B2cVisaStatus;
+  exitedAt?: string;
+  notes?: string;
+  updatedAt?: string;
 }
 
 export interface SaudiVisaVisitor {

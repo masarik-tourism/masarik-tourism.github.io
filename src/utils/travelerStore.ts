@@ -19,6 +19,8 @@ import {
   ActiveSessionMode,
   ActiveSessionRecord,
   AppointmentDetails,
+  B2cVisaRecord,
+  B2cVisaType,
   CanonicalVisaOrderStatus,
   ClientNotification,
   DocumentReviewStatus,
@@ -35,6 +37,7 @@ import {
   TrustedDevice,
   VisaOrderStatus,
 } from '../types/travel';
+import { calculateExpectedExitDate } from './b2cVisaHelpers';
 import {
   TravelRepository,
   normalizeOrderStatusValue,
@@ -868,6 +871,30 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
       payload.appointmentDetails = cleanAppt;
     }
   }
+  if (profile.b2cVisa && typeof profile.b2cVisa === 'object') {
+    const bv = profile.b2cVisa;
+    const visaType: B2cVisaType = bv.visaType === 'free_b2c' ? 'free_b2c' : 'umrah_b2c';
+    const entryDate = String(bv.entryDate || '').trim().slice(0, 10);
+    const stayDays = Math.max(1, Math.min(365, Math.round(Number(bv.stayDays) || 30)));
+    const expectedExitDate = (
+      bv.expectedExitDate && /^\d{4}-\d{2}-\d{2}$/.test(bv.expectedExitDate)
+        ? bv.expectedExitDate
+        : calculateExpectedExitDate(entryDate, stayDays)
+    ).slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(entryDate) && /^\d{4}-\d{2}-\d{2}$/.test(expectedExitDate)) {
+      const cleanB2c: B2cVisaRecord = {
+        visaType,
+        entryDate,
+        stayDays,
+        expectedExitDate,
+        status: bv.status === 'exited' ? 'exited' : 'active',
+        ...(bv.exitedAt ? { exitedAt: String(bv.exitedAt).slice(0, 64) } : {}),
+        ...(bv.notes ? { notes: String(bv.notes).trim().slice(0, 500) } : {}),
+        updatedAt: String(bv.updatedAt || new Date().toISOString()).slice(0, 64),
+      };
+      payload.b2cVisa = cleanB2c;
+    }
+  }
   const normalizedTokens = normalizeFcmTokenList(profile.fcmTokens, profile.fcmToken, 10);
   if (profile.fcmToken) {
     payload.fcmToken = String(profile.fcmToken).trim().slice(0, 512);
@@ -1052,6 +1079,7 @@ function mergeCloudClientWithLocal(
         ? cloudData.hasActiveOrder
         : localExisting?.hasActiveOrder,
     adminPrivateNotes: cloudData.adminPrivateNotes ?? localExisting?.adminPrivateNotes,
+    b2cVisa: cloudData.b2cVisa || localExisting?.b2cVisa,
   };
 }
 
@@ -3676,6 +3704,128 @@ export async function adminCreateClientCloud(
   saveAllTravelersLocalOnly(all);
   await syncTravelerToCloud(profile);
   return profile;
+}
+
+export async function upsertB2cVisaTravelerCloud(params: {
+  existingPhone?: string;
+  name: string;
+  phone: string;
+  passportNumber?: string;
+  visaType: B2cVisaType;
+  entryDate: string;
+  stayDays: number;
+  notes?: string;
+}): Promise<{ ok: boolean; profile?: TravelerProfile; error?: string }> {
+  const targetPhone = normalizePhone(params.existingPhone || params.phone);
+  if (!/^[0-9]{8,20}$/.test(targetPhone)) {
+    return { ok: false, error: 'رقم الواتساب غير صالح (يجب أن يكون 8 أرقام على الأقل).' };
+  }
+  const cleanEntryDate = String(params.entryDate || '').trim();
+  const safeDays = Math.max(1, Math.min(365, Math.round(Number(params.stayDays) || 0)));
+  const expectedExitDate = calculateExpectedExitDate(cleanEntryDate, safeDays);
+  if (!expectedExitDate) {
+    return { ok: false, error: 'يرجى إدخال تاريخ دخول صحيح ومدة إقامة صالحة.' };
+  }
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[targetPhone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', targetPhone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[targetPhone]);
+    }
+  } catch {
+    // Fallback to local snapshot if offline
+  }
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiryIso = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
+  const cleanName = params.name.trim();
+  const cleanPassport = String(params.passportNumber || '').trim().toUpperCase();
+  const split = cleanName ? splitPassportName(cleanName) : null;
+
+  const b2cRecord: B2cVisaRecord = {
+    visaType: params.visaType,
+    entryDate: cleanEntryDate,
+    stayDays: safeDays,
+    expectedExitDate,
+    status: 'active',
+    ...(params.notes?.trim() ? { notes: params.notes.trim().slice(0, 500) } : {}),
+    updatedAt: nowIso,
+  };
+
+  const profile: TravelerProfile = existing
+    ? {
+        ...existing,
+        phone: targetPhone,
+        phoneNormalized: targetPhone,
+        name: cleanName || existing.name,
+        ...(split?.firstName && !existing.firstName ? { firstName: split.firstName } : {}),
+        ...(split?.lastName && !existing.lastName ? { lastName: split.lastName } : {}),
+        ...(cleanPassport ? { passportNumber: cleanPassport } : {}),
+        b2cVisa: b2cRecord,
+        updatedAt: nowIso,
+      }
+    : {
+        phone: targetPhone,
+        phoneNormalized: targetPhone,
+        orderCode: buildOrderCodeFromPhone(targetPhone),
+        firstName: split?.firstName || cleanName,
+        lastName: split?.lastName || '',
+        name: cleanName || `معتمر/مسافر (${formatPhoneForDisplay(targetPhone)})`,
+        ...(cleanPassport ? { passportNumber: cleanPassport } : {}),
+        otp: generateSixDigitOtp(),
+        otpGeneratedAt: nowIso,
+        otpExpiresAt: expiryIso,
+        otpConsumed: false,
+        activatedByAdmin: false,
+        verified: false,
+        accountStatus: 'pending_verification',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        orderStatus: 'none',
+        hasActiveOrder: false,
+        documents: [],
+        b2cVisa: b2cRecord,
+      };
+
+  all[targetPhone] = profile;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(profile);
+  return { ok: true, profile };
+}
+
+export async function markB2cVisaExitedCloud(
+  rawPhone: string,
+  exited = true
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing?.b2cVisa) return null;
+
+  const nowIso = new Date().toISOString();
+  const nextB2c: B2cVisaRecord = {
+    ...existing.b2cVisa,
+    status: exited ? 'exited' : 'active',
+    ...(exited ? { exitedAt: nowIso } : {}),
+    updatedAt: nowIso,
+  };
+  if (!exited) {
+    delete nextB2c.exitedAt;
+  }
+
+  const updated: TravelerProfile = {
+    ...existing,
+    b2cVisa: nextB2c,
+    updatedAt: nowIso,
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return updated;
 }
 
 /**

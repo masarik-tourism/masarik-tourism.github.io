@@ -309,6 +309,10 @@
           "type": "object",
           "description": "Structured booked appointment metadata (serviceType, date, time, location, referenceNumber) used for the client's high-contrast Appointment QR Pass."
         },
+        "b2cVisa": {
+          "type": "object",
+          "description": "Structured Umrah B2C / Free B2C stay duration tracking with entryDate, stayDays, auto-calculated expectedExitDate, and exit/archive status."
+        },
         "fcmToken": {
           "type": "string",
           "description": "Firebase Cloud Messaging (FCM) device registration token for instant Web/Mobile Push Notifications.",

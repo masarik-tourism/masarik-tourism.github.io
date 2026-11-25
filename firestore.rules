@@ -99,6 +99,7 @@ service cloud.firestore {
         'issuedDocuments',
         'notifications',
         'appointmentDetails',
+        'b2cVisa',
         'fcmToken',
         'fcmTokens',
         'fcmUpdatedAt',
@@ -427,6 +428,37 @@ service cloud.firestore {
           && isOptionalString(data.appointmentDetails, 'location', 200)
           && isOptionalString(data.appointmentDetails, 'referenceNumber', 80)
           && isOptionalString(data.appointmentDetails, 'updatedAt', 64)
+        )
+      )
+      && (
+        !('b2cVisa' in data)
+        || (
+          data.b2cVisa is map
+          && data.b2cVisa.keys().hasAll(['visaType', 'entryDate', 'stayDays', 'expectedExitDate', 'status'])
+          && data.b2cVisa.keys().hasOnly([
+            'visaType',
+            'entryDate',
+            'stayDays',
+            'expectedExitDate',
+            'status',
+            'exitedAt',
+            'notes',
+            'updatedAt'
+          ])
+          && data.b2cVisa.visaType is string
+          && data.b2cVisa.visaType in ['umrah_b2c', 'free_b2c']
+          && data.b2cVisa.entryDate is string
+          && data.b2cVisa.entryDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && data.b2cVisa.stayDays is int
+          && data.b2cVisa.stayDays >= 1
+          && data.b2cVisa.stayDays <= 365
+          && data.b2cVisa.expectedExitDate is string
+          && data.b2cVisa.expectedExitDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && data.b2cVisa.status is string
+          && data.b2cVisa.status in ['active', 'exited']
+          && isOptionalString(data.b2cVisa, 'exitedAt', 64)
+          && isOptionalString(data.b2cVisa, 'notes', 500)
+          && isOptionalString(data.b2cVisa, 'updatedAt', 64)
         )
       )
       && isOptionalString(data, 'fcmToken', 512)
