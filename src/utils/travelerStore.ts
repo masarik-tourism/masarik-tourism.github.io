@@ -71,7 +71,9 @@ import {
   OFFICIAL_COMPANY_WHATSAPP_NUMBER,
   buildClientOtpRequestMessage,
   buildClientOtpRequestUrl,
+  hasClientActiveOrder,
   isClientAccountVerified,
+  isClientOrderCompleted,
   resolveOtpCompanyWhatsAppNumber,
 } from './whatsappHelpers';
 import { buildAdminNewOtpPushNotification } from './adminOtpHelpers';
@@ -127,6 +129,9 @@ export const VISA_ORDER_STATUSES: CanonicalVisaOrderStatus[] = [
 
 export function getOrderStatusStageIndex(status?: string): number {
   const canonical = normalizeOrderStatusValue(status);
+  if (canonical === 'none') {
+    return -1;
+  }
   if (canonical === 'تم تنفيذ الطلب' || canonical === 'مكتمل') {
     return VISA_ORDER_STATUSES.length - 1;
   }
@@ -141,7 +146,7 @@ export function buildOrderCodeFromPhone(rawPhone?: string): string {
   return `MSK-${suffix}`;
 }
 
-export { normalizeOrderStatusValue };
+export { normalizeOrderStatusValue, hasClientActiveOrder, isClientOrderCompleted };
 
 export const TRAVELERS_UPDATED_EVENT = 'masarik-travelers-updated';
 
@@ -458,7 +463,13 @@ function saveAllTravelersLocalOnly(map: Record<string, TravelerProfile>): void {
 }
 
 function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, unknown> {
-  const safeStatus: VisaOrderStatus = normalizeOrderStatusValue(profile.orderStatus);
+  const hasActive = hasClientActiveOrder(profile);
+  const normalizedSt = normalizeOrderStatusValue(profile.orderStatus);
+  const safeStatus: VisaOrderStatus = hasActive
+    ? normalizedSt === 'none'
+      ? 'تم استلام الطلب'
+      : normalizedSt
+    : 'none';
 
   const safeOtp = /^\d{4,6}$/.test(String(profile.otp || ''))
     ? String(profile.otp)
@@ -750,6 +761,7 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     createdAt: String(profile.createdAt || new Date().toISOString()).slice(0, 64),
     updatedAt: new Date().toISOString(),
     orderStatus: safeStatus,
+    hasActiveOrder: hasActive,
     documents: safeDocs,
     familyMembers: safeFamilyMembers,
     trustedDevices: validDevices,
@@ -775,6 +787,8 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
   }
   if (profile.verifiedAt) payload.verifiedAt = String(profile.verifiedAt).slice(0, 64);
   if (profile.adminNotes !== undefined) payload.adminNotes = String(profile.adminNotes).slice(0, 1000);
+  if (profile.adminPrivateNotes !== undefined)
+    payload.adminPrivateNotes = String(profile.adminPrivateNotes).slice(0, 2000);
   if (profile.preferredVisaType !== undefined)
     payload.preferredVisaType = String(profile.preferredVisaType).slice(0, 200);
   if (profile.passportNumber !== undefined)
@@ -1033,6 +1047,11 @@ function mergeCloudClientWithLocal(
       typeof cloudData.pushNotificationsEnabled === 'boolean'
         ? cloudData.pushNotificationsEnabled
         : localExisting?.pushNotificationsEnabled,
+    hasActiveOrder:
+      typeof cloudData.hasActiveOrder === 'boolean'
+        ? cloudData.hasActiveOrder
+        : localExisting?.hasActiveOrder,
+    adminPrivateNotes: cloudData.adminPrivateNotes ?? localExisting?.adminPrivateNotes,
   };
 }
 
@@ -1040,10 +1059,18 @@ export async function syncPublicOrderStatusDoc(profile: TravelerProfile): Promis
   const phone = normalizePhone(profile.phone);
   if (!/^[0-9]{8,20}$/.test(phone)) return;
 
+  const hasActive = hasClientActiveOrder(profile);
+  const normalizedSt = normalizeOrderStatusValue(profile.orderStatus);
+  const safeStatus: VisaOrderStatus = hasActive
+    ? normalizedSt === 'none'
+      ? 'تم استلام الطلب'
+      : normalizedSt
+    : 'none';
+
   const summary: PublicOrderStatusSummary = {
     phoneId: phone,
     orderCode: (profile.orderCode || buildOrderCodeFromPhone(phone)).toUpperCase().slice(0, 32),
-    orderStatus: normalizeOrderStatusValue(profile.orderStatus),
+    orderStatus: safeStatus,
     hasIssuedDocuments: Array.isArray(profile.issuedDocuments) && profile.issuedDocuments.length > 0,
     updatedAt: String(profile.updatedAt || new Date().toISOString()).slice(0, 64),
   };
@@ -1117,10 +1144,12 @@ export async function lookupPublicOrderStatusCloud(rawQuery: string): Promise<{
       const clientSnap = await getDoc(doc(db, 'clients', phoneDigits));
       if (clientSnap.exists()) {
         const cData = clientSnap.data() as TravelerProfile;
+        const cActive = hasClientActiveOrder(cData);
+        const cNorm = normalizeOrderStatusValue(cData.orderStatus);
         const summary: PublicOrderStatusSummary = {
           phoneId: phoneDigits,
           orderCode: cData.orderCode || buildOrderCodeFromPhone(phoneDigits),
-          orderStatus: normalizeOrderStatusValue(cData.orderStatus),
+          orderStatus: cActive ? (cNorm === 'none' ? 'تم استلام الطلب' : cNorm) : 'none',
           hasIssuedDocuments: Array.isArray(cData.issuedDocuments) && cData.issuedDocuments.length > 0,
           updatedAt: String(cData.updatedAt || cData.createdAt || new Date().toISOString()).slice(0, 64),
         };
@@ -1142,12 +1171,14 @@ export async function lookupPublicOrderStatusCloud(rawQuery: string): Promise<{
   });
 
   if (matchedLocal) {
+    const mActive = hasClientActiveOrder(matchedLocal);
+    const mNorm = normalizeOrderStatusValue(matchedLocal.orderStatus);
     return {
       found: true,
       statusSummary: {
         phoneId: normalizePhone(matchedLocal.phone),
         orderCode: matchedLocal.orderCode || buildOrderCodeFromPhone(matchedLocal.phone),
-        orderStatus: normalizeOrderStatusValue(matchedLocal.orderStatus),
+        orderStatus: mActive ? (mNorm === 'none' ? 'تم استلام الطلب' : mNorm) : 'none',
         hasIssuedDocuments:
           Array.isArray(matchedLocal.issuedDocuments) && matchedLocal.issuedDocuments.length > 0,
         updatedAt: String(
@@ -3107,7 +3138,8 @@ export async function initiateTravelerOtpLoginCloud(
     verified: false,
     accountStatus: 'pending_verification',
     createdAt: nowIso,
-    orderStatus: 'تم استلام الطلب',
+    orderStatus: 'none',
+    hasActiveOrder: false,
     documents: [],
   };
 
@@ -3635,7 +3667,8 @@ export async function adminCreateClientCloud(
         verified: false,
         accountStatus: 'pending_verification',
         createdAt: nowIso,
-        orderStatus: 'تم استلام الطلب',
+        orderStatus: 'none',
+        hasActiveOrder: false,
         documents: [],
       };
 
@@ -3888,7 +3921,8 @@ export async function registerClientInstantCloud(
       lastSeenAt: nowIso,
       createdAt: nowIso,
       updatedAt: nowIso,
-      orderStatus: 'تم استلام الطلب',
+      orderStatus: 'none',
+      hasActiveOrder: false,
       documents: [],
       notifications: [],
     };
@@ -4264,7 +4298,8 @@ export async function adminCreateOrUpgradeB2BPartnerCloud(input: {
         isOnline: false,
         createdAt: nowIso,
         updatedAt: nowIso,
-        orderStatus: 'تم استلام الطلب',
+        orderStatus: 'none',
+        hasActiveOrder: false,
         documents: [],
       };
 
@@ -4326,7 +4361,8 @@ export function registerOrLoginTraveler(name: string, rawPhone: string): Travele
     verified: false,
     accountStatus: 'pending_verification',
     createdAt: nowIso,
-    orderStatus: 'تم استلام الطلب',
+    orderStatus: 'none',
+    hasActiveOrder: false,
     documents: [],
   };
   all[phone] = created;
@@ -4464,7 +4500,8 @@ export function activateViaMagicLink(
     accountStatus: 'verified',
     verifiedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
-    orderStatus: 'تم استلام الطلب',
+    orderStatus: 'none',
+    hasActiveOrder: false,
     documents: [],
   };
   all[phone] = restored;
@@ -4624,7 +4661,9 @@ export function updateTravelerProfileDetails(
       | 'portOfEntry'
       | 'preferredVisaType'
       | 'orderStatus'
+      | 'hasActiveOrder'
       | 'adminNotes'
+      | 'adminPrivateNotes'
       | 'verified'
       | 'verifiedAt'
       | 'activatedByAdmin'
@@ -4660,13 +4699,23 @@ export function updateTravelerProfileDetails(
       ? cleanUpdates.name.trim()
       : `${nextFirst} ${nextLast}`.trim() || existing.name;
 
+  const nextNormalizedStatus = cleanUpdates.orderStatus
+    ? normalizeOrderStatusValue(cleanUpdates.orderStatus)
+    : undefined;
+  const nextHasActiveOrder =
+    cleanUpdates.hasActiveOrder !== undefined
+      ? cleanUpdates.hasActiveOrder
+      : nextNormalizedStatus && nextNormalizedStatus !== 'none'
+      ? true
+      : existing.hasActiveOrder;
+
   // Automatically create a live notification when the order status stage advances/changes
   let nextNotifications = cleanUpdates.notifications ?? existing.notifications ?? [];
   let shouldDispatchOrderPush = false;
   if (
     cleanUpdates.orderStatus &&
-    normalizeOrderStatusValue(cleanUpdates.orderStatus) !==
-      normalizeOrderStatusValue(existing.orderStatus)
+    nextNormalizedStatus !== 'none' &&
+    nextNormalizedStatus !== normalizeOrderStatusValue(existing.orderStatus)
   ) {
     const statusAr = translateOrderStatus(cleanUpdates.orderStatus, 'ar');
     const statusEn = translateOrderStatus(cleanUpdates.orderStatus, 'en');
@@ -4710,6 +4759,7 @@ export function updateTravelerProfileDetails(
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
+    ...(nextHasActiveOrder !== undefined ? { hasActiveOrder: nextHasActiveOrder } : {}),
     accountStatus:
       cleanUpdates.verified !== undefined
         ? cleanUpdates.verified
@@ -4735,6 +4785,63 @@ export function updateTravelerProfileDetails(
       title: nextNotifications[0].titleAr,
       body: nextNotifications[0].bodyAr,
       data: { role: 'client', action: 'orders', phone },
+    });
+  }
+
+  return updated;
+}
+
+/**
+ * Activates a real service order on an existing client profile ONLY when they submit a service request,
+ * upload execution documents, or when an Admin manually opens an order for the client.
+ */
+export async function activateClientOrderCloud(
+  rawPhone: string,
+  serviceTitle?: string
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch {
+    // Offline cache fallback
+  }
+  if (!existing) return null;
+
+  const alreadyActive = hasClientActiveOrder(existing);
+  const currentNorm = normalizeOrderStatusValue(existing.orderStatus);
+  const nextStatus: VisaOrderStatus =
+    alreadyActive && currentNorm !== 'none' ? currentNorm : 'تم استلام الطلب';
+  const cleanService = (serviceTitle || '').trim().slice(0, 200);
+
+  const updated: TravelerProfile = {
+    ...existing,
+    hasActiveOrder: true,
+    orderStatus: nextStatus,
+    ...(cleanService ? { preferredVisaType: cleanService } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+
+  if (cleanService) {
+    const senderLabel =
+      updated.accountType === 'b2b_partner' && updated.companyName
+        ? updated.companyName
+        : updated.name;
+    void dispatchRemotePushNotification({
+      targetRole: 'admin',
+      title: `طلب خدمة جديد من ${senderLabel}`,
+      body: `الخدمة المطلوبة: ${cleanService}`.slice(0, 300),
+      data: { role: 'admin', action: 'client_folder', phone },
     });
   }
 
@@ -4852,6 +4959,7 @@ export async function approveAndDeliverDocumentCloud(
 
   const updated: TravelerProfile = {
     ...latestExisting,
+    hasActiveOrder: true,
     orderStatus: 'تم تنفيذ الطلب',
     updatedAt: nowIso,
     issuedDocuments: [deliverable, ...remainingIssuedDocs].slice(0, 30),
@@ -5257,8 +5365,20 @@ export async function attachPreOrderFilesToTravelerCloud(
 
   const latestAll = getAllTravelers();
   const latest = latestAll[phone] || existing;
+  const shouldActivate =
+    addedDocs.length > 0 || Boolean(input.serviceTitle?.trim()) || hasClientActiveOrder(latest);
+  const currentNorm = normalizeOrderStatusValue(latest.orderStatus);
   const updated: TravelerProfile = {
     ...latest,
+    ...(shouldActivate
+      ? {
+          hasActiveOrder: true,
+          orderStatus:
+            !hasClientActiveOrder(latest) || currentNorm === 'none'
+              ? 'تم استلام الطلب'
+              : latest.orderStatus,
+        }
+      : {}),
     ...(input.serviceTitle ? { preferredVisaType: input.serviceTitle.slice(0, 200) } : {}),
     ...(nextAvatarUrl ? { avatarUrl: nextAvatarUrl } : {}),
     ...(nextAvatarStoragePath ? { avatarStoragePath: nextAvatarStoragePath } : {}),
@@ -5324,8 +5444,14 @@ export async function uploadAndAddDocumentToTravelerCloud(
 
   const latestAll = getAllTravelers();
   const latest = latestAll[phone] || existing;
+  const currentNorm = normalizeOrderStatusValue(latest.orderStatus);
   const updated: TravelerProfile = {
     ...latest,
+    hasActiveOrder: true,
+    orderStatus:
+      !hasClientActiveOrder(latest) || currentNorm === 'none'
+        ? 'تم استلام الطلب'
+        : latest.orderStatus,
     documents: [newDoc, ...(latest.documents || [])].slice(0, 30),
   };
 
@@ -5440,8 +5566,14 @@ export async function uploadBatchFilesToTravelerCloud(
 
   const latestAll = getAllTravelers();
   const latest = latestAll[phone] || existing;
+  const currentNorm = normalizeOrderStatusValue(latest.orderStatus);
   const updated: TravelerProfile = {
     ...latest,
+    hasActiveOrder: true,
+    orderStatus:
+      !hasClientActiveOrder(latest) || currentNorm === 'none'
+        ? 'تم استلام الطلب'
+        : latest.orderStatus,
     documents: [...addedDocs, ...(latest.documents || [])].slice(0, 30),
     updatedAt: new Date().toISOString(),
   };
@@ -5648,9 +5780,20 @@ export async function commitTravelerProfileDraftCloud(
   // Re-read latest map in case snapshot arrived while uploading
   const latestAll = getAllTravelers();
   const latestExisting = latestAll[phone] || existing;
+  const didUploadExecutionDocs = uploadedNewDocs.length > 0;
+  const existingNorm = normalizeOrderStatusValue(latestExisting.orderStatus);
 
   const updated: TravelerProfile = {
     ...latestExisting,
+    ...(didUploadExecutionDocs
+      ? {
+          hasActiveOrder: true,
+          orderStatus:
+            !hasClientActiveOrder(latestExisting) || existingNorm === 'none'
+              ? 'تم استلام الطلب'
+              : latestExisting.orderStatus,
+        }
+      : {}),
     phone,
     phoneNormalized: phone,
     firstName: cleanFirst,
@@ -5983,8 +6126,14 @@ export async function uploadAndAddDocumentToTraveler(
   // Re-read latest map in case snapshot updated while uploading
   const latestAll = getAllTravelers();
   const latestExisting = latestAll[phone] || existing;
+  const currentNorm = normalizeOrderStatusValue(latestExisting.orderStatus);
   const updated: TravelerProfile = {
     ...latestExisting,
+    hasActiveOrder: true,
+    orderStatus:
+      !hasClientActiveOrder(latestExisting) || currentNorm === 'none'
+        ? 'تم استلام الطلب'
+        : latestExisting.orderStatus,
     documents: [newDoc, ...(latestExisting.documents || [])],
   };
   latestAll[phone] = updated;

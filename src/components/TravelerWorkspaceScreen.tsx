@@ -90,7 +90,7 @@ import {
   verifyClientOptionalCodeCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
-import { isClientAccountVerified } from '../utils/whatsappHelpers';
+import { hasClientActiveOrder, isClientAccountVerified } from '../utils/whatsappHelpers';
 import {
   clearSavedClientPhone,
   getSavedClientPhone,
@@ -2835,13 +2835,17 @@ Please advise on the next steps for my application.`
     `${draft.firstName || names.firstName} ${draft.lastName || names.lastName}`.trim() ||
     activeTraveler.name;
   const currentStatusIdx = getOrderStatusStageIndex(activeTraveler.orderStatus);
+  const clientHasActiveOrder = hasClientActiveOrder(activeTraveler);
 
   const familyMembers = activeTraveler.familyMembers || [];
   const issuedDocuments = activeTraveler.issuedDocuments || [];
   const unreadNotifications = (activeTraveler.notifications || []).filter((n) => !n.read);
 
   const renderIssuedDeliverablesSection = () => {
-    const hasCompletedStatus = activeTraveler.orderStatus === 'تم تنفيذ الطلب';
+    const hasCompletedStatus =
+      clientHasActiveOrder &&
+      (activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+        activeTraveler.orderStatus === 'مكتمل');
     if (issuedDocuments.length === 0 && !hasCompletedStatus) return null;
 
     return (
@@ -4568,7 +4572,11 @@ Please advise on the next steps for my application.`
                           isDirty: true,
                         }))
                       }
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                      placeholder={t(
+                        'مثال: تأشيرة زيارة / تساهيل السعودية (اختياري)',
+                        'e.g. Saudi Visit Visa / VFS Tasheer (Optional)'
+                      )}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                     />
                   </div>
                 </div>
@@ -5273,254 +5281,297 @@ Please advise on the next steps for my application.`
           <div className="space-y-5">
             {renderIssuedDeliverablesSection()}
 
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-xl bg-[#0284C7]/10 text-[#0284C7] flex items-center justify-center">
-                    <Clock className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
-                      {t('متابعة حالة المعاملة والتأشيرة', 'Visa & Application Status Tracker')}
-                    </h2>
-                    <p className="text-[11px] text-slate-500">
-                      {draft.preferredVisaType ||
-                        activeTraveler.preferredVisaType ||
-                        t('تأشيرة زيارة / تساهيل السعودية', 'Saudi Visit Visa / VFS Tasheer')}
-                    </p>
-                  </div>
+            {!clientHasActiveOrder ? (
+              <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-10 shadow-xs text-center space-y-4">
+                <div className="w-14 h-14 mx-auto rounded-2xl bg-[#FAF8F2] border border-[#E5C887] text-[#9E7B33] flex items-center justify-center shadow-xs">
+                  <FileText className="w-7 h-7" />
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#E5C887] text-[11px] font-black text-[#0F2438] tabular-nums"
-                    dir="ltr"
-                  >
-                    {t('رقم الطلب:', 'Order No:')} {activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)}
-                  </span>
-                  <span
-                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black ${
-                      activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
-                      activeTraveler.orderStatus === 'مكتمل'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-[#0F2438] text-[#E5C887]'
-                    }`}
-                  >
-                    {(activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
-                      activeTraveler.orderStatus === 'مكتمل') && (
-                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <div className="space-y-1.5 max-w-md mx-auto">
+                  <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+                    {t(
+                      'لا توجد طلبات مسجلة في محفظتك بعد — اختر خدمة للبدء',
+                      'No orders recorded in your wallet yet — Choose a service to begin'
                     )}
-                    <span>{translateOrderStatus(activeTraveler.orderStatus, lang)}</span>
-                  </span>
+                  </h2>
+                  <p className="text-xs text-slate-500 leading-relaxed">
+                    {t(
+                      'عند اختيارك لخدمة سياحية أو تأشيرة وتأكيد طلبك، أو رفع مستندات التنفيذ، سيظهر طلبك هنا مباشرةً لمتابعة مراحله أولاً بأول.',
+                      'Once you select a service and submit a request or upload your documents for processing, your live order tracker will appear right here.'
+                    )}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  {onNavigateToServices && (
+                    <button
+                      type="button"
+                      onClick={onNavigateToServices}
+                      className="min-h-[44px] px-6 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 shadow-sm transition cursor-pointer"
+                    >
+                      <span>{t('تصفح الخدمات وحجز خدمة جديدة', 'Browse & Choose a Service')}</span>
+                      {isAr ? <ArrowLeft className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleSendWalletSummaryWhatsApp}
+                    className="min-h-[44px] px-5 py-2.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <WhatsAppIcon className="w-4.5 h-4.5" variant="white" />
+                    <span>{t('تواصل معنا عبر واتساب', 'Contact Us on WhatsApp')}</span>
+                  </button>
                 </div>
               </div>
-
-              {/* Visual Progress Bar Header */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-bold text-slate-500">
-                  <span>{t('تقدم الطلب الحالي', 'Order Progress')}</span>
-                  <span className="text-[#0F2438] font-black tabular-nums">
-                    {Math.round(((currentStatusIdx + 1) / VISA_ORDER_STATUSES.length) * 100)}%
-                  </span>
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-[#0284C7]/10 text-[#0284C7] flex items-center justify-center">
+                      <Clock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-sm sm:text-base font-black text-[#0F2438]">
+                        {t('متابعة حالة المعاملة والتأشيرة', 'Visa & Application Status Tracker')}
+                      </h2>
+                      <p className="text-[11px] text-slate-500">
+                        {draft.preferredVisaType ||
+                          activeTraveler.preferredVisaType ||
+                          t('معاملة قيد المتابعة لدى مسارك', 'Application tracked with Masarik')}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className="px-2.5 py-1 rounded-lg bg-[#FAF8F2] border border-[#E5C887] text-[11px] font-black text-[#0F2438] tabular-nums"
+                      dir="ltr"
+                    >
+                      {t('رقم الطلب:', 'Order No:')} {activeTraveler.orderCode || buildOrderCodeFromPhone(activeTraveler.phone)}
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black ${
+                        activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                        activeTraveler.orderStatus === 'مكتمل'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-[#0F2438] text-[#E5C887]'
+                      }`}
+                    >
+                      {(activeTraveler.orderStatus === 'تم تنفيذ الطلب' ||
+                        activeTraveler.orderStatus === 'مكتمل') && (
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span>{translateOrderStatus(activeTraveler.orderStatus, lang)}</span>
+                    </span>
+                  </div>
                 </div>
-                <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200/80">
-                  <div
-                    className="h-full bg-gradient-to-l from-emerald-500 to-[#0284C7] rounded-full transition-all duration-500"
-                    style={{
-                      width: `${Math.round(
-                        ((currentStatusIdx + 1) / VISA_ORDER_STATUSES.length) * 100
-                      )}%`,
-                    }}
-                  />
+
+                {/* Visual Progress Bar Header */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-500">
+                    <span>{t('تقدم الطلب الحالي', 'Order Progress')}</span>
+                    <span className="text-[#0F2438] font-black tabular-nums">
+                      {Math.round(((Math.max(currentStatusIdx, 0) + 1) / VISA_ORDER_STATUSES.length) * 100)}%
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full bg-slate-100 rounded-full overflow-hidden border border-slate-200/80">
+                    <div
+                      className="h-full bg-gradient-to-l from-emerald-500 to-[#0284C7] rounded-full transition-all duration-500"
+                      style={{
+                        width: `${Math.round(
+                          ((Math.max(currentStatusIdx, 0) + 1) / VISA_ORDER_STATUSES.length) * 100
+                        )}%`,
+                      }}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              {/* 4-Stage Visual Order Timeline */}
-              <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 sm:gap-2.5">
-                {VISA_ORDER_STATUSES.map((st, idx) => {
-                  const completed = idx < currentStatusIdx;
-                  const current = idx === currentStatusIdx;
-                  const StepArrow = isAr ? ArrowLeft : ArrowRight;
-                  const StageIcon =
-                    idx === 0
-                      ? FileText
-                      : idx === 1
-                      ? Clock
-                      : idx === 2
-                      ? CalendarCheck2
-                      : CheckCircle2;
+                {/* 4-Stage Visual Order Timeline */}
+                <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2 sm:gap-2.5">
+                  {VISA_ORDER_STATUSES.map((st, idx) => {
+                    const completed = idx < currentStatusIdx;
+                    const current = idx === currentStatusIdx;
+                    const StepArrow = isAr ? ArrowLeft : ArrowRight;
+                    const StageIcon =
+                      idx === 0
+                        ? FileText
+                        : idx === 1
+                        ? Clock
+                        : idx === 2
+                        ? CalendarCheck2
+                        : CheckCircle2;
 
-                  return (
-                    <React.Fragment key={st}>
-                      <div
-                        className={`flex-1 p-3.5 sm:p-4 rounded-2xl border transition-all flex md:flex-col items-center md:text-center gap-3 md:gap-2 ${
-                          current
-                            ? 'bg-[#0F2438] text-white border-[#C6A052] ring-2 ring-[#C6A052]/35 shadow-md'
-                            : completed
-                            ? 'bg-emerald-50 text-emerald-950 border-emerald-300'
-                            : 'bg-slate-50 text-slate-400 border-slate-200'
-                        }`}
-                      >
+                    return (
+                      <React.Fragment key={st}>
                         <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border font-black text-xs tabular-nums ${
+                          className={`flex-1 p-3.5 sm:p-4 rounded-2xl border transition-all flex md:flex-col items-center md:text-center gap-3 md:gap-2 ${
                             current
-                              ? 'bg-[#C6A052] text-[#0A1926] border-[#E5C887]'
+                              ? 'bg-[#0F2438] text-white border-[#C6A052] ring-2 ring-[#C6A052]/35 shadow-md'
                               : completed
-                              ? 'bg-emerald-600 text-white border-emerald-500'
-                              : 'bg-white text-slate-400 border-slate-200'
+                              ? 'bg-emerald-50 text-emerald-950 border-emerald-300'
+                              : 'bg-slate-50 text-slate-400 border-slate-200'
                           }`}
                         >
-                          {completed ? (
-                            <Check className="w-5 h-5 stroke-[2.75]" />
-                          ) : (
-                            <StageIcon className="w-5 h-5" />
-                          )}
+                          <div
+                            className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border font-black text-xs tabular-nums ${
+                              current
+                                ? 'bg-[#C6A052] text-[#0A1926] border-[#E5C887]'
+                                : completed
+                                ? 'bg-emerald-600 text-white border-emerald-500'
+                                : 'bg-white text-slate-400 border-slate-200'
+                            }`}
+                          >
+                            {completed ? (
+                              <Check className="w-5 h-5 stroke-[2.75]" />
+                            ) : (
+                              <StageIcon className="w-5 h-5" />
+                            )}
+                          </div>
+
+                          <div className="min-w-0 flex-1 md:flex-initial">
+                            <span
+                              className={`text-[10.5px] font-black block tabular-nums ${
+                                current
+                                  ? 'text-[#E5C887]'
+                                  : completed
+                                  ? 'text-emerald-700'
+                                  : 'text-slate-400'
+                              }`}
+                            >
+                              {t(`المرحلة ${idx + 1}`, `Stage ${idx + 1}`)}
+                            </span>
+                            <span
+                              className={`text-xs sm:text-sm font-black leading-snug block ${
+                                current
+                                  ? 'text-white'
+                                  : completed
+                                  ? 'text-emerald-950'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              {translateOrderStatus(st, lang)}
+                            </span>
+                            {current && (
+                              <span className="inline-block mt-1 text-[10px] font-bold text-[#E5C887]">
+                                {t('● الحالة الحالية', '● Current Stage')}
+                              </span>
+                            )}
+                          </div>
                         </div>
 
-                        <div className="min-w-0 flex-1 md:flex-initial">
-                          <span
-                            className={`text-[10.5px] font-black block tabular-nums ${
-                              current
-                                ? 'text-[#E5C887]'
-                                : completed
-                                ? 'text-emerald-700'
-                                : 'text-slate-400'
-                            }`}
-                          >
-                            {t(`المرحلة ${idx + 1}`, `Stage ${idx + 1}`)}
+                        {idx < VISA_ORDER_STATUSES.length - 1 && (
+                          <div className="hidden md:flex items-center justify-center shrink-0">
+                            <StepArrow
+                              className={`w-4 h-4 ${
+                                idx < currentStatusIdx ? 'text-emerald-600' : 'text-slate-300'
+                              }`}
+                            />
+                          </div>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+
+                {activeTraveler.adminNotes ? (
+                  <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4 text-xs sm:text-sm text-[#0F2438]">
+                    <span className="font-black block mb-1">
+                      {t('ملاحظة وتحديث من إدارة مسارك:', 'Update & Note from Masarik Team:')}
+                    </span>
+                    <p className="leading-relaxed text-slate-700">{activeTraveler.adminNotes}</p>
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-500">
+                    {t(
+                      'لا توجد ملاحظات إضافية مسجلة حالياً. سيتم إشعارك فور تحديد موعد تساهيل أو صدور تحديث جديد.',
+                      'No additional notes posted yet. Updates appear here automatically once reviewed by our team.'
+                    )}
+                  </div>
+                )}
+
+                {(currentStatusIdx >= 2 ||
+                  Boolean(
+                    activeTraveler.appointmentDetails?.appointmentDate ||
+                      activeTraveler.appointmentDetails?.appointmentTime ||
+                      activeTraveler.appointmentDetails?.referenceNumber
+                  )) && (
+                  <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white rounded-2xl p-4 sm:p-5 border border-[#C6A052]/65 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-start gap-3 min-w-0">
+                      <div className="w-11 h-11 rounded-xl bg-[#C6A052] text-[#0A1926] flex items-center justify-center shrink-0 shadow-xs">
+                        <QrCode className="w-6 h-6" />
+                      </div>
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-black text-white">
+                            {t('بطاقة باركود الموعد السريع (QR Pass)', 'Express Appointment QR Pass')}
                           </span>
-                          <span
-                            className={`text-xs sm:text-sm font-black leading-snug block ${
-                              current
-                                ? 'text-white'
-                                : completed
-                                ? 'text-emerald-950'
-                                : 'text-slate-500'
-                            }`}
-                          >
-                            {translateOrderStatus(st, lang)}
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-[10.5px] font-black text-emerald-300">
+                            {t('جاهزة للإبراز عند الدخول', 'Ready for Entry')}
                           </span>
-                          {current && (
-                            <span className="inline-block mt-1 text-[10px] font-bold text-[#E5C887]">
-                              {t('● الحالة الحالية', '● Current Stage')}
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {activeTraveler.appointmentDetails?.serviceType ||
+                            activeTraveler.preferredVisaType ||
+                            t('موعد خدمة محجوز لدى مسارك', 'Confirmed Service Appointment')}
+                          {activeTraveler.appointmentDetails?.appointmentDate && (
+                            <span className="text-[#E5C887] font-black mx-1.5 tabular-nums" dir="ltr">
+                              • {activeTraveler.appointmentDetails.appointmentDate}{' '}
+                              {activeTraveler.appointmentDetails.appointmentTime || ''}
                             </span>
                           )}
-                        </div>
+                        </p>
+                        {activeTraveler.appointmentDetails?.location && (
+                          <p className="text-[11px] text-slate-300 flex items-center gap-1">
+                            <MapPin className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
+                            <span>{activeTraveler.appointmentDetails.location}</span>
+                          </p>
+                        )}
                       </div>
+                    </div>
 
-                      {idx < VISA_ORDER_STATUSES.length - 1 && (
-                        <div className="hidden md:flex items-center justify-center shrink-0">
-                          <StepArrow
-                            className={`w-4 h-4 ${
-                              idx < currentStatusIdx ? 'text-emerald-600' : 'text-slate-300'
-                            }`}
-                          />
-                        </div>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowQrPassModal(true)}
+                      className="min-h-[44px] px-4 py-2.5 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer shrink-0"
+                    >
+                      <QrCode className="w-4.5 h-4.5" />
+                      <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
+                    </button>
+                  </div>
+                )}
 
-              {activeTraveler.adminNotes ? (
-                <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4 text-xs sm:text-sm text-[#0F2438]">
-                  <span className="font-black block mb-1">
-                    {t('ملاحظة وتحديث من إدارة مسارك:', 'Update & Note from Masarik Team:')}
-                  </span>
-                  <p className="leading-relaxed text-slate-700">{activeTraveler.adminNotes}</p>
-                </div>
-              ) : (
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-500">
-                  {t(
-                    'لا توجد ملاحظات إضافية مسجلة حالياً. سيتم إشعارك فور تحديد موعد تساهيل أو صدور تحديث جديد.',
-                    'No additional notes posted yet. Updates appear here automatically once reviewed by our team.'
+                <div className="flex flex-wrap items-center gap-3 pt-2">
+                  {(currentStatusIdx >= 2 ||
+                    Boolean(activeTraveler.appointmentDetails?.appointmentDate)) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowQrPassModal(true)}
+                      className="min-h-[44px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] border border-[#C6A052] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
+                    >
+                      <QrCode className="w-4.5 h-4.5" />
+                      <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleSendWalletSummaryWhatsApp}
+                    className="min-h-[44px] px-5 py-2.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <WhatsAppIcon className="w-4.5 h-4.5" variant="white" />
+                    <span>{t('استفسار عن حالة طلبي عبر واتساب', 'Inquire About Order via WhatsApp')}</span>
+                  </button>
+
+                  {onNavigateToServices && (
+                    <button
+                      type="button"
+                      onClick={onNavigateToServices}
+                      className="min-h-[44px] px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#0F2438] rounded-xl text-xs sm:text-sm font-bold transition cursor-pointer"
+                    >
+                      {t('تصفح الخدمات وحجز خدمة جديدة', 'Browse & Request New Service')}
+                    </button>
                   )}
                 </div>
-              )}
-
-              {(currentStatusIdx >= 2 ||
-                Boolean(
-                  activeTraveler.appointmentDetails?.appointmentDate ||
-                    activeTraveler.appointmentDetails?.appointmentTime ||
-                    activeTraveler.appointmentDetails?.referenceNumber
-                )) && (
-                <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white rounded-2xl p-4 sm:p-5 border border-[#C6A052]/65 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-start gap-3 min-w-0">
-                    <div className="w-11 h-11 rounded-xl bg-[#C6A052] text-[#0A1926] flex items-center justify-center shrink-0 shadow-xs">
-                      <QrCode className="w-6 h-6" />
-                    </div>
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-black text-white">
-                          {t('بطاقة باركود الموعد السريع (QR Pass)', 'Express Appointment QR Pass')}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/50 text-[10.5px] font-black text-emerald-300">
-                          {t('جاهزة للإبراز عند الدخول', 'Ready for Entry')}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-300 leading-relaxed">
-                        {activeTraveler.appointmentDetails?.serviceType ||
-                          activeTraveler.preferredVisaType ||
-                          t('موعد خدمة محجوز لدى مسارك', 'Confirmed Service Appointment')}
-                        {activeTraveler.appointmentDetails?.appointmentDate && (
-                          <span className="text-[#E5C887] font-black mx-1.5 tabular-nums" dir="ltr">
-                            • {activeTraveler.appointmentDetails.appointmentDate}{' '}
-                            {activeTraveler.appointmentDetails.appointmentTime || ''}
-                          </span>
-                        )}
-                      </p>
-                      {activeTraveler.appointmentDetails?.location && (
-                        <p className="text-[11px] text-slate-300 flex items-center gap-1">
-                          <MapPin className="w-3.5 h-3.5 text-[#E5C887] shrink-0" />
-                          <span>{activeTraveler.appointmentDetails.location}</span>
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowQrPassModal(true)}
-                    className="min-h-[44px] px-4 py-2.5 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.98] cursor-pointer shrink-0"
-                  >
-                    <QrCode className="w-4.5 h-4.5" />
-                    <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
-                  </button>
-                </div>
-              )}
-
-              <div className="flex flex-wrap items-center gap-3 pt-2">
-                {(currentStatusIdx >= 2 ||
-                  Boolean(activeTraveler.appointmentDetails?.appointmentDate)) && (
-                  <button
-                    type="button"
-                    onClick={() => setShowQrPassModal(true)}
-                    className="min-h-[44px] px-4 py-2.5 bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] border border-[#C6A052] rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
-                  >
-                    <QrCode className="w-4.5 h-4.5" />
-                    <span>{t('عرض باركود الموعد (QR)', 'Show Appointment QR')}</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={handleSendWalletSummaryWhatsApp}
-                  className="min-h-[44px] px-5 py-2.5 bg-[#25D366] hover:bg-[#128C7E] text-white rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer"
-                >
-                  <WhatsAppIcon className="w-4.5 h-4.5" variant="white" />
-                  <span>{t('استفسار عن حالة طلبي عبر واتساب', 'Inquire About Order via WhatsApp')}</span>
-                </button>
-
-                {onNavigateToServices && (
-                  <button
-                    type="button"
-                    onClick={onNavigateToServices}
-                    className="min-h-[44px] px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-[#0F2438] rounded-xl text-xs sm:text-sm font-bold transition cursor-pointer"
-                  >
-                    {t('تصفح الخدمات وحجز خدمة جديدة', 'Browse & Request New Service')}
-                  </button>
-                )}
               </div>
-            </div>
+            )}
           </div>
         )}
 

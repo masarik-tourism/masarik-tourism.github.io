@@ -72,7 +72,9 @@ service cloud.firestore {
         'createdAt',
         'updatedAt',
         'orderStatus',
+        'hasActiveOrder',
         'adminNotes',
+        'adminPrivateNotes',
         'preferredVisaType',
         'passportNumber',
         'passportFullName',
@@ -135,6 +137,8 @@ service cloud.firestore {
       && data.createdAt.size() <= 64
       && data.orderStatus is string
       && data.orderStatus in [
+        'none',
+        'بدون طلبات نشطة',
         'تم استلام الطلب',
         'قيد المراجعة والتنفيذ',
         'تم الحجز / الإصدار',
@@ -145,9 +149,11 @@ service cloud.firestore {
         'تحت المراجعة',
         'صدرت التأشيرة'
       ]
+      && (!('hasActiveOrder' in data) || data.hasActiveOrder is bool)
       && isOptionalString(data, 'verifiedAt', 64)
       && isOptionalString(data, 'updatedAt', 64)
       && isOptionalString(data, 'adminNotes', 1000)
+      && isOptionalString(data, 'adminPrivateNotes', 2000)
       && isOptionalString(data, 'preferredVisaType', 200)
       && isOptionalString(data, 'passportNumber', 40)
       && isOptionalString(data, 'passportFullName', 200)
@@ -607,6 +613,8 @@ service cloud.firestore {
       && data.orderCode.size() <= 32
       && data.orderStatus is string
       && data.orderStatus in [
+        'none',
+        'بدون طلبات نشطة',
         'تم استلام الطلب',
         'قيد المراجعة والتنفيذ',
         'تم الحجز / الإصدار',

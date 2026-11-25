@@ -41,6 +41,7 @@ export interface FaqItem {
 }
 
 export type CanonicalVisaOrderStatus =
+  | 'none'
   | 'تم استلام الطلب'
   | 'قيد المراجعة والتنفيذ'
   | 'تم الحجز / الإصدار'
@@ -251,7 +252,9 @@ export interface TravelerProfile {
   createdAt: string;
   updatedAt?: string;
   orderStatus: VisaOrderStatus;
+  hasActiveOrder?: boolean;
   adminNotes?: string;
+  adminPrivateNotes?: string;
   preferredVisaType?: string;
   passportNumber?: string;
   passportFullName?: string;

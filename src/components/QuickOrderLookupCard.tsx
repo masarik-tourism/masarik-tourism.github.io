@@ -60,10 +60,14 @@ export const QuickOrderLookupCard: React.FC<QuickOrderLookupCardProps> = ({
     }
   };
 
+  const hasActiveLookupOrder = Boolean(
+    lookupResult && lookupResult.orderStatus && lookupResult.orderStatus !== 'none'
+  );
   const isCompleted =
+    hasActiveLookupOrder &&
     lookupResult &&
     (lookupResult.orderStatus === 'تم تنفيذ الطلب' || lookupResult.orderStatus === 'مكتمل');
-  const activeStageIdx = lookupResult ? getOrderStatusStageIndex(lookupResult.orderStatus) : 0;
+  const activeStageIdx = lookupResult ? getOrderStatusStageIndex(lookupResult.orderStatus) : -1;
 
   return (
     <section
@@ -153,7 +157,30 @@ export const QuickOrderLookupCard: React.FC<QuickOrderLookupCardProps> = ({
         </div>
       )}
 
-      {lookupResult && (
+      {lookupResult && !hasActiveLookupOrder && (
+        <div className="rounded-2xl p-4 sm:p-5 border border-slate-200 bg-slate-50 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <span className="text-sm font-black text-[#0F2438] tabular-nums" dir="ltr">
+              {lookupResult.orderCode}
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-600">
+              {t('لا توجد طلبات مسجلة في محفظتك بعد — اختر خدمة للبدء', 'No orders recorded in your wallet yet — Choose a service to start')}
+            </span>
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={onOpenTravelerProfile}
+              className="min-h-[40px] px-4 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shadow-xs"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>{t('دخول حساب المسافر', 'Open Client Account')}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {lookupResult && hasActiveLookupOrder && (
         <div
           className={`rounded-2xl p-4 sm:p-5 border space-y-4 ${
             isCompleted

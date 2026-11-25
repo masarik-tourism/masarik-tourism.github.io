@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   OFFICIAL_COMPANY_WHATSAPP_NUMBER,
+  buildAdminStageWhatsAppMessage,
   buildClientOtpRequestMessage,
   buildClientOtpRequestUrl,
   buildWhatsAppSendUrl,
   createPendingVerificationClientFields,
   formatWhatsAppPhoneForMessage,
+  hasClientActiveOrder,
   isClientAccountVerified,
+  isClientOrderCompleted,
   normalizeWhatsAppPhoneDigits,
   resolveOtpCompanyWhatsAppNumber,
 } from './whatsappHelpers';
@@ -79,4 +82,52 @@ test('New client defaults and isClientAccountVerified strictly block unverified 
   assert.equal(isClientAccountVerified({ verified: true, accountStatus: 'pending_verification' }), false);
   assert.equal(isClientAccountVerified({ verified: false, accountStatus: 'verified' }), false);
   assert.equal(isClientAccountVerified({ verified: true, accountStatus: 'verified' }), true);
+});
+
+test('hasClientActiveOrder and isClientOrderCompleted cleanly separate account registration from submitted orders', () => {
+  assert.equal(hasClientActiveOrder(null), false);
+  assert.equal(hasClientActiveOrder({ orderStatus: 'none', hasActiveOrder: false }), false);
+  assert.equal(hasClientActiveOrder({ orderStatus: 'تم استلام الطلب', hasActiveOrder: false }), false);
+  assert.equal(hasClientActiveOrder({ orderStatus: 'تم استلام الطلب', preferredVisaType: '', documents: [] }), false);
+
+  assert.equal(hasClientActiveOrder({ orderStatus: 'تم استلام الطلب', hasActiveOrder: true }), true);
+  assert.equal(
+    hasClientActiveOrder({ orderStatus: 'تم استلام الطلب', preferredVisaType: 'تأشيرة زيارة' }),
+    true
+  );
+  assert.equal(
+    hasClientActiveOrder({ orderStatus: 'تم استلام الطلب', documents: [{ id: 'doc1' }] }),
+    true
+  );
+  assert.equal(
+    isClientOrderCompleted({ orderStatus: 'تم تنفيذ الطلب', hasActiveOrder: false }),
+    false
+  );
+  assert.equal(
+    isClientOrderCompleted({ orderStatus: 'تم تنفيذ الطلب', hasActiveOrder: true }),
+    true
+  );
+});
+
+test('buildAdminStageWhatsAppMessage generates localized WhatsApp update message with order code and stage', () => {
+  const arMsg = buildAdminStageWhatsAppMessage({
+    clientName: 'أحمد علي',
+    orderCode: 'MSK-5002428',
+    stageLabel: 'قيد المراجعة والتنفيذ',
+    serviceTitle: 'تأشيرة زيارة عائلية',
+    lang: 'ar',
+  });
+  assert.ok(arMsg.includes('أحمد علي'));
+  assert.ok(arMsg.includes('MSK-5002428'));
+  assert.ok(arMsg.includes('قيد المراجعة والتنفيذ'));
+  assert.ok(arMsg.includes('تأشيرة زيارة عائلية'));
+
+  const enMsg = buildAdminStageWhatsAppMessage({
+    clientName: 'Ahmed Ali',
+    orderCode: 'MSK-5002428',
+    stageLabel: 'Booked / Issued',
+    lang: 'en',
+  });
+  assert.ok(enMsg.includes('Ahmed Ali'));
+  assert.ok(enMsg.includes('Booked / Issued'));
 });

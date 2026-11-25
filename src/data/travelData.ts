@@ -494,12 +494,16 @@ export function getLocalizedTravelContent(lang: AppLanguage) {
 }
 
 export function normalizeOrderStatusValue(status?: string):
+  | 'none'
   | 'تم استلام الطلب'
   | 'قيد المراجعة والتنفيذ'
   | 'تم الحجز / الإصدار'
   | 'تم تنفيذ الطلب'
   | 'مكتمل' {
   switch (status) {
+    case 'none':
+    case 'بدون طلبات نشطة':
+      return 'none';
     case 'قيد المراجعة والتنفيذ':
     case 'تحت المراجعة':
       return 'قيد المراجعة والتنفيذ';
@@ -520,6 +524,9 @@ export function normalizeOrderStatusValue(status?: string):
 
 export function translateOrderStatus(status: VisaOrderStatus | string, lang: AppLanguage): string {
   const canonical = normalizeOrderStatusValue(status);
+  if (canonical === 'none') {
+    return lang === 'ar' ? 'بدون طلبات نشطة' : 'No Active Orders';
+  }
   if (lang === 'ar') return canonical;
   switch (canonical) {
     case 'تم استلام الطلب':

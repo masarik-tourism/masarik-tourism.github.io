@@ -118,3 +118,89 @@ export function createPendingVerificationClientFields() {
     otpConsumed: false,
   };
 }
+
+/**
+ * Determines whether a client account has an actual submitted/active service order
+ * (separating mere account registration from real service submission).
+ */
+export function hasClientActiveOrder(
+  profile?: {
+    orderStatus?: string;
+    hasActiveOrder?: boolean;
+    preferredVisaType?: string;
+    documents?: unknown[];
+    issuedDocuments?: unknown[];
+    appointmentDetails?: { appointmentDate?: string } | null;
+  } | null
+): boolean {
+  if (!profile) return false;
+  if (profile.orderStatus === 'none' || profile.orderStatus === 'بدون طلبات نشطة') {
+    return false;
+  }
+  if (profile.hasActiveOrder === false) {
+    return false;
+  }
+  if (profile.hasActiveOrder === true) {
+    return true;
+  }
+  const st = String(profile.orderStatus || '').trim();
+  const isBeyondStageOne =
+    st === 'قيد المراجعة والتنفيذ' ||
+    st === 'تحت المراجعة' ||
+    st === 'تم الحجز / الإصدار' ||
+    st === 'تم حجز موعد تساهيل' ||
+    st === 'تم تنفيذ الطلب' ||
+    st === 'مكتمل' ||
+    st === 'صدرت التأشيرة';
+  const hasService = Boolean((profile.preferredVisaType || '').trim());
+  const hasDocs = Array.isArray(profile.documents) && profile.documents.length > 0;
+  const hasIssued = Array.isArray(profile.issuedDocuments) && profile.issuedDocuments.length > 0;
+  const hasAppointment = Boolean(profile.appointmentDetails?.appointmentDate?.trim());
+
+  return isBeyondStageOne || hasService || hasDocs || hasIssued || hasAppointment;
+}
+
+/**
+ * Returns true only when the client has an active order AND it reached the final completed stage.
+ */
+export function isClientOrderCompleted(
+  profile?: {
+    orderStatus?: string;
+    hasActiveOrder?: boolean;
+    preferredVisaType?: string;
+    documents?: unknown[];
+    issuedDocuments?: unknown[];
+    appointmentDetails?: { appointmentDate?: string } | null;
+  } | null
+): boolean {
+  if (!hasClientActiveOrder(profile)) return false;
+  const st = String(profile?.orderStatus || '').trim();
+  return st === 'تم تنفيذ الطلب' || st === 'مكتمل' || st === 'صدرت التأشيرة';
+}
+
+/**
+ * Builds the localized WhatsApp message when Admin notifies a client of a stage update (stages 2, 3, or 4).
+ */
+export function buildAdminStageWhatsAppMessage(params: {
+  clientName: string;
+  orderCode: string;
+  stageLabel: string;
+  serviceTitle?: string;
+  lang?: 'ar' | 'en';
+}): string {
+  const { clientName, orderCode, stageLabel, serviceTitle, lang = 'ar' } = params;
+  const cleanName = clientName.trim() || (lang === 'en' ? 'Valued Client' : 'عميلنا العزيز');
+  const cleanService = (serviceTitle || '').trim();
+
+  if (lang === 'en') {
+    return `Hello ${cleanName},
+Masarik Tourism team has updated your order (${orderCode})${cleanService ? ` for (${cleanService})` : ''} to:
+• Current Stage: ${stageLabel}
+You can track your order details and documents inside the Masarik app/portal. Thank you.`;
+  }
+
+  return `السلام عليكم ${cleanName}،
+يود فريق مسارك للإنجاز السياحي إبلاغكم بتحديث حالة طلبكم رقم (${orderCode})${cleanService ? ` الخاص بخدمة (${cleanService})` : ''} إلى:
+• المرحلة الحالية: ${stageLabel}
+يمكنكم متابعة تفاصيل الطلب والمستندات عبر حسابكم في تطبيق ومنصة مسارك. مع خالص التحية.`;
+}

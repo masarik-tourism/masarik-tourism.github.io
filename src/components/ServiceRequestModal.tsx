@@ -21,6 +21,7 @@ import { WhatsAppIcon } from './WhatsAppIcon';
 import { useLanguage } from '../contexts/LanguageContext';
 import {
   TRAVELERS_UPDATED_EVENT,
+  activateClientOrderCloud,
   attachPreOrderFilesToTravelerCloud,
   compressImageToDataUrl,
   formatPhoneForDisplay,
@@ -245,6 +246,11 @@ export const ServiceRequestModal: React.FC<ServiceRequestModalProps> = ({
         });
         if (res) {
           updatedTraveler = res;
+        }
+      } else if (activeTraveler) {
+        const activated = await activateClientOrderCloud(activeTraveler.phone, selectedService);
+        if (activated) {
+          updatedTraveler = activated;
         }
       }
 

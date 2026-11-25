@@ -166,8 +166,10 @@
         },
         "orderStatus": {
           "type": "string",
-          "description": "Current processing stage for Visa or VFS Tasheer appointment.",
+          "description": "Current processing stage for Visa or VFS Tasheer appointment (defaults to 'none' until an order is submitted or opened).",
           "enum": [
+            "none",
+            "بدون طلبات نشطة",
             "تم استلام الطلب",
             "قيد المراجعة والتنفيذ",
             "تم الحجز / الإصدار",
@@ -179,10 +181,19 @@
             "صدرت التأشيرة"
           ]
         },
+        "hasActiveOrder": {
+          "type": "boolean",
+          "description": "Explicit flag separating simple account registration from an active submitted service order."
+        },
         "adminNotes": {
           "type": "string",
           "description": "Client-visible note written by General Manager or Sub-Admin.",
           "maxLength": 1000
+        },
+        "adminPrivateNotes": {
+          "type": "string",
+          "description": "Internal-only private notes written by Admin or Staff; never displayed on client views.",
+          "maxLength": 2000
         },
         "preferredVisaType": {
           "type": "string",
@@ -528,6 +539,8 @@
         "orderStatus": {
           "type": "string",
           "enum": [
+            "none",
+            "بدون طلبات نشطة",
             "تم استلام الطلب",
             "قيد المراجعة والتنفيذ",
             "تم الحجز / الإصدار",

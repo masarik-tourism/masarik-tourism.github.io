@@ -99,8 +99,7 @@ function buildDraftFromTraveler(
       passportIssueDate: '',
       passportExpiryDate: '',
       nationality: lang === 'en' ? 'Egyptian' : 'مصري',
-      preferredVisaType:
-        lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية',
+      preferredVisaType: '',
       visaDocumentNumber: '',
       saudiSponsorId: '',
       sponsorName: '',
@@ -129,9 +128,7 @@ function buildDraftFromTraveler(
     passportIssueDate: traveler.passportIssueDate || '',
     passportExpiryDate: traveler.passportExpiryDate || '',
     nationality: traveler.nationality || (lang === 'en' ? 'Egyptian' : 'مصري'),
-    preferredVisaType:
-      traveler.preferredVisaType ||
-      (lang === 'en' ? 'Saudi Visit Visa / VFS Tasheer' : 'تأشيرة زيارة / تساهيل السعودية'),
+    preferredVisaType: traveler.preferredVisaType || '',
     visaDocumentNumber: traveler.visaDocumentNumber || '',
     saudiSponsorId: traveler.saudiSponsorId || '',
     sponsorName: traveler.sponsorName || '',
@@ -478,7 +475,7 @@ export const App: React.FC = () => {
         tag: `masarik-client-docs-${activeTraveler.phone}`,
         data: { role: 'client', action: 'documents', phone: activeTraveler.phone },
       });
-    } else if (orderChanged) {
+    } else if (orderChanged && orderStatus && orderStatus !== 'none') {
       playChatNotificationChime(true);
       void showBrowserPushNotification({
         title: t('مسارك للإنجاز السياحي — تحديث حالة الطلب', 'Masarik Tourism — Order Status Updated'),

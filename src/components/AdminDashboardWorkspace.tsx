@@ -48,6 +48,8 @@ import {
   Upload,
   TrendingUp,
   BarChart3,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { subscribePlatformAnalytics, AnalyticsDashboardState } from '../utils/analyticsStore';
 import {
@@ -79,6 +81,7 @@ import { isRunningInApp } from '../utils/appEnvironment';
 import {
   VISA_ORDER_STATUSES,
   TRAVELERS_UPDATED_EVENT,
+  activateClientOrderCloud,
   adminCreateClientCloud,
   adminCreateOrUpgradeB2BPartnerCloud,
   adminInstantActivateClientCloud,
@@ -168,7 +171,12 @@ import {
 import { translateOrderStatus } from '../data/travelData';
 import { buildSmsSendUrl, buildWhatsAppSendUrl, openWhatsApp } from '../utils/communication';
 import { getPendingOtpClients } from '../utils/adminOtpHelpers';
-import { isClientAccountVerified } from '../utils/whatsappHelpers';
+import {
+  buildAdminStageWhatsAppMessage,
+  hasClientActiveOrder,
+  isClientAccountVerified,
+  isClientOrderCompleted,
+} from '../utils/whatsappHelpers';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
@@ -284,8 +292,10 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [editDocumentPassportNumber, setEditDocumentPassportNumber] = useState('');
   const [editPortOfEntry, setEditPortOfEntry] = useState('');
   const [adminCopiedKey, setAdminCopiedKey] = useState<string | null>(null);
-  const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('تم استلام الطلب');
+  const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('none');
   const [editAdminNotes, setEditAdminNotes] = useState('');
+  const [editAdminPrivateNotes, setEditAdminPrivateNotes] = useState('');
+  const [expandedClientPhones, setExpandedClientPhones] = useState<Record<string, boolean>>({});
   const [editApptServiceType, setEditApptServiceType] = useState('');
   const [editApptDate, setEditApptDate] = useState('');
   const [editApptTime, setEditApptTime] = useState('');
@@ -713,6 +723,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setAdminCopiedKey(null);
       setEditOrderStatus(normalizeOrderStatusValue(selectedClient.orderStatus));
       setEditAdminNotes(selectedClient.adminNotes || '');
+      setEditAdminPrivateNotes(selectedClient.adminPrivateNotes || '');
       setEditApptServiceType(
         selectedClient.appointmentDetails?.serviceType || selectedClient.preferredVisaType || ''
       );
@@ -1010,6 +1021,40 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     loadTravelers();
   };
 
+  const handleManualOpenOrder = (client: TravelerProfile) => {
+    if (!canManageClients) return;
+    updateTravelerProfileDetails(client.phone, {
+      hasActiveOrder: true,
+      orderStatus: 'تم استلام الطلب',
+    });
+    void activateClientOrderCloud(client.phone, client.preferredVisaType);
+    if (selectedClientPhone === client.phone) {
+      setEditOrderStatus('تم استلام الطلب');
+      setFolderSavedMsg(
+        t('تم فتح وتفعيل الطلب للعميل بنجاح ✓', 'Order opened & activated for client ✓')
+      );
+      setTimeout(() => setFolderSavedMsg(''), 2500);
+    }
+    setExpandedClientPhones((prev) => ({ ...prev, [client.phone]: true }));
+    loadTravelers();
+  };
+
+  const handleNotifyClientStageWhatsApp = (client: TravelerProfile) => {
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
+    const orderCode = client.orderCode || buildOrderCodeFromPhone(client.phone);
+    const normalized = normalizeOrderStatusValue(client.orderStatus);
+    const stageLabel = translateOrderStatus(normalized, lang);
+    const msg = buildAdminStageWhatsAppMessage({
+      clientName: displayName,
+      orderCode,
+      stageLabel,
+      serviceTitle: client.preferredVisaType,
+      lang,
+    });
+    openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
+  };
+
   const handleSaveClientFolder = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedClient || !canManageClients) return;
@@ -1059,6 +1104,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       portOfEntry: editPortOfEntry.trim(),
       orderStatus: editOrderStatus,
       adminNotes: editAdminNotes.trim(),
+      adminPrivateNotes: editAdminPrivateNotes.trim(),
       appointmentDetails: nextAppointmentDetails,
     });
     loadTravelers();
@@ -2111,14 +2157,14 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
   const filteredRequests = sortProfilesByPresence(
     individualTravelers.filter((tr) => {
-      const normalizedSt = normalizeOrderStatusValue(tr.orderStatus);
-      const isCompleted = normalizedSt === 'تم تنفيذ الطلب';
+      const hasActive = hasClientActiveOrder(tr);
+      const isCompleted = isClientOrderCompleted(tr);
       const hasFiles = (tr.documents?.length || 0) > 0;
       const online = isUserCurrentlyOnline(tr);
       const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
 
       if (orderFilter === 'online' && !online) return false;
-      if (orderFilter === 'active' && isCompleted) return false;
+      if (orderFilter === 'active' && (!hasActive || isCompleted)) return false;
       if (orderFilter === 'with_files' && !hasFiles) return false;
       if (orderFilter === 'completed' && !isCompleted) return false;
       if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
@@ -2210,7 +2256,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
   const pendingCount = pendingOtpClients.length;
   const activeOrdersCount = individualTravelers.filter(
-    (tr) => normalizeOrderStatusValue(tr.orderStatus) !== 'تم تنفيذ الطلب'
+    (tr) => hasClientActiveOrder(tr) && !isClientOrderCompleted(tr)
   ).length;
   const withFilesCount = individualTravelers.filter(
     (tr) => (tr.documents?.length || 0) > 0
@@ -2218,7 +2264,9 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const expiringPassportCount = individualTravelers.filter(
     (tr) => evaluatePassportValidity(tr.passportExpiryDate).isUnderSixMonths
   ).length;
-  const completedCount = individualTravelers.length - activeOrdersCount;
+  const completedCount = individualTravelers.filter((tr) =>
+    isClientOrderCompleted(tr)
+  ).length;
   const messagesBadgeCount =
     pendingCount +
     travelers.filter(
@@ -3051,20 +3099,28 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   const isOnline = isUserCurrentlyOnline(client);
                   const unreadChat = chatThreads[client.phone]?.unreadAdminCount || 0;
                   const clientPassportEval = evaluatePassportValidity(client.passportExpiryDate);
+                  const clientHasActiveOrder = hasClientActiveOrder(client);
+                  const clientIsCompleted = isClientOrderCompleted(client);
+                  const clientStageIdx = getOrderStatusStageIndex(client.orderStatus);
+                  const isExpanded = Boolean(expandedClientPhones[client.phone]);
+                  const waCopyKey = `card-wa-${client.phone}`;
+                  const formattedPhone = formatPhoneForDisplay(client.phone);
                   return (
                     <div
                       key={client.phone}
-                      onClick={() => setSelectedClientPhone(client.phone)}
-                      className={`bg-white border rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between ${
+                      className={`bg-white border rounded-2xl p-4 space-y-3 shadow-xs hover:shadow-md transition flex flex-col justify-between ${
                         isOnline
                           ? 'border-emerald-300 ring-1 ring-emerald-200/70'
                           : 'border-slate-200 hover:border-[#C6A052]/80'
                       }`}
                     >
-                      <div className="space-y-2">
+                      <div className="space-y-2.5">
                         <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="flex items-start gap-3 min-w-0">
-                            <div className="relative shrink-0">
+                          <div className="flex items-start gap-3 min-w-0 flex-1">
+                            <div
+                              onClick={() => setSelectedClientPhone(client.phone)}
+                              className="relative shrink-0 cursor-pointer"
+                            >
                               {client.avatarUrl ? (
                                 <img
                                   src={getDisplayableDriveImageUrl(client.avatarUrl)}
@@ -3085,11 +3141,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                               />
                             </div>
 
-                            <div className="space-y-1 min-w-0">
+                            <div className="space-y-1.5 min-w-0 flex-1">
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-sm sm:text-base font-black text-[#0F2438]">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedClientPhone(client.phone)}
+                                  className="text-sm sm:text-base font-black text-[#0F2438] hover:text-[#0284C7] transition cursor-pointer text-start"
+                                >
                                   {clientDisplayName}
-                                </span>
+                                </button>
                                 <span
                                   className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[10.5px] font-black text-[#0F2438] tabular-nums"
                                   dir="ltr"
@@ -3125,14 +3185,58 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                 </span>
                               </div>
 
-                              <div className="text-xs text-slate-600 tabular-nums flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                                <span>
-                                  {t('واتساب:', 'WhatsApp:')}{' '}
-                                  <strong className="text-[#0F2438]">
-                                    {formatPhoneForDisplay(client.phone)}
+                              {/* Quick WhatsApp Contact Bar + Copy */}
+                              <div className="text-xs text-slate-600 tabular-nums flex flex-wrap items-center gap-1.5">
+                                <span className="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-0.5">
+                                  <span>{t('واتساب:', 'WhatsApp:')}</span>
+                                  <strong className="text-[#0F2438]" dir="ltr">
+                                    {formattedPhone}
                                   </strong>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void handleAdminCopyValue(waCopyKey, formattedPhone);
+                                    }}
+                                    title={t('نسخ الرقم', 'Copy Number')}
+                                    className="p-0.5 rounded hover:bg-slate-200 text-slate-600 hover:text-[#0F2438] cursor-pointer transition"
+                                  >
+                                    {adminCopiedKey === waCopyKey ? (
+                                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    ) : (
+                                      <Copy className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
                                 </span>
-                                <span>·</span>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDirectWhatsAppChat(client);
+                                  }}
+                                  className="px-2 py-0.5 rounded-lg bg-[#25D366]/15 hover:bg-[#25D366]/25 border border-[#25D366]/30 text-[#128C7E] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                                >
+                                  <MessageCircle className="w-3 h-3" />
+                                  <span>{t('واتساب', 'WhatsApp')}</span>
+                                </button>
+
+                                {unreadChat > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleOpenClientChat(client.phone);
+                                    }}
+                                    className="px-2 py-0.5 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums cursor-pointer"
+                                  >
+                                    {t(`رسالة (${unreadChat})`, `Chat (${unreadChat})`)}
+                                  </button>
+                                )}
+                              </div>
+
+                              {/* Concise Status Metadata */}
+                              <div className="text-[11px] text-slate-500 tabular-nums flex flex-wrap items-center gap-x-2 gap-y-1">
                                 <span>
                                   {t('الجواز:', 'Passport:')}{' '}
                                   <strong className="text-[#0F2438] uppercase">
@@ -3147,34 +3251,28 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                 {receiptsCount > 0 && (
                                   <>
                                     <span>·</span>
-                                    <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10.5px] font-black">
-                                      {t(`إيصال دفع (${receiptsCount})`, `Receipt (${receiptsCount})`)}
+                                    <span className="px-1.5 py-0.2 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-black">
+                                      {t(`إيصال (${receiptsCount})`, `Receipt (${receiptsCount})`)}
                                     </span>
                                   </>
                                 )}
                                 {(client.familyMembers?.length || 0) > 0 && (
                                   <>
                                     <span>·</span>
-                                    <span className="px-2 py-0.5 rounded-full bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#0F2438] text-[10.5px] font-black">
-                                      {t(
-                                        `العائلة: ${client.familyMembers?.length}`,
-                                        `Family: ${client.familyMembers?.length}`
-                                      )}
+                                    <span className="px-1.5 py-0.2 rounded-full bg-[#C6A052]/20 border border-[#C6A052]/50 text-[#0F2438] text-[10px] font-black">
+                                      {t(`العائلة: ${client.familyMembers?.length}`, `Family: ${client.familyMembers?.length}`)}
                                     </span>
                                   </>
                                 )}
                                 {clientPassportEval.isUnderSixMonths && (
                                   <>
                                     <span>·</span>
-                                    <span className="px-2 py-0.5 rounded-full bg-red-50 border border-red-300 text-red-800 text-[10.5px] font-black inline-flex items-center gap-1">
+                                    <span className="px-1.5 py-0.2 rounded-full bg-red-50 border border-red-300 text-red-800 text-[10px] font-black inline-flex items-center gap-1">
                                       <AlertTriangle className="w-3 h-3 text-red-600 shrink-0" />
                                       <span>
                                         {clientPassportEval.isExpired
                                           ? t('جواز منتهي', 'Passport Expired')
-                                          : t(
-                                              `صلاحية الجواز ${clientPassportEval.remainingDays} يوم (< 6 أشهر)`,
-                                              `Passport ${clientPassportEval.remainingDays}d (< 6m)`
-                                            )}
+                                          : t(`صلاحية ${clientPassportEval.remainingDays}ي`, `${clientPassportEval.remainingDays}d left`)}
                                       </span>
                                     </span>
                                   </>
@@ -3183,213 +3281,297 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             </div>
                           </div>
 
-                          <span
-                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 inline-flex items-center gap-1 ${
-                              client.orderStatus === 'تم تنفيذ الطلب' ||
-                              client.orderStatus === 'مكتمل'
-                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                                : 'bg-slate-100 border-slate-200 text-[#0F2438]'
-                            }`}
-                          >
-                            {(client.orderStatus === 'تم تنفيذ الطلب' ||
-                              client.orderStatus === 'مكتمل') && (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <div className="flex flex-col items-end gap-1.5 shrink-0">
+                            <span
+                              className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-1 ${
+                                !clientHasActiveOrder
+                                  ? 'bg-slate-50 border-slate-200 text-slate-500'
+                                  : clientIsCompleted
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                  : 'bg-[#FAF8F2] border-[#E5C887] text-[#0F2438]'
+                              }`}
+                            >
+                              {clientIsCompleted && (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              )}
+                              <span>
+                                {clientHasActiveOrder
+                                  ? translateOrderStatus(client.orderStatus, lang)
+                                  : t('بدون طلبات نشطة', 'No Active Orders')}
+                              </span>
+                            </span>
+
+                            {clientHasActiveOrder && clientStageIdx >= 1 && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleNotifyClientStageWhatsApp(client);
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[10.5px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                              >
+                                <span>{t('📲 إبلاغ العميل واتساب', '📲 Notify via WhatsApp')}</span>
+                              </button>
                             )}
-                            <span>{translateOrderStatus(client.orderStatus, lang)}</span>
-                          </span>
+                          </div>
                         </div>
                       </div>
 
-                      <div className="space-y-2 pt-2 border-t border-slate-100">
-                        {canActivateOtp && !isClientAccountVerified(client) && (
-                          <div
-                            onClick={(e) => e.stopPropagation()}
-                            className="bg-orange-50/85 border border-orange-200 rounded-xl p-2.5 space-y-2"
-                          >
-                            <button
-                              type="button"
-                              disabled={togglingVerifyPhone === client.phone}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleAdminInstantActivate(client);
-                              }}
-                              className="w-full px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs flex items-center justify-center gap-1.5"
-                            >
-                              <span>
-                                {togglingVerifyPhone === client.phone
-                                  ? t('جاري التوثيق...', 'Verifying...')
-                                  : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
-                              </span>
-                            </button>
-
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleSendVerificationWhatsApp(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={sendingVerifyNotifPhone === client.phone}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleSendVerificationAppPush(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {sendingVerifyNotifPhone === client.phone
-                                  ? t('جاري الإرسال...', 'Sending...')
-                                  : t('🔔 إشعار التطبيق', '🔔 App Push')}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleSendVerificationSms(client);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
-                              >
-                                {t('📱 SMS', '📱 SMS')}
-                              </button>
-                            </div>
-
-                            {verifyActionFeedback?.phone === client.phone && (
-                              <p
-                                className={`text-[11px] font-bold px-1 ${
-                                  verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
-                                }`}
-                              >
-                                {verifyActionFeedback.text}
-                              </p>
-                            )}
-                          </div>
-                        )}
-
-                        {canActivateOtp && isClientAccountVerified(client) && (
-                          <div
-                            onClick={(e) => e.stopPropagation()}
-                            className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2 space-y-1.5"
-                          >
-                            <button
-                              type="button"
-                              disabled={togglingVerifyPhone === client.phone}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleAdminRevertUnverified(client);
-                              }}
-                              className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition flex items-center justify-center gap-1.5"
-                            >
-                              <span>
-                                {togglingVerifyPhone === client.phone
-                                  ? t('جاري التحديث...', 'Updating...')
-                                  : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
-                              </span>
-                            </button>
-
-                            {verifyActionFeedback?.phone === client.phone && (
-                              <p
-                                className={`text-[11px] font-bold px-1 ${
-                                  verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
-                                }`}
-                              >
-                                {verifyActionFeedback.text}
-                              </p>
-                            )}
-                          </div>
-                        )}
-
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="bg-slate-50 border border-slate-200/90 rounded-xl p-2 space-y-1.5"
+                      {/* Compact Action Strip + Expand Toggle */}
+                      <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedClientPhones((prev) => ({
+                              ...prev,
+                              [client.phone]: !prev[client.phone],
+                            }));
+                          }}
+                          className={`px-3 py-1.5 rounded-xl border text-xs font-black inline-flex items-center gap-1.5 transition cursor-pointer ${
+                            isExpanded
+                              ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438]'
+                              : 'bg-slate-50 hover:bg-slate-100 text-[#0F2438] border-slate-200'
+                          }`}
                         >
-                          <div className="flex items-center justify-between gap-2 px-1">
-                            <span className="text-[10.5px] font-black text-slate-600">
-                              {t('تحديث حالة الطلب بضغطة واحدة:', '1-Click Stage Update:')}
-                            </span>
-                            {stageUpdatedPhone === client.phone && (
-                              <span className="text-[10.5px] font-black text-emerald-700">
-                                {t('تم التحديث ✓', 'Updated ✓')}
-                              </span>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                            {VISA_ORDER_STATUSES.map((st, idx) => {
-                              const activeIdx = getOrderStatusStageIndex(client.orderStatus);
-                              const isCurrent = idx === activeIdx;
-                              const isPast = idx < activeIdx;
-                              return (
+                          <span>{t('إدارة الحساب والطلب', 'Manage Account & Order')}</span>
+                          {isExpanded ? (
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedClientPhone(client.phone);
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-[#FAF8F2] hover:bg-[#F3ECE0] border border-[#C6A052]/60 text-[#0F2438] text-xs font-black inline-flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5 text-[#9E7B33]" />
+                          <span>{t('فتح ملف العميل', 'Open Folder')}</span>
+                        </button>
+                      </div>
+
+                      {/* Expanded Controls Section */}
+                      {isExpanded && (
+                        <div className="space-y-2.5 pt-2.5 border-t border-slate-200/80">
+                          {canActivateOtp && !isClientAccountVerified(client) && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="bg-orange-50/85 border border-orange-200 rounded-xl p-2.5 space-y-2"
+                            >
+                              <button
+                                type="button"
+                                disabled={togglingVerifyPhone === client.phone}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleAdminInstantActivate(client);
+                                }}
+                                className="w-full px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-black cursor-pointer transition shadow-xs flex items-center justify-center gap-1.5"
+                              >
+                                <span>
+                                  {togglingVerifyPhone === client.phone
+                                    ? t('جاري التوثيق...', 'Verifying...')
+                                    : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
+                                </span>
+                              </button>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <button
-                                  key={st}
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    handleOneClickOrderStageUpdate(client, st);
+                                    void handleSendVerificationWhatsApp(client);
                                   }}
-                                  className={`px-2 py-1.5 rounded-lg text-[10.5px] font-bold border transition cursor-pointer text-center leading-tight min-h-[34px] ${
-                                    isCurrent
-                                      ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438] shadow-xs'
-                                      : isPast
-                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
-                                      : 'bg-white text-slate-600 border-slate-200 hover:border-[#C6A052] hover:text-[#0F2438]'
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                                >
+                                  {t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={sendingVerifyNotifPhone === client.phone}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleSendVerificationAppPush(client);
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                                >
+                                  {sendingVerifyNotifPhone === client.phone
+                                    ? t('جاري الإرسال...', 'Sending...')
+                                    : t('🔔 إشعار التطبيق', '🔔 App Push')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleSendVerificationSms(client);
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-black cursor-pointer transition shadow-xs"
+                                >
+                                  {t('📱 SMS', '📱 SMS')}
+                                </button>
+                              </div>
+
+                              {verifyActionFeedback?.phone === client.phone && (
+                                <p
+                                  className={`text-[11px] font-bold px-1 ${
+                                    verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
                                   }`}
                                 >
-                                  <span className="block tabular-nums">
-                                    {idx + 1}. {translateOrderStatus(st, lang)}
-                                  </span>
-                                </button>
-                              );
-                            })}
+                                  {verifyActionFeedback.text}
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {canActivateOtp && isClientAccountVerified(client) && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="bg-emerald-50/70 border border-emerald-200 rounded-xl p-2 space-y-1.5"
+                            >
+                              <button
+                                type="button"
+                                disabled={togglingVerifyPhone === client.phone}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleAdminRevertUnverified(client);
+                                }}
+                                className="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black cursor-pointer transition flex items-center justify-center gap-1.5"
+                              >
+                                <span>
+                                  {togglingVerifyPhone === client.phone
+                                    ? t('جاري التحديث...', 'Updating...')
+                                    : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
+                                </span>
+                              </button>
+
+                              {verifyActionFeedback?.phone === client.phone && (
+                                <p
+                                  className={`text-[11px] font-bold px-1 ${
+                                    verifyActionFeedback.ok ? 'text-emerald-800' : 'text-red-700'
+                                  }`}
+                                >
+                                  {verifyActionFeedback.text}
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {!clientHasActiveOrder ? (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2"
+                            >
+                              <span className="text-[11px] font-bold text-slate-600">
+                                {t('لم يبدأ العميل طلباً فعلياً بعد.', 'No active order submitted yet.')}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleManualOpenOrder(client);
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>{t('+ فتح طلب يدوياً للعميل', '+ Open Order Manually')}</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="bg-slate-50 border border-slate-200/90 rounded-xl p-2 space-y-1.5"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                                <span className="text-[10.5px] font-black text-slate-600">
+                                  {t('تحديث حالة الطلب بضغطة واحدة:', '1-Click Stage Update:')}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  {stageUpdatedPhone === client.phone && (
+                                    <span className="text-[10.5px] font-black text-emerald-700">
+                                      {t('تم التحديث ✓', 'Updated ✓')}
+                                    </span>
+                                  )}
+                                  {clientStageIdx >= 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleNotifyClientStageWhatsApp(client);
+                                      }}
+                                      className="px-2 py-0.5 rounded-md bg-[#25D366] hover:bg-[#128C7E] text-white text-[10px] font-black cursor-pointer transition"
+                                    >
+                                      {t('📲 إبلاغ العميل واتساب', '📲 Notify WhatsApp')}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                                {VISA_ORDER_STATUSES.map((st, idx) => {
+                                  const activeIdx = getOrderStatusStageIndex(client.orderStatus);
+                                  const isCurrent = idx === activeIdx;
+                                  const isPast = idx < activeIdx;
+                                  return (
+                                    <button
+                                      key={st}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleOneClickOrderStageUpdate(client, st);
+                                      }}
+                                      className={`px-2 py-1.5 rounded-lg text-[10.5px] font-bold border transition cursor-pointer text-center leading-tight min-h-[34px] ${
+                                        isCurrent
+                                          ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438] shadow-xs'
+                                          : isPast
+                                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                                          : 'bg-white text-slate-600 border-slate-200 hover:border-[#C6A052] hover:text-[#0F2438]'
+                                      }`}
+                                    >
+                                      <span className="block tabular-nums">
+                                        {idx + 1}. {translateOrderStatus(st, lang)}
+                                      </span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenClientChat(client.phone);
+                              }}
+                              className="px-3 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[#0284C7] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                              <span>{t('محادثة فورية', 'Live Chat')}</span>
+                              {unreadChat > 0 && (
+                                <span className="px-1.5 py-0.2 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums">
+                                  {unreadChat}
+                                </span>
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedClientPhone(client.phone);
+                              }}
+                              className="flex-1 px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" />
+                              <span>{t('فتح ملف العميل والمستندات', 'Open Client Folder')}</span>
+                            </button>
                           </div>
                         </div>
-
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenClientChat(client.phone);
-                            }}
-                            className="px-3 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-[#0284C7] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <MessageCircle className="w-3.5 h-3.5" />
-                            <span>{t('محادثة فورية', 'Live Chat')}</span>
-                            {unreadChat > 0 && (
-                              <span className="px-1.5 py-0.2 rounded-full bg-red-600 text-white text-[10px] font-black tabular-nums">
-                                {unreadChat}
-                              </span>
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDirectWhatsAppChat(client);
-                            }}
-                            className="px-3 py-2 rounded-xl bg-[#25D366]/15 hover:bg-[#25D366]/25 text-[#128C7E] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <MessageCircle className="w-3.5 h-3.5" />
-                            <span>{t('واتساب', 'WhatsApp')}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setSelectedClientPhone(client.phone);
-                            }}
-                            className="flex-1 px-3 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer"
-                          >
-                            <FolderOpen className="w-3.5 h-3.5" />
-                            <span>{t('فتح ملف العميل والمستندات', 'Open Client Folder')}</span>
-                          </button>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   );
                 })}
@@ -3427,7 +3609,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   {t('طلبات شركات جارية', 'Active Partner Orders')}
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-sky-900">
-                  {b2bPartners.filter((p) => normalizeOrderStatusValue(p.orderStatus) !== 'تم تنفيذ الطلب').length}
+                  {b2bPartners.filter((p) => hasClientActiveOrder(p) && !isClientOrderCompleted(p)).length}
                 </span>
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 shadow-xs">
@@ -4780,10 +4962,45 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     </div>
                   </div>
 
-                  <div className="sm:col-span-2">
-                    <label className="block font-bold text-slate-600 mb-1.5">
-                      {t('مرحلة طلب التأشيرة / تساهيل (تحديث فوري بضغطة واحدة)', 'Order Stage (1-Click Live Update)')}
-                    </label>
+                  <div className="sm:col-span-2 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="block font-bold text-slate-600">
+                        {t('مرحلة طلب التأشيرة / تساهيل (تحديث فوري بضغطة واحدة)', 'Order Stage (1-Click Live Update)')}
+                      </label>
+                      {getOrderStatusStageIndex(editOrderStatus) >= 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleNotifyClientStageWhatsApp({
+                              ...selectedClient,
+                              orderStatus: editOrderStatus,
+                            })
+                          }
+                          className="px-3 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1.5 cursor-pointer transition shadow-xs"
+                        >
+                          <span>{t('📲 إبلاغ العميل واتساب', '📲 Notify Client via WhatsApp')}</span>
+                        </button>
+                      )}
+                    </div>
+                    {!hasClientActiveOrder(selectedClient) &&
+                      normalizeOrderStatusValue(editOrderStatus) === 'none' && (
+                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[11px] font-bold text-slate-600">
+                            {t(
+                              'هذا الحساب مسجل بدون طلب خدمة نشط حالياً.',
+                              'This account currently has no active service order.'
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleManualOpenOrder(selectedClient)}
+                            className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>{t('+ فتح طلب يدوياً للعميل', '+ Open Order Manually')}</span>
+                          </button>
+                        </div>
+                      )}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       {VISA_ORDER_STATUSES.map((st, idx) => {
                         const isActive =
@@ -4807,20 +5024,49 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   </div>
                 </div>
 
-                <div className="text-xs">
-                  <label className="block font-bold text-slate-600 mb-1">
-                    {t('ملاحظة الإدارة للعميل', 'Client-Visible Admin Note')}
-                  </label>
-                  <input
-                    type="text"
-                    value={editAdminNotes}
-                    onChange={(e) => setEditAdminNotes(e.target.value)}
-                    placeholder={t(
-                      'مثال: موعد تساهيل يوم الثلاثاء 10 صباحاً',
-                      'e.g. Tasheer appointment Tuesday 10 AM'
-                    )}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                  />
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-bold text-slate-600 mb-1">
+                      {t('ملاحظة الإدارة للعميل', 'Client-Visible Admin Note')}
+                    </label>
+                    <input
+                      type="text"
+                      value={editAdminNotes}
+                      onChange={(e) => setEditAdminNotes(e.target.value)}
+                      placeholder={t(
+                        'مثال: موعد تساهيل يوم الثلاثاء 10 صباحاً',
+                        'e.g. Tasheer appointment Tuesday 10 AM'
+                      )}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                    />
+                  </div>
+
+                  <div className="bg-amber-50/70 border border-amber-200/90 rounded-xl p-3 space-y-1.5">
+                    <label className="flex items-center justify-between gap-2 font-black text-amber-950">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>
+                          {t(
+                            'ملاحظات إدارية خاصة (لا يراها العميل)',
+                            'Private Admin Notes (Hidden from Client)'
+                          )}
+                        </span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-black text-amber-900">
+                        {t('سري للإدارة فقط', 'Internal Only')}
+                      </span>
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={editAdminPrivateNotes}
+                      onChange={(e) => setEditAdminPrivateNotes(e.target.value)}
+                      placeholder={t(
+                        'سجّل هنا أي ملاحظات داخلية أو مدفوعات أو تنبيهات خاصة بفريق العمل فقط...',
+                        'Internal team notes, balances, or reminders (never visible to client)...'
+                      )}
+                      className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white text-[#0F2438] text-xs focus:outline-none focus:ring-2 focus:ring-amber-400"
+                    />
+                  </div>
                 </div>
 
                 {/* Appointment QR Pass Entry Section */}
