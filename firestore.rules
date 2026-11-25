@@ -1,17 +1,6 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Shared Platform Rules: Teb Al-Hajayzah (طب الحجايزة)
-    match /teb_alhajayzah_accounts/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_clinics/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_appointments/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_messages/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_settings/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_fcm_tokens/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah_records/{docId} { allow read, write: if true; }
-    match /teb_alhajayzah/{document=**} { allow read, write: if true; }
-
     // Global Default-Deny Catch-All
     match /{document=**} {
       allow read, write: if false;
@@ -133,7 +122,7 @@ service cloud.firestore {
       && isOptionalString(data, 'avatarStoragePath', 300)
       && (!('avatarSizeBytes' in data) || (data.avatarSizeBytes is int && data.avatarSizeBytes >= 0 && data.avatarSizeBytes <= 10485760))
       && data.otp is string
-      && data.otp.matches('^[0-9]{6}$')
+      && data.otp.matches('^[0-9]{4,6}$')
       && isOptionalString(data, 'otpGeneratedAt', 64)
       && isOptionalString(data, 'otpExpiresAt', 64)
       && (!('otpConsumed' in data) || data.otpConsumed is bool)

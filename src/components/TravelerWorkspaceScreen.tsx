@@ -67,12 +67,14 @@ import {
   getRelationshipLabel,
   getTravelerDisplayNames,
   initiateTravelerOtpLoginCloud,
+  loginClientInstantCloud,
   loginWithClientPinCloud,
   logoutTravelerSession,
   markClientNotificationsReadCloud,
   normalizeArabicDigits,
   normalizePhone,
   readFileAsAiDataUrl,
+  registerClientInstantCloud,
   requestAccountSecurityOtpCloud,
   saveClientFcmTokenCloud,
   saveFamilyMemberCloud,
@@ -85,8 +87,10 @@ import {
   uploadAndSaveAvatarImmediateCloud,
   uploadBatchFilesToTravelerCloud,
   verifyAccountSecurityOtpCloud,
+  verifyClientOptionalCodeCloud,
   verifyLoginOtpCloud,
 } from '../utils/travelerStore';
+import { isClientAccountVerified } from '../utils/whatsappHelpers';
 import {
   clearSavedClientPhone,
   getSavedClientPhone,
@@ -295,6 +299,42 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const [memberAiExtractedBadge, setMemberAiExtractedBadge] = useState(false);
   const [memberClarityWarning, setMemberClarityWarning] = useState<string | null>(null);
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
+  const [optionalVerifyCode, setOptionalVerifyCode] = useState('');
+  const [isVerifyingOptionalCode, setIsVerifyingOptionalCode] = useState(false);
+  const [optionalVerifyFeedback, setOptionalVerifyFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
+
+  const handleOptionalCodeVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTraveler || isVerifyingOptionalCode) return;
+    setOptionalVerifyFeedback(null);
+    setIsVerifyingOptionalCode(true);
+    try {
+      const res = await verifyClientOptionalCodeCloud(
+        activeTraveler.phone,
+        optionalVerifyCode,
+        lang
+      );
+      if (!res.ok) {
+        setOptionalVerifyFeedback({
+          type: 'error',
+          text:
+            res.error ||
+            t('تعذر التحقق من الكود المدخل.', 'Could not verify the entered code.'),
+        });
+        return;
+      }
+      setOptionalVerifyCode('');
+      setOptionalVerifyFeedback({
+        type: 'success',
+        text: t('تم توثيق حسابك بنجاح ✅', 'Your account has been verified ✅'),
+      });
+    } finally {
+      setIsVerifyingOptionalCode(false);
+    }
+  };
 
   const handleCopyFieldValue = async (key: string, value: string) => {
     const clean = (value || '').trim();
@@ -381,20 +421,14 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         setOtpExpiresAt(profile.otpExpiresAt);
       }
 
-      const stillPending = !profile.verified || profile.accountStatus === 'pending_verification';
-      if (stillPending) {
-        setOtpPurpose('first_login');
+      if (otpPurpose === 'forgot_pin') {
         setAuthStage('otp_verify');
         return;
       }
 
       if (!check.hasPin) {
-        onSetPendingPostAuthFlow?.({
-          phone: profile.phone,
-          stage: 'pin_setup',
-          isPinReset: false,
-        });
-        setAuthStage('pin_setup');
+        onSetPendingOtpPhone(null);
+        void loginClientInstantCloud(profile.phone);
         return;
       }
 
@@ -409,11 +443,12 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     activeTraveler,
     pendingPostAuthFlow,
     pendingOtpPhone,
+    otpPurpose,
     onSetPendingOtpPhone,
     onSetPendingPostAuthFlow,
   ]);
 
-  // Auto-hydrate saved client phone into instant 6-digit PIN screen (on reload or after 12h inactivity lock)
+  // Auto-hydrate saved client phone into instant 6-digit PIN screen or instant session (no OTP hold)
   useEffect(() => {
     if (activeTraveler || pendingPostAuthFlow || pendingOtpPhone) return;
     const saved = getSavedClientPhone();
@@ -444,25 +479,10 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
       setDetectedAccountType(check.accountType);
       setDetectedCompanyName(check.companyName || profile.companyName || '');
 
-      const stillPending = !profile.verified || profile.accountStatus === 'pending_verification';
-      if (stillPending) {
-        setOtpPurpose('first_login');
-        if (profile.otpExpiresAt && !profile.otpConsumed) {
-          setOtpExpiresAt(profile.otpExpiresAt);
-        }
-        onSetPendingOtpPhone(profile.phone);
-        setAuthStage('otp_verify');
-        return;
-      }
-
       if (!check.hasPin) {
-        onSetPendingOtpPhone(profile.phone);
-        onSetPendingPostAuthFlow?.({
-          phone: profile.phone,
-          stage: 'pin_setup',
-          isPinReset: false,
-        });
-        setAuthStage('pin_setup');
+        onSetPendingOtpPhone(null);
+        onSetPendingPostAuthFlow?.(null);
+        void loginClientInstantCloud(profile.phone);
         return;
       }
 
@@ -857,57 +877,34 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
         setDetectedAccountType(check.accountType);
         setDetectedCompanyName(check.companyName || check.profile.companyName || '');
 
-        const isPendingVerification =
-          !check.profile.verified || check.profile.accountStatus === 'pending_verification';
-
-        // Strict hold: unverified accounts MUST verify once via OTP / Link / Admin activation
-        if (isPendingVerification) {
-          setOtpPurpose('first_login');
-          const res = await initiateTravelerOtpLoginCloud('', '', check.phone);
-          if (!res.ok) {
-            setAuthError(res.error || t('تعذر بدء تسجيل الدخول.', 'Could not start login.'));
-            return;
-          }
-          setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
-          setOtpInfoBanner(
-            t(
-              'حسابك بانتظار التفعيل لمرة واحدة فقط. أدخل كود التفعيل (OTP) أو تواصل معنا عبر واتساب أو اطلب من الإدارة تفعيلك فوراً.',
-              'Your account requires one-time activation. Enter the 6-digit OTP, open the WhatsApp link, or request instant Admin activation.'
-            )
-          );
-          onSetPendingOtpPhone(check.phone);
-          setOtpInput('');
-          setAuthStage('otp_verify');
-          return;
-        }
-
         setSavedClientPhone(check.phone);
 
-        // Verified account without PIN yet -> route straight to 6-digit PIN setup
-        if (!check.hasPin) {
-          onSetPendingOtpPhone(check.phone);
-          onSetPendingPostAuthFlow?.({
-            phone: check.phone,
-            stage: 'pin_setup',
-            isPinReset: false,
-          });
-          setNewPinInput('');
-          setConfirmPinInput('');
-          setPinSetupError('');
-          setAuthStage('pin_setup');
+        // If client already created a 6-digit PIN -> fast PIN login
+        if (check.hasPin) {
+          setPinLoginInput('');
+          setPinLoginError('');
+          onSetPendingOtpPhone(null);
+          onSetPendingPostAuthFlow?.(null);
+          setAuthStage('pin_login');
           return;
         }
 
-        // Verified account with PIN -> Direct Fast PIN Login (and remember phone permanently)
-        setPinLoginInput('');
-        setPinLoginError('');
+        // Instant entry without OTP hold (whether verified or unverified)
+        const instantLoginRes = await loginClientInstantCloud(check.phone);
+        if (!instantLoginRes.ok) {
+          setAuthError(
+            instantLoginRes.error || t('تعذر الدخول حالياً.', 'Could not sign in right now.')
+          );
+          return;
+        }
         onSetPendingOtpPhone(null);
         onSetPendingPostAuthFlow?.(null);
-        setAuthStage('pin_login');
+        setAuthStage('phone_entry');
+        onChangeSubTab('account');
         return;
       }
 
-      // Brand new client -> gather passport-matching First & Last Name first
+      // Brand new client -> gather First & Last Name then enter immediately (verified: false)
       setDetectedClientName('');
       setAuthStage('register_details');
     } catch (err) {
@@ -923,7 +920,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
     }
   };
 
-  // Step 1B: New Client Name Entry -> Issue fresh 6-digit OTP (valid 24h) in Firestore
+  // Step 1B: Instant Client Registration (verified: false) -> Immediate Entry Without OTP Gate
   const handleInitiateLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
@@ -949,18 +946,19 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
 
     setIsInitiatingOtp(true);
     try {
-      const res = await initiateTravelerOtpLoginCloud(cleanFirst, cleanLast, targetPhone);
+      const res = await registerClientInstantCloud(cleanFirst, cleanLast, targetPhone);
       if (!res.ok || !res.phone) {
-        setAuthError(res.error || t('تعذر بدء تسجيل الدخول.', 'Could not start login.'));
+        setAuthError(res.error || t('تعذر إنشاء الحساب حالياً.', 'Could not create account.'));
         return;
       }
       setTrustedPhone(res.phone);
+      setSavedClientPhone(res.phone);
       setDetectedClientName(`${cleanFirst} ${cleanLast}`.trim());
-      setOtpPurpose('first_login');
-      setOtpExpiresAt(res.otpExpiresAt || res.profile?.otpExpiresAt || null);
-      onSetPendingOtpPhone(res.phone);
+      onSetPendingOtpPhone(null);
+      onSetPendingPostAuthFlow?.(null);
       setOtpInput('');
-      setAuthStage('otp_verify');
+      setAuthStage('phone_entry');
+      onChangeSubTab('account');
     } finally {
       setIsInitiatingOtp(false);
     }
@@ -2205,8 +2203,8 @@ Please advise on the next steps for my application.`
             'Your phone stays saved on this device and this PIN secures daily sign-ins'
           )
         : t(
-            'بوابة المسافر الموثقة لرفع الجواز ومتابعة حالة التأشيرة',
-            'Verified portal for passport wallet and live visa tracking'
+            'بوابة المسافر لمتابعة التأشيرات، رفع الجوازات، والتواصل الفوري مع الإدارة',
+            'Traveler portal for visa tracking, passport wallet, and direct chat'
           );
 
     return (
@@ -2289,8 +2287,8 @@ Please advise on the next steps for my application.`
                 <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 text-xs text-slate-600 leading-relaxed space-y-1.5">
                   <p>
                     {t(
-                      'أدخل رقم الواتساب الخاص بك للدخول السريع بالرقم السري (PIN)، أو لإنشاء حساب جديد وتفعيله لمرة واحدة فقط.',
-                      'Enter your WhatsApp number for quick PIN login, or to register and verify a new account once.'
+                      'أدخل رقم الواتساب الخاص بك للدخول الفوري إلى حسابك أو لإنشاء ملف مسافر جديد بدون انتظار كود تفعيل.',
+                      'Enter your WhatsApp number to sign in or create a new profile immediately with zero waiting.'
                     )}
                   </p>
                   <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#0F2438]">
@@ -2406,7 +2404,7 @@ Please advise on the next steps for my application.`
                     className="flex-1 min-h-[46px] py-3 px-4 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs sm:text-sm font-black transition cursor-pointer shadow-xs flex items-center justify-center gap-2"
                   >
                     {isInitiatingOtp && <Loader2 className="w-4 h-4 animate-spin" />}
-                    <span>{t('متابعة وإصدار كود التفعيل', 'Continue & Request OTP')}</span>
+                    <span>{t('إنشاء الحساب والدخول مباشرة', 'Create Account & Enter Now')}</span>
                   </button>
 
                   <button
@@ -3659,10 +3657,17 @@ Please advise on the next steps for my application.`
                     <span>{t('حساب شركة شريكة (B2B)', 'B2B Partner')}</span>
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-[11px] font-bold text-emerald-300">
-                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                  <span>{t('حساب موثق', 'Verified')}</span>
-                </span>
+                {isClientAccountVerified(activeTraveler) ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-[11px] font-bold text-emerald-300">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t('✅ حساب موثق', '✅ Verified')}</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-300/60 text-[11px] font-bold text-amber-200">
+                    <Clock className="w-3.5 h-3.5 shrink-0" />
+                    <span>{t('⏳ حساب غير موثق بعد', '⏳ Not Verified Yet')}</span>
+                  </span>
+                )}
                 {draft.isDirty && (
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-[11px] font-bold text-amber-200">
                     {t('تعديلات غير محفوظة', 'Unsaved Draft')}
@@ -3745,8 +3750,13 @@ Please advise on the next steps for my application.`
               <button
                 type="button"
                 onClick={() => {
+                  const firstNotif = unreadNotifications[0];
                   void markClientNotificationsReadCloud(activeTraveler.phone);
-                  onChangeSubTab(unreadNotifications[0].type === 'deliverable' ? 'documents' : 'orders');
+                  if (firstNotif.id.startsWith('notif-verify-')) {
+                    onChangeSubTab('account');
+                  } else {
+                    onChangeSubTab(firstNotif.type === 'deliverable' ? 'documents' : 'orders');
+                  }
                 }}
                 className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black cursor-pointer whitespace-nowrap"
               >
@@ -3878,6 +3888,117 @@ Please advise on the next steps for my application.`
             </div>
           );
         })()}
+
+        {/* SUB-TAB 1: CALM ACCOUNT VERIFICATION STATUS + OPTIONAL CODE ENTRY */}
+        {subTab === 'account' && (
+          <div
+            className={`rounded-2xl border p-4 sm:p-5 shadow-xs space-y-3 ${
+              isClientAccountVerified(activeTraveler)
+                ? 'bg-emerald-50/70 border-emerald-200'
+                : 'bg-amber-50/60 border-amber-200'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    isClientAccountVerified(activeTraveler)
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-amber-100 text-amber-800 border border-amber-300'
+                  }`}
+                >
+                  {isClientAccountVerified(activeTraveler) ? (
+                    <ShieldCheck className="w-5 h-5" />
+                  ) : (
+                    <Clock className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs sm:text-sm font-black text-[#0F2438]">
+                      {t('حالة توثيق الحساب:', 'Account Verification Status:')}
+                    </span>
+                    {isClientAccountVerified(activeTraveler) ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[11px] font-black">
+                        {t('✅ حساب موثق', '✅ Verified Account')}
+                      </span>
+                    ) : (
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-900 text-[11px] font-black">
+                        {t('⏳ حساب غير موثق بعد', '⏳ Not Verified Yet')}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                    {isClientAccountVerified(activeTraveler)
+                      ? t(
+                          'حسابك موثق ومعتمد لدى إدارة مسارك للإنجاز السياحي.',
+                          'Your account is verified by Masarik Tourism management.'
+                        )
+                      : t(
+                          'يمكنك تصفح البرامج وإرسال الطلبات والرسائل بشكل طبيعي. وإذا أرسل لك المدير كود توثيق (4 أرقام) يمكنك إدخاله هنا اختيارياً:',
+                          'You can browse services, send messages, and submit requests normally. If management sends you a 4-digit code later, you can optionally enter it below:'
+                        )}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {!isClientAccountVerified(activeTraveler) && (
+              <form
+                onSubmit={handleOptionalCodeVerify}
+                className="pt-2 border-t border-amber-200/70 space-y-2.5"
+              >
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    dir="ltr"
+                    value={optionalVerifyCode}
+                    onChange={(e) => {
+                      setOptionalVerifyFeedback(null);
+                      setOptionalVerifyCode(
+                        normalizeArabicDigits(e.target.value).replace(/\D/g, '').slice(0, 6)
+                      );
+                    }}
+                    placeholder={t('أدخل كود التوثيق (اختياري - 4 أرقام)', 'Optional 4-digit verification code')}
+                    className="flex-1 px-3.5 py-2.5 rounded-xl border border-amber-300 bg-white text-center sm:text-start text-xs sm:text-sm font-black tracking-widest text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#C6A052]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isVerifyingOptionalCode || optionalVerifyCode.length < 4}
+                    className="min-h-[42px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-50 text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 transition cursor-pointer shrink-0"
+                  >
+                    {isVerifyingOptionalCode ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <KeyRound className="w-4 h-4" />
+                    )}
+                    <span>{t('تأكيد كود التوثيق', 'Verify Code')}</span>
+                  </button>
+                </div>
+
+                {optionalVerifyFeedback && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 ${
+                      optionalVerifyFeedback.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-red-50 border-red-200 text-red-800'
+                    }`}
+                  >
+                    {optionalVerifyFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                    )}
+                    <span>{optionalVerifyFeedback.text}</span>
+                  </div>
+                )}
+              </form>
+            )}
+          </div>
+        )}
 
         {/* SUB-TAB 1: ACCOUNT INFO & MANDATORY PASSPORT / AVATAR */}
         {subTab === 'account' && (

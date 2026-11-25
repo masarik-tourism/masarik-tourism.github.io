@@ -346,9 +346,13 @@ export function generateSixDigitOtp(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+export function generateFourDigitVerificationCode(): string {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
 export function isOtpActiveAndUnexpired(profile?: Partial<TravelerProfile> | null): boolean {
   if (!profile) return false;
-  if (!/^\d{6}$/.test(String(profile.otp || ''))) return false;
+  if (!/^\d{4,6}$/.test(String(profile.otp || ''))) return false;
   if (profile.otpConsumed === true) return false;
   if (profile.otpExpiresAt) {
     const expMs = Date.parse(profile.otpExpiresAt);
@@ -374,6 +378,19 @@ export function buildActivationMagicLink(phone: string, otp: string, name?: stri
     params.set('name', name.trim());
   }
   return `${OFFICIAL_SITE_BASE_URL}?${params.toString()}`;
+}
+
+export function buildAdminVerificationCodeWhatsAppMessage(
+  name: string,
+  verificationCode: string,
+  lang: 'ar' | 'en' = 'ar'
+): string {
+  const cleanName = name.trim() || (lang === 'en' ? 'Valued Client' : 'عميلنا العزيز');
+  const cleanCode = normalizeArabicDigits(verificationCode).replace(/\D/g, '') || '0000';
+  if (lang === 'en') {
+    return `Hello ${cleanName}, your Masarik Tourism verification code is: ${cleanCode}\n\nYou can enter this 4-digit code in your Profile page to verify your account.`;
+  }
+  return `مرحباً ${cleanName}،\nكود توثيق حسابك في ${TravelRepository.COMPANY_NAME_AR} هو: ${cleanCode}\n\nيمكنك إدخال الكود في صفحة ملفك الشخصي لتوثيق الحساب.`;
 }
 
 export function buildAdminForwardActivationMessage(
@@ -442,9 +459,9 @@ function saveAllTravelersLocalOnly(map: Record<string, TravelerProfile>): void {
 function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, unknown> {
   const safeStatus: VisaOrderStatus = normalizeOrderStatusValue(profile.orderStatus);
 
-  const safeOtp = /^\d{6}$/.test(String(profile.otp || ''))
+  const safeOtp = /^\d{4,6}$/.test(String(profile.otp || ''))
     ? String(profile.otp)
-    : generateSixDigitOtp();
+    : generateFourDigitVerificationCode();
 
   const normalized = normalizePhone(profile.phone).slice(0, 20);
   const split = splitPassportName(profile.name || '');
@@ -1520,11 +1537,7 @@ export function getActiveTraveler(): TravelerProfile | null {
   const activePhone = getActivePhone();
   if (!activePhone) return null;
   const all = getAllTravelers();
-  const profile = all[activePhone];
-  if (!isClientAccountVerified(profile)) {
-    return null;
-  }
-  return profile;
+  return all[activePhone] || null;
 }
 
 export function setActiveTravelerPhone(phone: string | null): void {
@@ -1552,10 +1565,6 @@ export function startTravelerSession(
 ): TravelerSessionMeta {
   const phone = normalizePhone(rawPhone);
   const { deviceId } = getDeviceFingerprint();
-  const existingProfile = getAllTravelers()[phone];
-  if (existingProfile && !isClientAccountVerified(existingProfile)) {
-    throw new Error('Cannot start dashboard session before OTP or Admin verification.');
-  }
   const now = Date.now();
   const persistInLocalStorage = options?.persistInLocalStorage ?? true;
   const expiresAt =
@@ -1862,17 +1871,6 @@ export async function loginWithTrustedDevicePinCloud(
         lang === 'en'
           ? 'Account not found. Please verify via WhatsApp OTP.'
           : 'لم يتم العثور على الحساب. يرجى التحقق عبر كود الواتساب.',
-    };
-  }
-
-  if (!isClientAccountVerified(check.profile)) {
-    return {
-      ok: false,
-      fallbackToOtp: true,
-      error:
-        lang === 'en'
-          ? 'Account is pending verification. Please complete OTP or Admin activation first.'
-          : 'الحساب بانتظار التفعيل. يرجى إكمال التفعيل بكود الواتساب أو من الإدارة أولاً.',
     };
   }
 
@@ -2600,17 +2598,6 @@ export async function completeApprovedNewDeviceLoginCloud(
     // Offline fallback
   }
   if (!target) return null;
-  if (!isClientAccountVerified(target)) {
-    if (
-      (Array.isArray(target.trustedDevices) && target.trustedDevices.length > 0) ||
-      target.verified === true
-    ) {
-      target.verified = true;
-      target.accountStatus = 'verified';
-    } else {
-      return null;
-    }
-  }
 
   const { deviceId, label } = getDeviceFingerprint();
   const nowMs = Date.now();
@@ -3294,13 +3281,13 @@ export async function verifyLoginOtpCloud(
 }> {
   const phone = normalizePhone(rawPhone);
   const cleanOtp = normalizeArabicDigits(enteredOtp).replace(/\D/g, '');
-  if (!/^[0-9]{8,20}$/.test(phone) || cleanOtp.length !== 6) {
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanOtp.length < 4 || cleanOtp.length > 6) {
     return {
       ok: false,
       error:
         lang === 'en'
-          ? 'Please enter a valid 6-digit numeric login code.'
-          : 'يرجى إدخال كود التفعيل المكون من 6 أرقام فقط (0-9).',
+          ? 'Please enter a valid 4 or 6 digit numeric verification code.'
+          : 'يرجى إدخال كود التفعيل المكون من أرقام فقط (0-9).',
     };
   }
 
@@ -3481,7 +3468,7 @@ export async function trustCurrentDeviceCloud(
     }
   }
 
-  if (!existing || !isClientAccountVerified(existing)) return null;
+  if (!existing) return null;
 
   const { deviceId, label } = getDeviceFingerprint();
   const nowIso = new Date().toISOString();
@@ -3706,6 +3693,368 @@ export async function adminInstantActivateClientCloud(
 }
 
 /**
+ * Instant Client Registration (No OTP Gate):
+ * Creates the client immediately with verified: false (pending_verification) and a 4-digit
+ * verification code, starts their session immediately so they can browse, upload, and message freely.
+ */
+export async function registerClientInstantCloud(
+  firstNameInput: string,
+  lastNameInput: string,
+  rawPhone: string
+): Promise<{
+  ok: boolean;
+  phone: string;
+  profile?: TravelerProfile;
+  error?: string;
+}> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, phone: '', error: 'يرجى إدخال رقم واتساب صحيح.' };
+  }
+
+  const cleanFirst = firstNameInput.trim();
+  const cleanLast = lastNameInput.trim();
+  const combinedName = `${cleanFirst} ${cleanLast}`.trim();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiryIso = new Date(nowMs + OTP_VALIDITY_MS).toISOString();
+  const path = `clients/${phone}`;
+  const localAll = getAllTravelers();
+  let existing: TravelerProfile | undefined = localAll[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, localAll[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  let targetProfile: TravelerProfile;
+  if (existing) {
+    const isVerified = isClientAccountVerified(existing);
+    const keepFourDigit =
+      /^\d{4}$/.test(String(existing.otp || '')) && isOtpActiveAndUnexpired(existing);
+    targetProfile = {
+      ...existing,
+      phone,
+      phoneNormalized: phone,
+      firstName: cleanFirst || existing.firstName,
+      lastName: cleanLast || existing.lastName,
+      name: combinedName || existing.name,
+      otp: keepFourDigit ? existing.otp : generateFourDigitVerificationCode(),
+      otpGeneratedAt: keepFourDigit ? existing.otpGeneratedAt || nowIso : nowIso,
+      otpExpiresAt: keepFourDigit ? existing.otpExpiresAt || expiryIso : expiryIso,
+      otpConsumed: isVerified ? existing.otpConsumed ?? true : false,
+      verified: isVerified,
+      accountStatus: isVerified ? 'verified' : 'pending_verification',
+      isOnline: true,
+      lastSeenAt: nowIso,
+      updatedAt: nowIso,
+    };
+  } else {
+    const freshCode = generateFourDigitVerificationCode();
+    targetProfile = {
+      phone,
+      phoneNormalized: phone,
+      orderCode: buildOrderCodeFromPhone(phone),
+      firstName: cleanFirst,
+      lastName: cleanLast,
+      name: combinedName || `مسافر (${formatPhoneForDisplay(phone)})`,
+      otp: freshCode,
+      otpGeneratedAt: nowIso,
+      otpExpiresAt: expiryIso,
+      otpConsumed: false,
+      activatedByAdmin: false,
+      trustedDevices: [],
+      verified: false,
+      accountStatus: 'pending_verification',
+      isOnline: true,
+      lastSeenAt: nowIso,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      orderStatus: 'تم استلام الطلب',
+      documents: [],
+      notifications: [],
+    };
+  }
+
+  localAll[phone] = targetProfile;
+  saveAllTravelersLocalOnly(localAll);
+  setSavedClientPhone(phone);
+  startTravelerSession(phone, 'trusted', {
+    persistInLocalStorage: true,
+    cloudRegistered: true,
+  });
+
+  await syncTravelerToCloud(targetProfile);
+
+  if (!isClientAccountVerified(targetProfile)) {
+    notifyAdminsOfClientOtpRequest({
+      name: targetProfile.name,
+      phone: targetProfile.phone,
+      otp: targetProfile.otp,
+    });
+  }
+
+  return { ok: true, phone, profile: targetProfile };
+}
+
+/**
+ * Instant sign-in for an existing client who has not set a PIN yet (regardless of verified status).
+ */
+export async function loginClientInstantCloud(rawPhone: string): Promise<{
+  ok: boolean;
+  phone: string;
+  profile?: TravelerProfile;
+  error?: string;
+}> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, phone: '', error: 'يرجى إدخال رقم واتساب صحيح.' };
+  }
+
+  const check = await checkClientAccountAndDeviceCloud(phone);
+  if (!check.exists || !check.profile) {
+    return { ok: false, phone, error: 'لم يتم العثور على الحساب.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const updated: TravelerProfile = {
+    ...check.profile,
+    isOnline: true,
+    lastSeenAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const all = getAllTravelers();
+  all[check.phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  setSavedClientPhone(check.phone);
+  startTravelerSession(check.phone, 'trusted', {
+    persistInLocalStorage: true,
+    cloudRegistered: true,
+  });
+  await syncTravelerToCloud(updated);
+  return { ok: true, phone: check.phone, profile: updated };
+}
+
+/**
+ * Client-side optional verification: verifies a 4-digit (or legacy 6-digit) code sent
+ * later by the General Manager via WhatsApp or In-App Push Notification.
+ */
+export async function verifyClientOptionalCodeCloud(
+  rawPhone: string,
+  enteredCode: string,
+  lang: 'ar' | 'en' = 'ar'
+): Promise<{
+  ok: boolean;
+  error?: string;
+  profile?: TravelerProfile;
+}> {
+  const phone = normalizePhone(rawPhone);
+  const cleanCode = normalizeArabicDigits(enteredCode).replace(/\D/g, '');
+  if (!/^[0-9]{8,20}$/.test(phone) || cleanCode.length < 4 || cleanCode.length > 6) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Please enter the 4-digit verification code sent by Management.'
+          : 'يرجى إدخال كود التوثيق المكون من 4 أرقام المرسل من الإدارة.',
+    };
+  }
+
+  const path = `clients/${phone}`;
+  const all = getAllTravelers();
+  let target: TravelerProfile | undefined = all[phone];
+
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      target = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  }
+
+  if (!target) {
+    return {
+      ok: false,
+      error: lang === 'en' ? 'Account not found.' : 'الحساب غير موجود.',
+    };
+  }
+
+  if (target.otpConsumed === true) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'This verification code has already been used. Ask Management for a fresh code.'
+          : 'تم استخدام هذا الكود مسبقاً. يرجى طلب كود توثيق جديد من الإدارة.',
+    };
+  }
+
+  if (target.otpExpiresAt && Date.parse(target.otpExpiresAt) <= Date.now()) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Verification code expired. Ask Management to send a fresh code.'
+          : 'انتهت صلاحية كود التوثيق. يرجى طلب كود جديد من الإدارة.',
+    };
+  }
+
+  if (String(target.otp || '').trim() !== cleanCode) {
+    return {
+      ok: false,
+      error:
+        lang === 'en'
+          ? 'Verification code does not match. Please double-check and try again.'
+          : 'كود التوثيق غير صحيح. يرجى التأكد من الأرقام والمحاولة مرة أخرى.',
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const verifiedProfile: TravelerProfile = {
+    ...target,
+    phone,
+    phoneNormalized: phone,
+    otp: generateFourDigitVerificationCode(),
+    otpConsumed: true,
+    otpExpiresAt: new Date(0).toISOString(),
+    verified: true,
+    accountStatus: 'verified',
+    verifiedAt: target.verifiedAt || nowIso,
+    updatedAt: nowIso,
+  };
+
+  all[phone] = verifiedProfile;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(verifiedProfile);
+  return { ok: true, profile: verifiedProfile };
+}
+
+/**
+ * Ensures the client has an active 4-digit verification code saved in Firestore
+ * (used when the manager sends the 4-digit verification code via WhatsApp).
+ */
+export async function ensureClientFourDigitCodeCloud(
+  rawPhone: string
+): Promise<{ ok: boolean; code: string; profile?: TravelerProfile }> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, code: '' };
+  }
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch {
+    // Fallback to local
+  }
+  if (!existing) return { ok: false, code: '' };
+
+  if (/^\d{4}$/.test(String(existing.otp || '')) && isOtpActiveAndUnexpired(existing)) {
+    return { ok: true, code: String(existing.otp), profile: existing };
+  }
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextCode = generateFourDigitVerificationCode();
+  const updated: TravelerProfile = {
+    ...existing,
+    otp: nextCode,
+    otpGeneratedAt: nowIso,
+    otpExpiresAt: new Date(nowMs + OTP_VALIDITY_MS).toISOString(),
+    otpConsumed: false,
+    updatedAt: nowIso,
+  };
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+  return { ok: true, code: nextCode, profile: updated };
+}
+
+/**
+ * Admin Verification Option 3: Sends the 4-digit verification code automatically
+ * as an in-app notification + remote push notification to the client's app.
+ */
+export async function adminSendVerificationCodeNotificationCloud(
+  rawPhone: string
+): Promise<{ ok: boolean; code?: string; profile?: TravelerProfile; error?: string }> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) {
+    return { ok: false, error: 'رقم الهاتف غير صالح.' };
+  }
+
+  const all = getAllTravelers();
+  let existing: TravelerProfile | undefined = all[phone];
+  try {
+    const snap = await getDoc(doc(db, 'clients', phone));
+    if (snap.exists()) {
+      existing = mergeCloudClientWithLocal(snap.data() as TravelerProfile, all[phone]);
+    }
+  } catch {
+    // Offline fallback
+  }
+  if (!existing) {
+    return { ok: false, error: 'لم يتم العثور على ملف العميل.' };
+  }
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const hasActiveFourDigit =
+    /^\d{4}$/.test(String(existing.otp || '')) && isOtpActiveAndUnexpired(existing);
+  const code = hasActiveFourDigit ? String(existing.otp) : generateFourDigitVerificationCode();
+
+  const notif: ClientNotification = {
+    id: `notif-verify-${nowMs}-${Math.random().toString(36).slice(2, 6)}`,
+    titleAr: 'كود توثيق حسابك في مسارك 🔔',
+    titleEn: 'Your Masarik Verification Code 🔔',
+    bodyAr: `كود توثيق حسابك المكون من 4 أرقام هو: ${code} — يمكنك إدخاله في صفحة ملفك الشخصي لتفعيل شارة التوثيق.`,
+    bodyEn: `Your 4-digit account verification code is: ${code} — enter it in your profile page to verify your account.`,
+    type: 'status',
+    createdAt: nowIso,
+    read: false,
+  };
+
+  const updated: TravelerProfile = {
+    ...existing,
+    otp: code,
+    otpGeneratedAt: hasActiveFourDigit ? existing.otpGeneratedAt || nowIso : nowIso,
+    otpExpiresAt: new Date(nowMs + OTP_VALIDITY_MS).toISOString(),
+    otpConsumed: false,
+    notifications: [notif, ...(existing.notifications || [])].slice(0, 30),
+    updatedAt: nowIso,
+  };
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+  await syncTravelerToCloud(updated);
+
+  void dispatchRemotePushNotification({
+    targetRole: 'client',
+    targetPhone: phone,
+    title: notif.titleAr,
+    body: notif.bodyAr,
+    data: { role: 'client', action: 'account', phone },
+  });
+
+  return { ok: true, code, profile: updated };
+}
+
+/**
  * Admin Action: Creates a dedicated Business/Travel Company (B2B Partner) account OR upgrades an existing individual account.
  */
 export async function adminCreateOrUpgradeB2BPartnerCloud(input: {
@@ -3906,13 +4255,13 @@ export function verifyManualOtp(
 ): { ok: boolean; error?: string; profile?: TravelerProfile } {
   const phone = normalizePhone(rawPhone);
   const cleanOtp = normalizeArabicDigits(enteredOtp).replace(/\D/g, '');
-  if (cleanOtp.length !== 6) {
+  if (cleanOtp.length < 4 || cleanOtp.length > 6) {
     return {
       ok: false,
       error:
         lang === 'en'
-          ? 'Please enter a valid 6-digit verification code.'
-          : 'يرجى إدخال كود تفعيل مكوّن من 6 أرقام.',
+          ? 'Please enter a valid 4 or 6 digit verification code.'
+          : 'يرجى إدخال كود تفعيل مكوّن من أرقام فقط.',
     };
   }
 
@@ -3961,7 +4310,7 @@ export function activateViaMagicLink(
   const phone = normalizePhone(rawPhone);
   const cleanOtp = normalizeArabicDigits(rawOtp).replace(/\D/g, '');
 
-  if (!phone || cleanOtp.length !== 6) {
+  if (!phone || cleanOtp.length < 4 || cleanOtp.length > 6) {
     return { ok: false, error: 'رابط التفعيل غير مكتمل أو يحتوي على كود غير صالح.' };
   }
 

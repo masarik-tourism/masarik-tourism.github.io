@@ -47,6 +47,7 @@ interface DirectChatPanelProps {
   recipientSubtitle?: string;
   avatarUrl?: string;
   accountType?: AccountType;
+  recipientVerified?: boolean;
   isOnline?: boolean;
   lastSeenAt?: string;
   senderRole: ChatSenderRole;
@@ -63,6 +64,7 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
   recipientSubtitle,
   avatarUrl,
   accountType = 'individual',
+  recipientVerified,
   isOnline = false,
   lastSeenAt,
   senderRole,
@@ -350,6 +352,21 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black shrink-0">
                   <Building2 className="w-3 h-3" />
                   <span>{t('شركة شريكة B2B', 'B2B Partner')}</span>
+                </span>
+              )}
+              {senderRole === 'admin' && recipientVerified !== undefined && (
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black shrink-0 border ${
+                    recipientVerified
+                      ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                      : 'bg-orange-500/25 border-orange-400/60 text-orange-200'
+                  }`}
+                >
+                  <span>
+                    {recipientVerified
+                      ? t('✅ موثق', '✅ Verified')
+                      : t('⚠️ غير موثق / غير مفعل', '⚠️ Unverified')}
+                  </span>
                 </span>
               )}
             </div>
