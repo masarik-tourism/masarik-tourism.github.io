@@ -1,9 +1,9 @@
-const CACHE_VERSION = 'masarik-cache-125-mwwev8p8';
+const CACHE_VERSION = 'masarik-cache-126-mx04f8sq';
 const PRECACHE_URLS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/favicon.svg',
+  '/apple-touch-icon.png',
   '/pwa-192x192.png',
   '/pwa-512x512.png',
 ];
@@ -42,6 +42,47 @@ self.addEventListener('message', (event) => {
         .then(() => self.skipWaiting())
     );
   }
+  if (event.data && event.data.type === 'SHOW_MASARIK_NOTIFICATION') {
+    const payload = event.data.payload || {};
+    const data = payload.data || {};
+    event.waitUntil(
+      self.registration.showNotification(payload.title || 'مسارك للإنجاز السياحي', {
+        body: payload.body || 'لديك إشعار جديد.',
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        dir: 'rtl',
+        lang: 'ar',
+        tag: payload.tag || 'masarik-desktop-notification',
+        renotify: true,
+        data,
+      })
+    );
+  }
+});
+
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { notification: { title: 'مسارك للإنجاز السياحي', body: event.data ? event.data.text() : '' } };
+  }
+  const notif = payload.notification || {};
+  const data = payload.data || {};
+  const title = notif.title || data.title || 'مسارك للإنجاز السياحي';
+  const body = notif.body || data.body || 'لديك تحديث جديد في حسابك.';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon: '/pwa-192x192.png',
+      badge: '/pwa-192x192.png',
+      dir: 'rtl',
+      lang: 'ar',
+      tag: data.tag || 'masarik-push-notification',
+      renotify: true,
+      data,
+    })
+  );
 });
 
 self.addEventListener('fetch', (event) => {
