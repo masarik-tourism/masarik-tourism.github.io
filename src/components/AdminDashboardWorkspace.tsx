@@ -51,6 +51,13 @@ import {
   Clock,
   Wifi,
   Zap,
+  Crown,
+  Filter,
+  Calendar,
+  MapPin,
+  History,
+  FileCheck2,
+  Award,
 } from 'lucide-react';
 import { testConnection } from '../firebase';
 import { subscribePlatformAnalytics, AnalyticsDashboardState } from '../utils/analyticsStore';
@@ -58,7 +65,9 @@ import {
   AdminPermission,
   AppointmentDetails,
   B2cVisaType,
+  ChatMessage,
   ChatThreadSummary,
+  ClientPriorityTier,
   DocumentReviewStatus,
   DriveEndpointScope,
   DriveStorageEndpoint,
@@ -67,16 +76,41 @@ import {
   VisaOrderStatus,
 } from '../types/travel';
 import { AppointmentQrPassModal } from './AppointmentQrPassModal';
+import { AppointmentCalendarWidget } from './AppointmentCalendarWidget';
+import { StageWhatsAppTemplatesModal } from './StageWhatsAppTemplatesModal';
+import { AdminReportsPanel } from './AdminReportsPanel';
 import { B2cVisasPanel } from './B2cVisasPanel';
 import { DirectChatPanel } from './DirectChatPanel';
+import { DocumentMonitorPanel } from './DocumentMonitorPanel';
+import { StaffPerformancePanel } from './StaffPerformancePanel';
+import {
+  dispatchStageWhatsAppNotification,
+  getAutoWhatsAppOnStageChange,
+  setAutoWhatsAppOnStageChange,
+} from '../utils/orderStageWhatsAppHelpers';
+import {
+  collectUpcoming24hAppointmentAlerts,
+} from '../utils/appointmentCalendarHelpers';
+import {
+  GlobalClientSearchResult,
+  searchAdminClientsGlobal,
+} from '../utils/staffPerformanceHelpers';
+import {
+  buildDocumentAuditTimeline,
+  collectGlobalDocumentAuditRecords,
+  computeDocumentMonitorStats,
+  resolveDocumentReviewMeta,
+} from '../utils/documentAuditHelpers';
 import {
   NATIVE_FCM_TOKEN_EVENT,
   PUSH_LOG_UPDATED_EVENT,
   PushDiagnosticLog,
+  buildPassportUpdateDirectUrl,
   getBrowserNotificationPermission,
   getLastPushDiagnosticLog,
   getNativeAndroidFcmToken,
   requestAndGetFcmToken,
+  sendPassportExpiryBrowserNotification,
   sendTestCloudflareWorkerPush,
   showBrowserPushNotification,
   waitForNativeAndroidFcmToken,
@@ -91,6 +125,7 @@ import {
   adminInstantActivateClientCloud,
   adminRevertClientUnverifiedCloud,
   adminSendVerificationCodeNotificationCloud,
+  adminUpdateClientTierCloud,
   approveAndDeliverDocumentCloud,
   buildActivationMagicLink,
   buildAdminForwardActivationMessage,
@@ -127,6 +162,7 @@ import {
   upsertB2cVisaTravelerCloud,
 } from '../utils/travelerStore';
 import {
+  fetchChatMessagesForResponseAnalysisCloud,
   getLocalAdminClearedAt,
   playChatNotificationChime,
   subscribeAllChatThreads,
@@ -179,7 +215,6 @@ import { translateOrderStatus } from '../data/travelData';
 import { buildSmsSendUrl, buildWhatsAppSendUrl, openWhatsApp } from '../utils/communication';
 import { getPendingOtpClients } from '../utils/adminOtpHelpers';
 import {
-  buildAdminStageWhatsAppMessage,
   hasClientActiveOrder,
   isClientAccountVerified,
   isClientOrderCompleted,
@@ -192,6 +227,17 @@ import {
   getTodayIsoDate,
   isB2cUrgentOrWarning,
 } from '../utils/b2cVisaHelpers';
+import {
+  CLIENT_PRIORITY_TIERS,
+  ClientEngagementAnalysis,
+  RegistrationDatePreset,
+  analyzeClientEngagement,
+  buildDocumentReminderWhatsAppMessage,
+  collectClientFilterOptions,
+  evaluateClientDocumentStaleness,
+  getClientTierConfig,
+  matchesAdvancedClientFilters,
+} from '../utils/clientReportsHelpers';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAdmin } from '../contexts/AdminContext';
 
@@ -202,15 +248,25 @@ type DashboardTab =
   | 'live_chat'
   | 'messages_otp'
   | 'ads'
+  | 'doc_monitor'
+  | 'reports'
+  | 'staff_performance'
   | 'settings';
 type ClientModalTab =
   | 'basic_passport'
   | 'documents'
   | 'order_stages'
+  | 'appointment_calendar'
   | 'b2c_visa'
   | 'private_notes';
 type OrderFilter =
   | 'all'
+  | 'eng_highly_likely'
+  | 'eng_dormant'
+  | 'stale_docs'
+  | 'tier_vip'
+  | 'tier_new'
+  | 'tier_delayed'
   | 'verified'
   | 'unverified'
   | 'active'
@@ -223,7 +279,12 @@ type OrderFilter =
 
 interface AdminDashboardWorkspaceProps {
   requestedChat?: { phone: string; nonce: number } | null;
-  requestedFolder?: { phone: string; nonce: number } | null;
+  requestedFolder?: {
+    phone: string;
+    nonce: number;
+    tab?: ClientModalTab;
+    focusPassport?: boolean;
+  } | null;
   requestedTab?: { tab: DashboardTab; nonce: number } | null;
 }
 
@@ -262,13 +323,25 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   // Tab 1 & 2: Clients, B2B Partners, Live Chat, Orders, Files & OTP
   const [travelers, setTravelers] = useState<TravelerProfile[]>([]);
   const [chatThreads, setChatThreads] = useState<Record<string, ChatThreadSummary>>({});
+  const [chatMessagesByPhone, setChatMessagesByPhone] = useState<Record<string, ChatMessage[]>>({});
   const [activeChatPhone, setActiveChatPhone] = useState<string | null>(null);
   const [chatInboxFilter, setChatInboxFilter] = useState<'all' | 'individual' | 'b2b_partner'>('all');
   const [chatSearchQuery, setChatSearchQuery] = useState('');
   const [, setPresenceTick] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const deferredGlobalSearchQuery = useDeferredValue(globalSearchQuery);
+  const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
+  const [globalSearchActiveIndex, setGlobalSearchActiveIndex] = useState(0);
+  const globalSearchContainerRef = useRef<HTMLDivElement>(null);
+  const globalSearchInputRef = useRef<HTMLInputElement>(null);
   const [orderFilter, setOrderFilter] = useState<OrderFilter>('all');
+  const [cityFilter, setCityFilter] = useState('');
+  const [regDatePreset, setRegDatePreset] = useState<RegistrationDatePreset>('all');
+  const [regDateFrom, setRegDateFrom] = useState('');
+  const [regDateTo, setRegDateTo] = useState('');
+  const [visaTypeFilter, setVisaTypeFilter] = useState('');
   const [b2bSearchQuery, setB2bSearchQuery] = useState('');
   const deferredB2bSearchQuery = useDeferredValue(b2bSearchQuery);
   const [b2bOnlineOnly, setB2bOnlineOnly] = useState(false);
@@ -294,6 +367,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [showAllOtpClients, setShowAllOtpClients] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState<string | null>(null);
   const [togglingVerifyPhone, setTogglingVerifyPhone] = useState<string | null>(null);
+  const [updatingTierPhone, setUpdatingTierPhone] = useState<string | null>(null);
   const [sendingVerifyNotifPhone, setSendingVerifyNotifPhone] = useState<string | null>(null);
   const [verifyActionFeedback, setVerifyActionFeedback] = useState<{
     phone: string;
@@ -326,6 +400,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [editPassportIssueDate, setEditPassportIssueDate] = useState('');
   const [editPassportExpiry, setEditPassportExpiry] = useState('');
   const [editNationality, setEditNationality] = useState('');
+  const [editCity, setEditCity] = useState('');
   const [editVisaDocumentNumber, setEditVisaDocumentNumber] = useState('');
   const [editSaudiSponsorId, setEditSaudiSponsorId] = useState('');
   const [editApplicantNameAr, setEditApplicantNameAr] = useState('');
@@ -333,6 +408,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [editDocumentPassportNumber, setEditDocumentPassportNumber] = useState('');
   const [editPortOfEntry, setEditPortOfEntry] = useState('');
   const [adminCopiedKey, setAdminCopiedKey] = useState<string | null>(null);
+  const [isAutoWhatsAppEnabled, setIsAutoWhatsAppEnabled] = useState<boolean>(() =>
+    getAutoWhatsAppOnStageChange()
+  );
+  const [showStageTemplatesModal, setShowStageTemplatesModal] = useState<boolean>(false);
+
+  const handleToggleAutoWhatsApp = (enabled: boolean) => {
+    setIsAutoWhatsAppEnabled(enabled);
+    setAutoWhatsAppOnStageChange(enabled);
+  };
   const [editOrderStatus, setEditOrderStatus] = useState<VisaOrderStatus>('none');
   const [editAdminNotes, setEditAdminNotes] = useState('');
   const [editAdminPrivateNotes, setEditAdminPrivateNotes] = useState('');
@@ -355,8 +439,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   } | null>(null);
   const [adminClarityWarning, setAdminClarityWarning] = useState<string | null>(null);
   const adminPassportInputRef = useRef<HTMLInputElement>(null);
+  const adminPassportExpiryInputRef = useRef<HTMLInputElement>(null);
+  const [highlightAdminPassport, setHighlightAdminPassport] = useState(false);
   const deliverableFormRef = useRef<HTMLDivElement>(null);
   const [isBatchApprovingDocs, setIsBatchApprovingDocs] = useState(false);
+  const [expandedDocAuditIds, setExpandedDocAuditIds] = useState<Record<string, boolean>>({});
+  const pendingModalTabRef = useRef<ClientModalTab | null>(null);
   const [previewDocImage, setPreviewDocImage] = useState<{
     label: string;
     dataUrl: string;
@@ -660,8 +748,14 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
   // Live Firestore Chat Threads Inbox Subscription & 15s Presence UI Ticker
   useEffect(() => {
+    let active = true;
     const unsubChats = subscribeAllChatThreads((threadsMap) => {
       setChatThreads(threadsMap);
+      void fetchChatMessagesForResponseAnalysisCloud(threadsMap).then((msgsMap) => {
+        if (active) {
+          setChatMessagesByPhone(msgsMap);
+        }
+      });
       const nextTotalUnread = Object.values(threadsMap).reduce(
         (acc, th) => acc + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
         0
@@ -682,6 +776,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     }, 15000);
 
     return () => {
+      active = false;
       unsubChats();
       window.clearInterval(tickId);
     };
@@ -712,6 +807,16 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     }
   }, [requestedChat?.nonce]);
 
+  const focusAdminPassportEditor = () => {
+    setClientModalTab('basic_passport');
+    setHighlightAdminPassport(true);
+    window.setTimeout(() => {
+      adminPassportExpiryInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      adminPassportExpiryInputRef.current?.focus();
+    }, 140);
+    window.setTimeout(() => setHighlightAdminPassport(false), 3200);
+  };
+
   useEffect(() => {
     if (!requestedFolder || !canManageClients || !requestedFolder.phone) return;
     const targetDigits = requestedFolder.phone.replace(/\D/g, '');
@@ -727,6 +832,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     } else {
       setActiveTab('individuals');
       setSelectedClientPhone(requestedFolder.phone);
+    }
+    if (requestedFolder.tab) {
+      setClientModalTab(requestedFolder.tab);
+    }
+    if (requestedFolder.focusPassport) {
+      focusAdminPassportEditor();
     }
   }, [requestedFolder?.nonce]);
 
@@ -835,6 +946,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       setEditPassportIssueDate(selectedClient.passportIssueDate || '');
       setEditPassportExpiry(selectedClient.passportExpiryDate || '');
       setEditNationality(selectedClient.nationality || '');
+      setEditCity(selectedClient.city || '');
       setEditVisaDocumentNumber(selectedClient.visaDocumentNumber || '');
       setEditSaudiSponsorId(selectedClient.saudiSponsorId || '');
       setEditApplicantNameAr(selectedClient.applicantNameAr || '');
@@ -885,13 +997,90 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     setAdminPassportAiBadge(false);
     setAdminPassportAiMsg(null);
     setAdminClarityWarning(null);
-    setClientModalTab('basic_passport');
+    if (pendingModalTabRef.current) {
+      setClientModalTab(pendingModalTabRef.current);
+      pendingModalTabRef.current = null;
+    } else {
+      setClientModalTab('basic_passport');
+    }
     setB2cModalFeedback(null);
   }, [selectedClientPhone]);
 
-  const handleOpenClientFromAnyTab = (phone: string) => {
+  const globalSearchResults = useMemo(
+    () => searchAdminClientsGlobal(travelers, deferredGlobalSearchQuery, 8),
+    [travelers, deferredGlobalSearchQuery]
+  );
+
+  useEffect(() => {
+    setGlobalSearchActiveIndex(0);
+  }, [deferredGlobalSearchQuery]);
+
+  useEffect(() => {
     if (!canManageClients) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (
+        globalSearchContainerRef.current &&
+        !globalSearchContainerRef.current.contains(event.target as Node)
+      ) {
+        setIsGlobalSearchOpen(false);
+      }
+    };
+    const handleGlobalSearchShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setIsGlobalSearchOpen(true);
+        globalSearchInputRef.current?.focus();
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleGlobalSearchShortcut);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleGlobalSearchShortcut);
+    };
+  }, [canManageClients]);
+
+  const handleOpenClientFromAnyTab = (phone: string, initialTab?: ClientModalTab) => {
+    if (!canManageClients) return;
+    if (initialTab) {
+      pendingModalTabRef.current = initialTab;
+      setClientModalTab(initialTab);
+    }
     setSelectedClientPhone(phone);
+  };
+
+  const handleSelectGlobalSearchResult = (
+    result: GlobalClientSearchResult,
+    overrideTab?: ClientModalTab
+  ) => {
+    const resolvedTab: ClientModalTab | undefined =
+      overrideTab ||
+      (result.matchField === 'passport' || result.matchField === 'family_passport'
+        ? 'basic_passport'
+        : undefined);
+    setIsGlobalSearchOpen(false);
+    handleOpenClientFromAnyTab(result.profile.phone, resolvedTab);
+  };
+
+  const handleSaveAppointmentFromWidget = (appt: AppointmentDetails) => {
+    if (!selectedClient || !canManageClients) return;
+    const actorMeta = {
+      actorName: session?.name || 'المدير العام',
+      actorId: session?.adminId,
+    };
+    updateTravelerProfileDetails(
+      selectedClient.phone,
+      {
+        appointmentDetails: appt,
+      },
+      actorMeta
+    );
+    setEditApptServiceType(appt.serviceType || '');
+    setEditApptDate(appt.appointmentDate || '');
+    setEditApptTime(appt.appointmentTime || '');
+    setEditApptLocation(appt.location || '');
+    setEditApptReference(appt.referenceNumber || '');
+    loadTravelers();
   };
 
   const handleSaveB2cFromModal = async (e: React.FormEvent) => {
@@ -1029,7 +1218,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         selectedClient.phone,
         docId,
         status,
-        docNoteDrafts[docId]
+        docNoteDrafts[docId],
+        session?.name || 'المدير العام'
       );
       loadTravelers();
     } finally {
@@ -1048,7 +1238,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           selectedClient.phone,
           docItem.id,
           'completed',
-          docNoteDrafts[docItem.id]
+          docNoteDrafts[docItem.id],
+          session?.name || 'المدير العام'
         );
       }
       loadTravelers();
@@ -1111,7 +1302,10 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     if (!canActivateOtp || togglingVerifyPhone) return;
     setTogglingVerifyPhone(client.phone);
     try {
-      await adminInstantActivateClientCloud(client.phone);
+      await adminInstantActivateClientCloud(client.phone, {
+        actorName: session?.name || 'المدير العام',
+        actorId: session?.adminId,
+      });
       setVerifyActionFeedback({
         phone: client.phone,
         ok: true,
@@ -1148,6 +1342,21 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       });
     } finally {
       setTogglingVerifyPhone(null);
+    }
+  };
+
+  const handleQuickUpdateClientTier = async (
+    client: TravelerProfile,
+    nextTier: ClientPriorityTier | null
+  ) => {
+    if (!canManageClients || updatingTierPhone === client.phone) return;
+    const resolvedTier = client.clientTier === nextTier ? null : nextTier;
+    setUpdatingTierPhone(client.phone);
+    try {
+      await adminUpdateClientTierCloud(client.phone, resolvedTier);
+      loadTravelers();
+    } finally {
+      setUpdatingTierPhone(null);
     }
   };
 
@@ -1217,33 +1426,63 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   ) => {
     if (!canManageClients) return;
     const normalized = normalizeOrderStatusValue(nextStatus);
-    updateTravelerProfileDetails(client.phone, {
-      orderStatus: normalized,
-    });
+    updateTravelerProfileDetails(
+      client.phone,
+      {
+        orderStatus: normalized,
+      },
+      {
+        actorName: session?.name || 'المدير العام',
+        actorId: session?.adminId,
+      }
+    );
     if (selectedClientPhone === client.phone) {
       setEditOrderStatus(normalized);
-      setFolderSavedMsg(
-        t(
-          `تم تحديث مرحلة الطلب إلى: ${translateOrderStatus(normalized, lang)}`,
-          `Stage updated to: ${translateOrderStatus(normalized, lang)}`
-        )
-      );
-      setTimeout(() => setFolderSavedMsg(''), 2500);
     }
     setStageUpdatedPhone(client.phone);
     setTimeout(() => {
       setStageUpdatedPhone((prev) => (prev === client.phone ? null : prev));
     }, 1800);
     loadTravelers();
+
+    if (isAutoWhatsAppEnabled) {
+      dispatchStageWhatsAppNotification({
+        client: { ...client, orderStatus: normalized },
+        stage: normalized,
+        lang,
+      });
+      setFolderSavedMsg(
+        t(
+          `تم تحديث مرحلة الطلب إلى (${translateOrderStatus(normalized, lang)}) وإرسال إشعار واتساب التلقائي للعميل 📲✅`,
+          `Stage updated to (${translateOrderStatus(normalized, lang)}) & auto-WhatsApp sent 📲✅`
+        )
+      );
+    } else {
+      setFolderSavedMsg(
+        t(
+          `تم تحديث مرحلة الطلب إلى: ${translateOrderStatus(normalized, lang)}`,
+          `Stage updated to: ${translateOrderStatus(normalized, lang)}`
+        )
+      );
+    }
+    setTimeout(() => setFolderSavedMsg(''), 3000);
   };
 
   const handleManualOpenOrder = (client: TravelerProfile) => {
     if (!canManageClients) return;
-    updateTravelerProfileDetails(client.phone, {
-      hasActiveOrder: true,
-      orderStatus: 'تم استلام الطلب',
-    });
-    void activateClientOrderCloud(client.phone, client.preferredVisaType);
+    const actorMeta = {
+      actorName: session?.name || 'المدير العام',
+      actorId: session?.adminId,
+    };
+    updateTravelerProfileDetails(
+      client.phone,
+      {
+        hasActiveOrder: true,
+        orderStatus: 'تم استلام الطلب',
+      },
+      actorMeta
+    );
+    void activateClientOrderCloud(client.phone, client.preferredVisaType, actorMeta);
     if (selectedClientPhone === client.phone) {
       setEditOrderStatus('تم استلام الطلب');
       setFolderSavedMsg(
@@ -1256,15 +1495,24 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   };
 
   const handleNotifyClientStageWhatsApp = (client: TravelerProfile) => {
+    dispatchStageWhatsAppNotification({
+      client,
+      stage: client.orderStatus,
+      lang,
+    });
+  };
+
+  const handleSendDocReminderWhatsApp = (client: TravelerProfile) => {
     const displayName = getTravelerDisplayNames(client).fullDisplayName;
     const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
     const orderCode = client.orderCode || buildOrderCodeFromPhone(client.phone);
-    const normalized = normalizeOrderStatusValue(client.orderStatus);
-    const stageLabel = translateOrderStatus(normalized, lang);
-    const msg = buildAdminStageWhatsAppMessage({
+    const staleness = evaluateClientDocumentStaleness(client);
+    const msg = buildDocumentReminderWhatsAppMessage({
       clientName: displayName,
       orderCode,
-      stageLabel,
+      daysSinceUpdate: staleness.daysSinceUpdate,
+      hasDocuments: staleness.hasDocuments,
+      isStale: staleness.isStale,
       serviceTitle: client.preferredVisaType,
       lang,
     });
@@ -1300,29 +1548,37 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         : undefined;
 
     const cleanFullEn = (editPassportFullNameEn || editPassportFullName).trim();
-    updateTravelerProfileDetails(selectedClient.phone, {
-      firstName: cleanFirst,
-      lastName: cleanLast,
-      name: combinedName,
-      passportFullName: cleanFullEn,
-      passportFullNameEn: cleanFullEn,
-      passportFullNameAr: editPassportFullNameAr.trim(),
-      passportNumber: editPassportNumber.trim().toUpperCase(),
-      birthDate: editBirthDate,
-      passportIssueDate: editPassportIssueDate,
-      passportExpiryDate: editPassportExpiry,
-      nationality: editNationality.trim(),
-      visaDocumentNumber: editVisaDocumentNumber.trim(),
-      saudiSponsorId: editSaudiSponsorId.trim(),
-      applicantNameAr: editApplicantNameAr.trim(),
-      applicantNameEn: editApplicantNameEn.trim(),
-      documentPassportNumber: editDocumentPassportNumber.trim().toUpperCase(),
-      portOfEntry: editPortOfEntry.trim(),
-      orderStatus: editOrderStatus,
-      adminNotes: editAdminNotes.trim(),
-      adminPrivateNotes: editAdminPrivateNotes.trim(),
-      appointmentDetails: nextAppointmentDetails,
-    });
+    updateTravelerProfileDetails(
+      selectedClient.phone,
+      {
+        firstName: cleanFirst,
+        lastName: cleanLast,
+        name: combinedName,
+        passportFullName: cleanFullEn,
+        passportFullNameEn: cleanFullEn,
+        passportFullNameAr: editPassportFullNameAr.trim(),
+        passportNumber: editPassportNumber.trim().toUpperCase(),
+        birthDate: editBirthDate,
+        passportIssueDate: editPassportIssueDate,
+        passportExpiryDate: editPassportExpiry,
+        nationality: editNationality.trim(),
+        city: editCity.trim(),
+        visaDocumentNumber: editVisaDocumentNumber.trim(),
+        saudiSponsorId: editSaudiSponsorId.trim(),
+        applicantNameAr: editApplicantNameAr.trim(),
+        applicantNameEn: editApplicantNameEn.trim(),
+        documentPassportNumber: editDocumentPassportNumber.trim().toUpperCase(),
+        portOfEntry: editPortOfEntry.trim(),
+        orderStatus: editOrderStatus,
+        adminNotes: editAdminNotes.trim(),
+        adminPrivateNotes: editAdminPrivateNotes.trim(),
+        appointmentDetails: nextAppointmentDetails,
+      },
+      {
+        actorName: session?.name || 'المدير العام',
+        actorId: session?.adminId,
+      }
+    );
     loadTravelers();
     setFolderSavedMsg(
       t(
@@ -2385,6 +2641,40 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     [chatThreads]
   );
 
+  const advancedFilterOptions = useMemo(
+    () => collectClientFilterOptions(individualTravelers),
+    [individualTravelers]
+  );
+
+  const activeAdvancedFiltersCount =
+    (cityFilter.trim() ? 1 : 0) +
+    (regDatePreset !== 'all' ? 1 : 0) +
+    (visaTypeFilter.trim() ? 1 : 0);
+
+  const handleResetAllClientFilters = () => {
+    setOrderFilter('all');
+    setSearchQuery('');
+    setCityFilter('');
+    setRegDatePreset('all');
+    setRegDateFrom('');
+    setRegDateTo('');
+    setVisaTypeFilter('');
+  };
+
+  const engagementByPhone = useMemo(() => {
+    const map: Record<string, ClientEngagementAnalysis> = {};
+    for (const tr of individualTravelers) {
+      const phoneKey = tr.phone.replace(/\D/g, '') || tr.phone;
+      map[tr.phone] = analyzeClientEngagement({
+        profile: tr,
+        thread: chatThreads[phoneKey] || chatThreads[tr.phone] || null,
+        messages: chatMessagesByPhone[phoneKey] || chatMessagesByPhone[tr.phone] || null,
+        lang,
+      });
+    }
+    return map;
+  }, [individualTravelers, chatThreads, chatMessagesByPhone, lang]);
+
   const filteredRequests = useMemo(
     () =>
       sortProfilesByPresence(
@@ -2396,7 +2686,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           const hasFiles = (tr.documents?.length || 0) > 0;
           const online = isUserCurrentlyOnline(tr);
           const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
+          const docStale = evaluateClientDocumentStaleness(tr).isStale;
+          const engagement = engagementByPhone[tr.phone];
 
+          if (orderFilter === 'eng_highly_likely' && engagement?.status !== 'highly_likely') return false;
+          if (orderFilter === 'eng_dormant' && engagement?.status !== 'dormant') return false;
+          if (orderFilter === 'stale_docs' && !docStale) return false;
+          if (orderFilter === 'tier_vip' && tr.clientTier !== 'vip') return false;
+          if (orderFilter === 'tier_new' && tr.clientTier !== 'new') return false;
+          if (orderFilter === 'tier_delayed' && tr.clientTier !== 'delayed') return false;
           if (orderFilter === 'online' && !online) return false;
           if (orderFilter === 'verified' && !isVerified) return false;
           if (orderFilter === 'unverified' && isVerified) return false;
@@ -2407,6 +2705,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           if (orderFilter === 'completed' && !isCompleted) return false;
           if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
 
+          if (
+            !matchesAdvancedClientFilters(tr, {
+              city: cityFilter,
+              regPreset: regDatePreset,
+              regFrom: regDateFrom,
+              regTo: regDateTo,
+              visaType: visaTypeFilter,
+            })
+          ) {
+            return false;
+          }
+
           const q = deferredSearchQuery.trim().toLowerCase();
           if (!q) return true;
           const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
@@ -2415,11 +2725,23 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
             tr.phone.includes(q) ||
             formatPhoneForDisplay(tr.phone).includes(q) ||
             orderCode.includes(q) ||
-            (tr.passportNumber || '').toLowerCase().includes(q)
+            (tr.passportNumber || '').toLowerCase().includes(q) ||
+            (tr.city || '').toLowerCase().includes(q) ||
+            (tr.preferredVisaType || '').toLowerCase().includes(q)
           );
         })
       ),
-    [individualTravelers, orderFilter, deferredSearchQuery]
+    [
+      individualTravelers,
+      engagementByPhone,
+      orderFilter,
+      deferredSearchQuery,
+      cityFilter,
+      regDatePreset,
+      regDateFrom,
+      regDateTo,
+      visaTypeFilter,
+    ]
   );
 
   const orderedRequests = useMemo(
@@ -2518,6 +2840,12 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     let withFiles = 0;
     let expiringPassports = 0;
     let completed = 0;
+    let vipClients = 0;
+    let newTierClients = 0;
+    let delayedClients = 0;
+    let staleDocClients = 0;
+    let highlyLikelyClients = 0;
+    let dormantClients = 0;
 
     for (const tr of individualTravelers) {
       const isVer = isClientAccountVerified(tr);
@@ -2530,6 +2858,13 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       if ((tr.documents?.length || 0) > 0) withFiles++;
       if (evaluatePassportValidity(tr.passportExpiryDate).isUnderSixMonths) expiringPassports++;
       if (isComp) completed++;
+      if (tr.clientTier === 'vip') vipClients++;
+      else if (tr.clientTier === 'new') newTierClients++;
+      else if (tr.clientTier === 'delayed') delayedClients++;
+      if (evaluateClientDocumentStaleness(tr).isStale) staleDocClients++;
+      const engStatus = engagementByPhone[tr.phone]?.status;
+      if (engStatus === 'highly_likely') highlyLikelyClients++;
+      else if (engStatus === 'dormant') dormantClients++;
     }
 
     const b2cActive = travelers.filter((tr) => tr.b2cVisa && tr.b2cVisa.status !== 'exited');
@@ -2553,9 +2888,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       withFilesCount: withFiles,
       expiringPassportCount: expiringPassports,
       completedCount: completed,
+      vipClientsCount: vipClients,
+      newTierClientsCount: newTierClients,
+      delayedClientsCount: delayedClients,
+      staleDocClientsCount: staleDocClients,
+      highlyLikelyClientsCount: highlyLikelyClients,
+      dormantClientsCount: dormantClients,
       messagesBadgeCount: msgBadge,
     };
-  }, [individualTravelers, travelers, pendingCount]);
+  }, [individualTravelers, engagementByPhone, travelers, pendingCount]);
 
   const {
     verifiedClientsCount,
@@ -2568,8 +2909,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     withFilesCount,
     expiringPassportCount,
     completedCount,
+    vipClientsCount,
+    newTierClientsCount,
+    delayedClientsCount,
+    staleDocClientsCount,
+    highlyLikelyClientsCount,
+    dormantClientsCount,
     messagesBadgeCount,
   } = kpiSummary;
+
+  const upcoming24hAppointmentAlerts = useMemo(() => {
+    return collectUpcoming24hAppointmentAlerts(travelers);
+  }, [travelers]);
 
   const overrideTextCount = Object.keys(cmsState.textOverrides).length;
   const storageStats = useMemo(() => computeStorageUsageStats(travelers), [travelers]);
@@ -2868,6 +3219,232 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           </div>
         </div>
 
+        {/* Global Instant Admin Search Bar (Name, Phone, Passport Number, Order Code) */}
+        {canManageClients && (
+          <div ref={globalSearchContainerRef} className="relative z-30">
+            <div className="bg-white border border-slate-200 focus-within:border-[#0F2438] focus-within:ring-2 focus-within:ring-[#C6A052]/25 rounded-2xl px-3.5 py-2 shadow-xs flex items-center gap-2.5 transition">
+              <Search className="w-4 h-4 text-[#C6A052] shrink-0" />
+              <input
+                ref={globalSearchInputRef}
+                type="text"
+                value={globalSearchQuery}
+                onFocus={() => setIsGlobalSearchOpen(true)}
+                onChange={(e) => {
+                  setGlobalSearchQuery(e.target.value);
+                  setIsGlobalSearchOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setIsGlobalSearchOpen(false);
+                    globalSearchInputRef.current?.blur();
+                  } else if (e.key === 'ArrowDown' && globalSearchResults.length > 0) {
+                    e.preventDefault();
+                    setIsGlobalSearchOpen(true);
+                    setGlobalSearchActiveIndex((prev) =>
+                      (prev + 1) % globalSearchResults.length
+                    );
+                  } else if (e.key === 'ArrowUp' && globalSearchResults.length > 0) {
+                    e.preventDefault();
+                    setIsGlobalSearchOpen(true);
+                    setGlobalSearchActiveIndex((prev) =>
+                      (prev - 1 + globalSearchResults.length) % globalSearchResults.length
+                    );
+                  } else if (e.key === 'Enter' && globalSearchQuery.trim()) {
+                    const picked =
+                      globalSearchResults[globalSearchActiveIndex] ||
+                      globalSearchResults[0];
+                    if (picked) {
+                      e.preventDefault();
+                      handleSelectGlobalSearchResult(picked);
+                    }
+                  }
+                }}
+                placeholder={t(
+                  'بحث عالمي فوري عن أي عميل بالاسم، رقم الهاتف، رقم جواز السفر، أو كود الطلب...',
+                  'Global instant search by client name, phone number, passport number, or order code...'
+                )}
+                aria-label={t('بحث عالمي عن العملاء', 'Global client search')}
+                className="w-full min-h-[36px] bg-transparent text-xs sm:text-sm font-bold text-[#0F2438] placeholder:text-slate-400 focus:outline-none"
+              />
+              {globalSearchQuery.trim().length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGlobalSearchQuery('');
+                    setIsGlobalSearchOpen(false);
+                    globalSearchInputRef.current?.focus();
+                  }}
+                  aria-label={t('مسح البحث العالمي', 'Clear global search')}
+                  className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center shrink-0 cursor-pointer transition"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <span className="hidden md:inline-flex items-center px-2 py-1 rounded-lg bg-slate-100 border border-slate-200 text-[10px] font-mono font-bold text-slate-500 shrink-0">
+                Ctrl+K
+              </span>
+            </div>
+
+            {isGlobalSearchOpen && globalSearchQuery.trim().length > 0 && (
+              <div
+                role="listbox"
+                className="absolute top-full inset-x-0 mt-2 bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden z-40"
+              >
+                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 text-[11px] font-bold text-slate-600">
+                  <span>
+                    {globalSearchResults.length > 0
+                      ? t(
+                          `نتائج البحث المقترحة (${globalSearchResults.length})`,
+                          `Suggested matches (${globalSearchResults.length})`
+                        )
+                      : t('لا توجد نتائج مطابقة', 'No matching clients found')}
+                  </span>
+                  <span className="text-slate-400 truncate max-w-[220px]">
+                    {globalSearchQuery.trim()}
+                  </span>
+                </div>
+
+                {globalSearchResults.length > 0 ? (
+                  <div className="divide-y divide-slate-100 max-h-[380px] overflow-y-auto">
+                    {globalSearchResults.map((res, index) => {
+                      const isActive = index === globalSearchActiveIndex;
+                      const matchLabel =
+                        res.matchField === 'passport'
+                          ? t('تطابق جواز السفر', 'Passport Match')
+                          : res.matchField === 'family_passport'
+                          ? t('جواز مرافق/تابع', 'Companion Passport')
+                          : res.matchField === 'phone'
+                          ? t('رقم الهاتف', 'Phone Match')
+                          : res.matchField === 'orderCode'
+                          ? t('كود الطلب', 'Order Code')
+                          : res.matchField === 'company'
+                          ? t('شركة B2B', 'B2B Partner')
+                          : t('الاسم', 'Name Match');
+                      const displayPassport =
+                        res.matchedPassportNumber || res.passportNumber;
+                      const stageLabel = hasClientActiveOrder(res.profile)
+                        ? translateOrderStatus(
+                            normalizeOrderStatusValue(res.profile.orderStatus),
+                            lang
+                          )
+                        : t('بدون طلب نشط', 'No Active Order');
+
+                      return (
+                        <div
+                          key={res.profile.phone}
+                          role="option"
+                          aria-selected={isActive}
+                          onMouseEnter={() => setGlobalSearchActiveIndex(index)}
+                          onClick={() => handleSelectGlobalSearchResult(res)}
+                          className={`px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 cursor-pointer transition ${
+                            isActive ? 'bg-[#FAF8F2]' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-black text-[#0F2438] truncate">
+                                {res.displayName}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-[#0F2438]/5 border border-[#0F2438]/15 text-[10.5px] font-bold text-[#0F2438]">
+                                {matchLabel}
+                              </span>
+                              <span className="text-[11px] font-bold text-sky-800 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded-md">
+                                {stageLabel}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 font-bold">
+                              <span dir="ltr" className="font-mono tabular-nums text-[#0F2438]">
+                                {formatPhoneForDisplay(res.phone)}
+                              </span>
+                              {displayPassport && (
+                                <span dir="ltr" className="font-mono tabular-nums text-amber-800">
+                                  PP: {displayPassport}
+                                </span>
+                              )}
+                              {res.orderCode && (
+                                <span dir="ltr" className="font-mono tabular-nums text-slate-500">
+                                  {res.orderCode}
+                                </span>
+                              )}
+                              {res.matchedFamilyMemberName && (
+                                <span className="text-slate-500">
+                                  ({res.matchedFamilyMemberName})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div
+                            className="flex items-center gap-1.5 shrink-0"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleSelectGlobalSearchResult(res)}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5" />
+                              <span>{t('فتح الملف', 'Open File')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectGlobalSearchResult(res, 'documents')}
+                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center gap-1 cursor-pointer transition"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              <span>{t('المستندات', 'Docs')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsGlobalSearchOpen(false);
+                                handleOpenClientChat(res.profile.phone);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5" />
+                              <span>{t('دردشة', 'Chat')}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="px-4 py-6 text-center text-xs font-bold text-slate-500">
+                    {t(
+                      'لم يتم العثور على عميل مطابق لهذا الاسم أو رقم الهاتف أو جواز السفر.',
+                      'No client matched that name, phone number, or passport number.'
+                    )}
+                  </div>
+                )}
+
+                {globalSearchResults.length > 0 && (
+                  <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-slate-500">
+                      {t('اضغط Enter لفتح أول نتيجة', 'Press Enter to open top match')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery(globalSearchQuery.trim());
+                        setActiveTab('individuals');
+                        setOrderFilter('all');
+                        setSelectedClientPhone(null);
+                        setIsGlobalSearchOpen(false);
+                      }}
+                      className="text-xs font-black text-[#0F2438] hover:text-[#C6A052] cursor-pointer transition"
+                    >
+                      {t('تصفية قائمة العملاء بهذه النتيجة ←', 'Filter directory with query →')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Real-Time Instant Alert Toast for New Pending OTP Requests */}
         {realtimeAlert && (
           <div className="bg-gradient-to-l from-amber-50 via-white to-amber-50 border-2 border-amber-400 rounded-2xl p-3.5 sm:p-4 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -2970,6 +3547,50 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               className="min-h-[38px] px-4 py-2 rounded-xl bg-red-700 hover:bg-red-800 text-white text-xs font-black flex items-center justify-center gap-1.5 shrink-0 cursor-pointer transition shadow-xs"
             >
               <span>{t('🕋 مراجعة تنبيهات B2C الآن', '🕋 Review B2C Alerts')}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Upcoming 24-Hour Tasheer / GAMCA Appointment Reminder Alert Banner */}
+        {canManageClients && upcoming24hAppointmentAlerts.length > 0 && (
+          <div className="bg-gradient-to-l from-amber-50 via-white to-sky-50 border-2 border-amber-400 rounded-2xl p-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-black text-[#0F2438] text-sm">
+                    {t(
+                      `تنبيه المواعيد: يوجد ${upcoming24hAppointmentAlerts.length} موعد (تساهيل/جامكا) خلال الـ 24 ساعة القادمة بحاجة لإرسال تذكير واتساب!`,
+                      `Appointment Alert: ${upcoming24hAppointmentAlerts.length} Tasheer/GAMCA appointment(s) in next 24 hours need WhatsApp reminder!`
+                    )}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-900 text-[10.5px] font-black tabular-nums">
+                    {upcoming24hAppointmentAlerts[0]?.displayName} ·{' '}
+                    {upcoming24hAppointmentAlerts[0]?.client.appointmentDetails?.appointmentDate}
+                  </span>
+                </div>
+                <p className="text-slate-700 font-bold mt-0.5">
+                  {t(
+                    'تأكد من تأكيد حضور العميل والأوراق المطلوبة (أصل الجواز، الصور الشخصية، إشعار الباركود) لتجنب فوات الموعد.',
+                    'Confirm traveler attendance and required documents (passport, photos, QR pass) to avoid missing the appointment.'
+                  )}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const target = upcoming24hAppointmentAlerts[0];
+                if (target) {
+                  handleOpenClientFromAnyTab(target.phone, 'appointment_calendar');
+                }
+              }}
+              className="min-h-[38px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black flex items-center justify-center gap-1.5 shrink-0 cursor-pointer transition shadow-xs"
+            >
+              <Calendar className="w-4 h-4" />
+              <span>{t('📅 فتح تقويم الموعد وإرسال التذكير', '📅 Open Appointment & Send Reminder')}</span>
             </button>
           </div>
         )}
@@ -3289,6 +3910,79 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
             </button>
           )}
 
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('doc_monitor');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'doc_monitor'
+                  ? 'bg-[#0F2438] text-[#E5C887] ring-1 ring-[#C6A052] shadow-xs'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <FileCheck2 className="w-4 h-4 shrink-0 text-[#C6A052]" />
+              <span>{t('مراقب المستندات', 'Doc Monitor')}</span>
+              {(() => {
+                const docStats = computeDocumentMonitorStats(
+                  collectGlobalDocumentAuditRecords(travelers)
+                );
+                const attention = docStats.rejectedCount + docStats.pendingReviewCount;
+                return docStats.totalDocs > 0 ? (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10.5px] font-black tabular-nums ${
+                      docStats.rejectedCount > 0
+                        ? 'bg-red-600 text-white'
+                        : attention > 0
+                        ? 'bg-sky-100 text-sky-900'
+                        : 'bg-emerald-100 text-emerald-900'
+                    }`}
+                  >
+                    {attention > 0 ? attention : docStats.totalDocs}
+                  </span>
+                ) : null;
+              })()}
+            </button>
+          )}
+
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('reports');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'reports'
+                  ? 'bg-[#0F2438] text-[#E5C887] ring-1 ring-[#C6A052] shadow-xs'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 shrink-0 text-[#C6A052]" />
+              <span>{t('التقارير', 'Reports')}</span>
+            </button>
+          )}
+
+          {canManageClients && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('staff_performance');
+                setSelectedClientPhone(null);
+              }}
+              className={`px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-black flex items-center gap-2 transition cursor-pointer whitespace-nowrap min-h-[44px] ${
+                activeTab === 'staff_performance'
+                  ? 'bg-[#0F2438] text-[#E5C887] ring-1 ring-[#C6A052] shadow-xs'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <Award className="w-4 h-4 shrink-0 text-[#C6A052]" />
+              <span>{t('أداء الموظفين', 'Staff KPIs')}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -3596,25 +4290,150 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               </button>
             </div>
 
-            {/* Search & Order Filter Pills */}
+            {/* Automatic 7-Day Stale-Documents Alert Banner */}
+            {staleDocClientsCount > 0 && (
+              <div className="bg-gradient-to-l from-rose-50 via-amber-50/70 to-white border-2 border-rose-300 rounded-2xl p-3.5 sm:p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-start sm:items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <BellRing className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs sm:text-sm font-black text-rose-950">
+                      {t(
+                        `تنبيه تلقائي: ${staleDocClientsCount} عميل لم يقموا بتحديث مستنداتهم لأكثر من 7 أيام`,
+                        `Automatic Alert: ${staleDocClientsCount} client(s) have not updated documents for over 7 days`
+                      )}
+                    </p>
+                    <p className="text-[11px] font-medium text-rose-800 mt-0.5">
+                      {t(
+                        'يتم تمييزهم تلقائياً في القائمة مع زر "إرسال تذكير واتساب" بجانب اسم كل عميل لسرعة المتابعة.',
+                        'Highlighted automatically in the list with a WhatsApp Reminder button next to every client name.'
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleKpiFilterClick(orderFilter === 'stale_docs' ? 'all' : 'stale_docs')
+                  }
+                  className={`px-3.5 py-2 rounded-xl text-xs font-black transition cursor-pointer shrink-0 shadow-xs ${
+                    orderFilter === 'stale_docs'
+                      ? 'bg-[#0F2438] text-[#E5C887]'
+                      : 'bg-rose-600 hover:bg-rose-700 text-white'
+                  }`}
+                >
+                  {orderFilter === 'stale_docs'
+                    ? t('عرض جميع العملاء', 'Show All Clients')
+                    : t(
+                        `تصفية المتأخرين (${staleDocClientsCount})`,
+                        `Filter Stale Docs (${staleDocClientsCount})`
+                      )}
+                </button>
+              </div>
+            )}
+
+            {/* Automatic 6-Month Passport Expiry Browser Notification Banner */}
+            {expiringPassportCount > 0 && (
+              <div className="bg-gradient-to-l from-red-50 via-amber-50/50 to-white border-2 border-red-300 rounded-2xl p-3.5 sm:p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-start sm:items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-red-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs sm:text-sm font-black text-red-950">
+                      {t(
+                        `تنبيه الجوازات: ${expiringPassportCount} عميل تقترب صلاحية جوازاتهم من الانتهاء خلال 6 أشهر أو منتهية`,
+                        `Passport Alert: ${expiringPassportCount} client passport(s) expiring within 6 months or expired`
+                      )}
+                    </p>
+                    <p className="text-[11px] font-medium text-red-800 mt-0.5">
+                      {t(
+                        'يتم إرسال تنبيه تلقائي عبر إشعارات المتصفح برابط مباشر لفتح ملف الجواز وتحديث بياناته فوراً.',
+                        'Browser notifications include a direct link to open the passport section and update details immediately.'
+                      )}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const perm = getBrowserNotificationPermission();
+                      if (perm !== 'granted') {
+                        const res = await requestAndGetFcmToken(siteDraft.fcmVapidKey);
+                        setBellPermission(res.permission);
+                        if (!res.ok) return;
+                      }
+                      const firstUrgent = individualTravelers
+                        .filter((tr) => tr.passportExpiryDate)
+                        .map((tr) => ({ tr, ev: evaluatePassportValidity(tr.passportExpiryDate) }))
+                        .filter((x) => x.ev.isUnderSixMonths && x.ev.isValidFormat)
+                        .sort((a, b) => (a.ev.remainingDays ?? 999) - (b.ev.remainingDays ?? 999))[0];
+                      if (firstUrgent) {
+                        const name =
+                          getTravelerDisplayNames(firstUrgent.tr).fullDisplayName ||
+                          firstUrgent.tr.phone;
+                        await sendPassportExpiryBrowserNotification({
+                          role: 'admin',
+                          phone: firstUrgent.tr.phone,
+                          clientName: name,
+                          expiryDate: firstUrgent.ev.expiryDate,
+                          remainingDays: firstUrgent.ev.remainingDays,
+                          lang,
+                          force: true,
+                        });
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-white hover:bg-red-100 border border-red-300 text-red-900 text-xs font-black transition cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+                  >
+                    <Bell className="w-3.5 h-3.5 text-red-600" />
+                    <span>
+                      {bellPermission === 'granted'
+                        ? t('إرسال تنبيه متصفح الآن', 'Send Browser Alert Now')
+                        : t('تفعيل إشعارات المتصفح', 'Enable Browser Alerts')}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleKpiFilterClick(
+                        orderFilter === 'expiring_passports' ? 'all' : 'expiring_passports'
+                      )
+                    }
+                    className={`px-3.5 py-2 rounded-xl text-xs font-black transition cursor-pointer shadow-xs ${
+                      orderFilter === 'expiring_passports'
+                        ? 'bg-[#0F2438] text-[#E5C887]'
+                        : 'bg-red-600 hover:bg-red-700 text-white'
+                    }`}
+                  >
+                    {orderFilter === 'expiring_passports'
+                      ? t('عرض الكل', 'Show All')
+                      : t(`عرض الجوازات (${expiringPassportCount})`, `View Expiring (${expiringPassportCount})`)}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Search, Advanced Multi-Criteria Filters & Interactive Filter Pills */}
             <div ref={individualsListRef} className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-3 shadow-xs scroll-mt-4">
-              {orderFilter !== 'all' && (
+              {(orderFilter !== 'all' || activeAdvancedFiltersCount > 0 || searchQuery.trim() !== '') && (
                 <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#FAF8F2] border border-[#C6A052]/60 text-xs">
                   <span className="font-black text-[#0F2438] flex items-center gap-1.5">
                     <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
                     <span>
                       {t(
-                        `تصفية نشطة من شريط المؤشرات — عدد النتائج: ${orderedRequests.length}`,
-                        `Active KPI filter — Showing ${orderedRequests.length} result(s)`
+                        `تصفية نشطة — عدد النتائج المطابقة: ${orderedRequests.length}`,
+                        `Active filter — Showing ${orderedRequests.length} matching result(s)`
                       )}
                     </span>
                   </span>
                   <button
                     type="button"
-                    onClick={() => setOrderFilter('all')}
+                    onClick={handleResetAllClientFilters}
                     className="px-2.5 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black cursor-pointer transition"
                   >
-                    {t('عرض جميع العملاء', 'Show All Clients')}
+                    {t('إعادة ضبط جميع الفلاتر', 'Reset All Filters')}
                   </button>
                 </div>
               )}
@@ -3626,11 +4445,139 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder={t(
-                    'ابحث بالاسم أو رقم الطلب (MSK-...) أو رقم الواتساب أو رقم جواز السفر...',
-                    'Search by name, Order Code (MSK-...), WhatsApp number, or passport number...'
+                    'ابحث بالاسم أو المدينة أو نوع التأشيرة أو رقم الطلب (MSK-...) أو الواتساب أو الجواز...',
+                    'Search by name, city, visa type, Order Code (MSK-...), WhatsApp, or passport...'
                   )}
                   className="w-full ps-10 pe-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-xs sm:text-sm text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                 />
+              </div>
+
+              {/* Advanced Multi-Criteria Filter Bar (City, Registration Date, Visa Type) */}
+              <div className="bg-slate-50/90 border border-slate-200 rounded-xl p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11.5px] font-black text-[#0F2438] inline-flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5 text-[#C6A052]" />
+                    <span>
+                      {t(
+                        'شريط الفلترة المتقدم (يدمج تلقائياً مع الفلاتر التفاعلية)',
+                        'Advanced Multi-Criteria Filter Bar (Combined with Interactive Filters)'
+                      )}
+                    </span>
+                    {activeAdvancedFiltersCount > 0 && (
+                      <span className="px-2 py-0.5 rounded-full bg-[#0F2438] text-[#E5C887] text-[10px] font-black tabular-nums">
+                        {activeAdvancedFiltersCount}
+                      </span>
+                    )}
+                  </span>
+
+                  {activeAdvancedFiltersCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCityFilter('');
+                        setRegDatePreset('all');
+                        setRegDateFrom('');
+                        setRegDateTo('');
+                        setVisaTypeFilter('');
+                      }}
+                      className="text-[11px] font-bold text-rose-700 hover:text-rose-900 cursor-pointer"
+                    >
+                      {t('مسح المعايير المتقدمة', 'Clear Advanced Criteria')}
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                  {/* City Filter */}
+                  <div>
+                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1 flex items-center gap-1">
+                      <MapPin className="w-3 h-3 text-[#0284C7]" />
+                      <span>{t('المدينة / المحافظة', 'City / Governorate')}</span>
+                    </label>
+                    <select
+                      value={cityFilter}
+                      onChange={(e) => setCityFilter(e.target.value)}
+                      aria-label={t('تصفية حسب المدينة', 'Filter by City')}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    >
+                      <option value="">{t('جميع المدن', 'All Cities')}</option>
+                      {advancedFilterOptions.cityOptions.map((cOpt) => (
+                        <option key={cOpt} value={cOpt}>
+                          {cOpt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Registration Date Filter */}
+                  <div>
+                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1 flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-[#9E7B33]" />
+                      <span>{t('تاريخ التسجيل', 'Registration Date')}</span>
+                    </label>
+                    <select
+                      value={regDatePreset}
+                      onChange={(e) => setRegDatePreset(e.target.value as RegistrationDatePreset)}
+                      aria-label={t('تصفية حسب تاريخ التسجيل', 'Filter by Registration Date')}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    >
+                      <option value="all">{t('جميع تواريخ التسجيل', 'All Dates')}</option>
+                      <option value="today">{t('مسجل اليوم', 'Registered Today')}</option>
+                      <option value="last_7_days">{t('آخر 7 أيام', 'Last 7 Days')}</option>
+                      <option value="last_30_days">{t('آخر 30 يوماً', 'Last 30 Days')}</option>
+                      <option value="older_than_30_days">{t('أقدم من 30 يوماً', 'Older than 30 Days')}</option>
+                      <option value="custom">{t('نطاق تاريخ مخصص...', 'Custom Date Range...')}</option>
+                    </select>
+                  </div>
+
+                  {/* Visa Type Filter */}
+                  <div>
+                    <label className="block text-[10.5px] font-bold text-slate-600 mb-1 flex items-center gap-1">
+                      <FileText className="w-3 h-3 text-emerald-700" />
+                      <span>{t('نوع التأشيرة / الخدمة', 'Visa / Service Type')}</span>
+                    </label>
+                    <select
+                      value={visaTypeFilter}
+                      onChange={(e) => setVisaTypeFilter(e.target.value)}
+                      aria-label={t('تصفية حسب نوع التأشيرة', 'Filter by Visa Type')}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    >
+                      <option value="">{t('جميع أنواع التأشيرات', 'All Visa Types')}</option>
+                      {advancedFilterOptions.visaTypeOptions.map((vOpt) => (
+                        <option key={vOpt} value={vOpt}>
+                          {vOpt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {regDatePreset === 'custom' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1 text-xs">
+                    <div>
+                      <label className="block text-[10.5px] font-bold text-slate-600 mb-1">
+                        {t('من تاريخ', 'From Date')}
+                      </label>
+                      <input
+                        type="date"
+                        value={regDateFrom}
+                        onChange={(e) => setRegDateFrom(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10.5px] font-bold text-slate-600 mb-1">
+                        {t('إلى تاريخ', 'To Date')}
+                      </label>
+                      <input
+                        type="date"
+                        value={regDateTo}
+                        onChange={(e) => setRegDateTo(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
@@ -3639,6 +4586,39 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     {
                       id: 'all',
                       label: t(`الكل (${individualTravelers.length})`, `All (${individualTravelers.length})`),
+                    },
+                    {
+                      id: 'eng_highly_likely',
+                      label: t(
+                        `🔥 محتمل جداً (${highlyLikelyClientsCount})`,
+                        `🔥 Highly Likely (${highlyLikelyClientsCount})`
+                      ),
+                    },
+                    {
+                      id: 'eng_dormant',
+                      label: t(
+                        `💤 خامل (${dormantClientsCount})`,
+                        `💤 Dormant (${dormantClientsCount})`
+                      ),
+                    },
+                    {
+                      id: 'stale_docs',
+                      label: t(
+                        `⏰ مستندات متوقفة +7 أيام (${staleDocClientsCount})`,
+                        `⏰ Stale Docs +7d (${staleDocClientsCount})`
+                      ),
+                    },
+                    {
+                      id: 'tier_vip',
+                      label: t(`👑 VIP (${vipClientsCount})`, `👑 VIP (${vipClientsCount})`),
+                    },
+                    {
+                      id: 'tier_new',
+                      label: t(`🆕 جديد (${newTierClientsCount})`, `🆕 New (${newTierClientsCount})`),
+                    },
+                    {
+                      id: 'tier_delayed',
+                      label: t(`⏳ متأخر (${delayedClientsCount})`, `⏳ Delayed (${delayedClientsCount})`),
                     },
                     {
                       id: 'verified',
@@ -3687,9 +4667,31 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     onClick={() => setOrderFilter(f.id)}
                     className={`px-3 py-1.5 rounded-lg text-[11.5px] font-black transition cursor-pointer tabular-nums flex items-center gap-1 ${
                       orderFilter === f.id
-                        ? f.id === 'expiring_passports'
+                        ? f.id === 'expiring_passports' || f.id === 'tier_delayed'
                           ? 'bg-red-700 text-white'
+                          : f.id === 'eng_highly_likely'
+                          ? 'bg-emerald-700 text-white'
+                          : f.id === 'eng_dormant'
+                          ? 'bg-slate-700 text-white'
+                          : f.id === 'stale_docs'
+                          ? 'bg-rose-600 text-white'
+                          : f.id === 'tier_vip'
+                          ? 'bg-gradient-to-l from-[#C6A052] to-[#9E7B33] text-[#0A1926]'
+                          : f.id === 'tier_new'
+                          ? 'bg-sky-600 text-white'
                           : 'bg-[#0F2438] text-[#E5C887]'
+                        : f.id === 'eng_highly_likely' && highlyLikelyClientsCount > 0
+                        ? 'bg-emerald-50 border border-emerald-300 text-emerald-900 hover:bg-emerald-100'
+                        : f.id === 'eng_dormant' && dormantClientsCount > 0
+                        ? 'bg-slate-100 border border-slate-300 text-slate-800 hover:bg-slate-200'
+                        : f.id === 'stale_docs' && staleDocClientsCount > 0
+                        ? 'bg-rose-50 border border-rose-300 text-rose-900 hover:bg-rose-100'
+                        : f.id === 'tier_vip' && vipClientsCount > 0
+                        ? 'bg-[#FAF0D7] border border-[#C6A052] text-[#7A5611] hover:bg-[#F5E1AC]'
+                        : f.id === 'tier_new' && newTierClientsCount > 0
+                        ? 'bg-sky-50 border border-sky-300 text-sky-900 hover:bg-sky-100'
+                        : f.id === 'tier_delayed' && delayedClientsCount > 0
+                        ? 'bg-red-50 border border-red-300 text-red-800 hover:bg-red-100'
                         : f.id === 'expiring_passports' && expiringPassportCount > 0
                         ? 'bg-red-50 border border-red-200 text-red-800 hover:bg-red-100'
                         : f.id === 'b2c' && b2cIndividualCount > 0
@@ -3726,13 +4728,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   const isExpanded = Boolean(expandedClientPhones[client.phone]);
                   const waCopyKey = `card-wa-${client.phone}`;
                   const formattedPhone = formatPhoneForDisplay(client.phone);
+                  const tierCfg = getClientTierConfig(client.clientTier, lang);
+                  const docStaleness = evaluateClientDocumentStaleness(client);
+                  const eng =
+                    engagementByPhone[client.phone] ||
+                    analyzeClientEngagement({ profile: client, lang });
                   return (
                     <div
                       key={client.phone}
                       className={`bg-white border rounded-2xl p-4 space-y-3 shadow-xs hover:shadow-md transition flex flex-col justify-between ${
                         isOnline
                           ? 'border-emerald-300 ring-1 ring-emerald-200/70'
-                          : 'border-slate-200 hover:border-[#C6A052]/80'
+                          : docStaleness.isStale
+                          ? 'border-rose-300 ring-1 ring-rose-200/70 bg-gradient-to-l from-rose-50/35 via-white to-white hover:border-rose-400'
+                          : `${tierCfg.cardAccentClass} hover:border-[#C6A052]/80`
                       }`}
                     >
                       <div className="space-y-2.5">
@@ -3741,6 +4750,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             <div
                               onClick={() => setSelectedClientPhone(client.phone)}
                               className="relative shrink-0 cursor-pointer"
+                              title={tierCfg.label}
                             >
                               {client.avatarUrl ? (
                                 <img
@@ -3748,12 +4758,27 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                   alt={clientDisplayName}
                                   loading="lazy"
                                   decoding="async"
-                                  className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
+                                  className={`w-11 h-11 rounded-full object-cover bg-slate-100 ${tierCfg.avatarRingClass}`}
                                 />
                               ) : (
-                                <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-sm font-black">
+                                <div
+                                  className={`w-11 h-11 rounded-full flex items-center justify-center text-sm font-black ${tierCfg.avatarFallbackClass}`}
+                                >
                                   {clientDisplayName.slice(0, 1) || 'م'}
                                 </div>
+                              )}
+                              {tierCfg.isClassified && (
+                                <span
+                                  className={`absolute -top-1 -start-1 w-4.5 h-4.5 rounded-full border flex items-center justify-center shadow-xs ${tierCfg.cornerBadgeClass}`}
+                                >
+                                  {tierCfg.tier === 'vip' ? (
+                                    <Crown className="w-2.5 h-2.5" />
+                                  ) : tierCfg.tier === 'new' ? (
+                                    <Sparkles className="w-2.5 h-2.5" />
+                                  ) : (
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                  )}
+                                </span>
                               )}
                               <span
                                 className={`absolute -bottom-0.5 -end-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
@@ -3771,6 +4796,61 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                 >
                                   {clientDisplayName}
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSendDocReminderWhatsApp(client);
+                                  }}
+                                  className={`px-2 py-0.5 rounded-lg text-[10.5px] font-black inline-flex items-center gap-1 cursor-pointer transition border ${
+                                    docStaleness.isStale
+                                      ? 'bg-[#25D366] hover:bg-[#128C7E] text-white border-[#128C7E] shadow-xs'
+                                      : 'bg-[#25D366]/12 hover:bg-[#25D366]/25 text-[#128C7E] border-[#25D366]/35'
+                                  }`}
+                                  title={t('إرسال تذكير واتساب لتحديث المستندات', 'Send WhatsApp Document Reminder')}
+                                >
+                                  <MessageCircle className="w-3 h-3 shrink-0" />
+                                  <span>{t('إرسال تذكير واتساب', 'WhatsApp Reminder')}</span>
+                                </button>
+                                {docStaleness.isStale && (
+                                  <span className="px-2 py-0.5 rounded-full bg-rose-100 border border-rose-300 text-rose-900 text-[10px] font-black inline-flex items-center gap-1 tabular-nums">
+                                    <Clock className="w-3 h-3 shrink-0 text-rose-600" />
+                                    <span>
+                                      {docStaleness.hasDocuments
+                                        ? t(
+                                            `لم يحدّث المستندات منذ ${docStaleness.daysSinceUpdate}ي`,
+                                            `Docs stale ${docStaleness.daysSinceUpdate}d`
+                                          )
+                                        : t(
+                                            `بدون مستندات منذ ${docStaleness.daysSinceUpdate}ي`,
+                                            `No docs ${docStaleness.daysSinceUpdate}d`
+                                          )}
+                                    </span>
+                                  </span>
+                                )}
+                                {eng && (
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-black border inline-flex items-center gap-1 ${eng.badgeClass}`}
+                                    title={`${eng.reasonText} (${eng.score}%)`}
+                                  >
+                                    <span>{eng.emoji}</span>
+                                    <span>{eng.label}</span>
+                                  </span>
+                                )}
+                                {tierCfg.isClassified && (
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-black border inline-flex items-center gap-1 ${tierCfg.badgeClass}`}
+                                  >
+                                    {tierCfg.tier === 'vip' ? (
+                                      <Crown className="w-3 h-3 shrink-0" />
+                                    ) : tierCfg.tier === 'new' ? (
+                                      <Sparkles className="w-3 h-3 shrink-0" />
+                                    ) : (
+                                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                                    )}
+                                    <span>{tierCfg.shortLabel}</span>
+                                  </span>
+                                )}
                                 <span
                                   className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[10.5px] font-black text-[#0F2438] tabular-nums"
                                   dir="ltr"
@@ -3922,8 +5002,44 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                           : t(`صلاحية ${clientPassportEval.remainingDays}ي`, `${clientPassportEval.remainingDays}d left`)}
                                       </span>
                                     </span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedClientPhone(client.phone);
+                                        focusAdminPassportEditor();
+                                      }}
+                                      className="px-1.5 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white text-[10px] font-black cursor-pointer transition"
+                                      title={t('رابط مباشر لتحديث بيانات الجواز في ملف العميل', 'Direct link to update passport data')}
+                                    >
+                                      {t('تحديث الجواز 🔗', 'Update Passport 🔗')}
+                                    </button>
                                   </>
                                 )}
+                              </div>
+
+                              {/* Automated Data Analysis Bar (Last Interaction & Reply Speed) */}
+                              <div
+                                className={`mt-1 px-2.5 py-1.5 rounded-xl border text-[10.5px] font-bold flex flex-wrap items-center justify-between gap-x-3 gap-y-1 tabular-nums ${eng.panelClass}`}
+                              >
+                                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${eng.dotClass}`} />
+                                    <span>{eng.emoji}</span>
+                                    <strong className="font-black">{eng.label}</strong>
+                                  </span>
+                                  <span className="opacity-50">|</span>
+                                  <span>
+                                    {t('آخر تفاعل:', 'Last active:')} <strong>{eng.lastInteractionLabel}</strong>
+                                  </span>
+                                  <span className="opacity-50">|</span>
+                                  <span>
+                                    {t('سرعة الاستجابة:', 'Reply speed:')} <strong>{eng.responseSpeedLabel}</strong>
+                                  </span>
+                                </div>
+                                <span className="px-1.5 py-0.2 rounded-md bg-white/80 border border-current/15 text-[10px] font-black">
+                                  {t(`مؤشر التفاعل ${eng.score}%`, `Score ${eng.score}%`)}
+                                </span>
                               </div>
                             </div>
                           </div>
@@ -4044,6 +5160,34 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             <MessageCircle className="w-3 h-3" />
                             <span>{t('واتساب جاهز', 'WhatsApp')}</span>
                           </button>
+
+                          {/* 1-Click Priority Tier Classification Controls */}
+                          <div className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5 gap-0.5">
+                            {CLIENT_PRIORITY_TIERS.map((tierOption) => {
+                              const optCfg = getClientTierConfig(tierOption, lang);
+                              const isSelectedTier = client.clientTier === tierOption;
+                              return (
+                                <button
+                                  key={tierOption}
+                                  type="button"
+                                  disabled={updatingTierPhone === client.phone}
+                                  onClick={() => void handleQuickUpdateClientTier(client, tierOption)}
+                                  title={optCfg.label}
+                                  className={`px-2 py-1 rounded-md text-[10px] font-black transition cursor-pointer disabled:opacity-50 ${
+                                    isSelectedTier
+                                      ? tierOption === 'vip'
+                                        ? 'bg-[#C6A052] text-[#0A1926] shadow-xs'
+                                        : tierOption === 'new'
+                                        ? 'bg-sky-600 text-white shadow-xs'
+                                        : 'bg-red-600 text-white shadow-xs'
+                                      : 'text-slate-600 hover:bg-white'
+                                  }`}
+                                >
+                                  {optCfg.shortLabel}
+                                </button>
+                              );
+                            })}
+                          </div>
 
                           {canDeleteRecords && (
                             !isEditUnlocked ? (
@@ -4531,6 +5675,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   const isOnline = isUserCurrentlyOnline(partner);
                   const unreadChat = chatThreads[partner.phone]?.unreadAdminCount || 0;
                   const companyTitle = partner.companyName || getTravelerDisplayNames(partner).fullDisplayName;
+                  const partnerTierCfg = getClientTierConfig(partner.clientTier, lang);
                   return (
                     <div
                       key={partner.phone}
@@ -4538,6 +5683,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       className={`bg-white border-2 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs hover:shadow-md transition cursor-pointer flex flex-col justify-between ${
                         isOnline
                           ? 'border-emerald-400 ring-1 ring-emerald-200'
+                          : partnerTierCfg.isClassified
+                          ? `${partnerTierCfg.cardAccentClass} hover:border-[#C6A052]`
                           : 'border-[#C6A052]/60 hover:border-[#C6A052]'
                       }`}
                     >
@@ -4549,12 +5696,27 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                 src={getDisplayableDriveImageUrl(partner.avatarUrl)}
                                 alt={companyTitle}
                                 loading="lazy"
-                                className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052]"
+                                className={`w-11 h-11 rounded-full object-cover ${partnerTierCfg.avatarRingClass}`}
                               />
                             ) : (
-                              <div className="w-11 h-11 rounded-full bg-[#0F2438] text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
+                              <div
+                                className={`w-11 h-11 rounded-full flex items-center justify-center ${partnerTierCfg.avatarFallbackClass}`}
+                              >
                                 <Building2 className="w-5 h-5" />
                               </div>
+                            )}
+                            {partnerTierCfg.isClassified && (
+                              <span
+                                className={`absolute -top-1 -start-1 w-4.5 h-4.5 rounded-full border flex items-center justify-center shadow-xs ${partnerTierCfg.cornerBadgeClass}`}
+                              >
+                                {partnerTierCfg.tier === 'vip' ? (
+                                  <Crown className="w-2.5 h-2.5" />
+                                ) : partnerTierCfg.tier === 'new' ? (
+                                  <Sparkles className="w-2.5 h-2.5" />
+                                ) : (
+                                  <AlertTriangle className="w-2.5 h-2.5" />
+                                )}
+                              </span>
                             )}
                             <span
                               className={`absolute -bottom-0.5 -end-0.5 w-3.5 h-3.5 rounded-full border-2 border-white ${
@@ -4568,6 +5730,13 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                               <span className="text-sm sm:text-base font-black text-[#0F2438]">
                                 {companyTitle}
                               </span>
+                              {partnerTierCfg.isClassified && (
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-black border inline-flex items-center gap-1 ${partnerTierCfg.badgeClass}`}
+                                >
+                                  <span>{partnerTierCfg.shortLabel}</span>
+                                </span>
+                              )}
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
                                 <Building2 className="w-3 h-3" />
                                 <span>{t('شركة شريكة B2B', 'B2B Partner')}</span>
@@ -5066,6 +6235,9 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     senderName={session?.name || 'المدير العام'}
                     clientName={getTravelerDisplayNames(activeChatClient).fullDisplayName}
                     companyName={activeChatClient.companyName}
+                    orderCode={
+                      activeChatClient.orderCode || buildOrderCodeFromPhone(activeChatClient.phone)
+                    }
                     onInspectImage={(url, title) =>
                       setPreviewDocImage({ label: title, dataUrl: url })
                     }
@@ -5100,32 +6272,50 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white px-4 sm:px-6 py-3.5 sm:py-4 border-b border-[#C6A052]/40 shrink-0 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2.5">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="relative shrink-0">
-                      {selectedClient.avatarUrl ? (
-                        <img
-                          src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
-                          alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
-                          loading="lazy"
-                          decoding="async"
-                          className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
-                        />
-                      ) : selectedClient.accountType === 'b2b_partner' ? (
-                        <div className="w-11 h-11 rounded-full bg-[#C6A052]/20 text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
-                          <Building2 className="w-5 h-5" />
+                    {(() => {
+                      const modalTierCfg = getClientTierConfig(selectedClient.clientTier, lang);
+                      return (
+                        <div className="relative shrink-0">
+                          {selectedClient.avatarUrl ? (
+                            <img
+                              src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
+                              alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
+                              loading="lazy"
+                              decoding="async"
+                              className={`w-11 h-11 rounded-full object-cover bg-slate-100 ${modalTierCfg.avatarRingClass}`}
+                            />
+                          ) : selectedClient.accountType === 'b2b_partner' ? (
+                            <div className={`w-11 h-11 rounded-full flex items-center justify-center ${modalTierCfg.modalAvatarClass}`}>
+                              <Building2 className="w-5 h-5" />
+                            </div>
+                          ) : (
+                            <div className={`w-11 h-11 rounded-full flex items-center justify-center text-sm font-black ${modalTierCfg.modalAvatarClass}`}>
+                              {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
+                            </div>
+                          )}
+                          {modalTierCfg.isClassified && (
+                            <span
+                              className={`absolute -top-1 -start-1 w-4.5 h-4.5 rounded-full border flex items-center justify-center shadow-xs ${modalTierCfg.cornerBadgeClass}`}
+                            >
+                              {modalTierCfg.tier === 'vip' ? (
+                                <Crown className="w-2.5 h-2.5" />
+                              ) : modalTierCfg.tier === 'new' ? (
+                                <Sparkles className="w-2.5 h-2.5" />
+                              ) : (
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                              )}
+                            </span>
+                          )}
+                          <span
+                            className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-[#0F2438] ${
+                              isUserCurrentlyOnline(selectedClient)
+                                ? 'bg-emerald-400 animate-pulse'
+                                : 'bg-slate-400'
+                            }`}
+                          />
                         </div>
-                      ) : (
-                        <div className="w-11 h-11 rounded-full bg-[#C6A052]/20 text-[#E5C887] border border-[#C6A052]/70 flex items-center justify-center text-sm font-black">
-                          {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
-                        </div>
-                      )}
-                      <span
-                        className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-[#0F2438] ${
-                          isUserCurrentlyOnline(selectedClient)
-                            ? 'bg-emerald-400 animate-pulse'
-                            : 'bg-slate-400'
-                        }`}
-                      />
-                    </div>
+                      );
+                    })()}
 
                     <div className="min-w-0 leading-tight">
                       <div className="flex flex-wrap items-center gap-1.5">
@@ -5134,6 +6324,13 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             ? selectedClient.companyName
                             : getTravelerDisplayNames(selectedClient).fullDisplayName}
                         </h3>
+                        {selectedClient.clientTier && (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-black border inline-flex items-center gap-1 ${getClientTierConfig(selectedClient.clientTier, lang).badgeClass}`}
+                          >
+                            <span>{getClientTierConfig(selectedClient.clientTier, lang).label}</span>
+                          </span>
+                        )}
                         {selectedClient.accountType === 'b2b_partner' && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
                             <Building2 className="w-3 h-3" />
@@ -5298,14 +6495,20 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         label: t('3. مراحل الطلب والتنفيذ', '3. Order Stages & QR'),
                       },
                       {
+                        id: 'appointment_calendar' as ClientModalTab,
+                        label: selectedClient.appointmentDetails?.appointmentDate
+                          ? t('4. تقويم المواعيد وتذكير 24h 📅', '4. Calendar & 24h 📅')
+                          : t('4. تقويم المواعيد (تساهيل/جامكا)', '4. Calendar (Tasheer/GAMCA)'),
+                      },
+                      {
                         id: 'b2c_visa' as ClientModalTab,
                         label: selectedClient.b2cVisa
-                          ? t('4. تأشيرة B2C 🕋', '4. B2C Visa 🕋')
-                          : t('4. تأشيرة B2C', '4. B2C Visa'),
+                          ? t('5. تأشيرة B2C 🕋', '5. B2C Visa 🕋')
+                          : t('5. تأشيرة B2C', '5. B2C Visa'),
                       },
                       {
                         id: 'private_notes' as ClientModalTab,
-                        label: t('5. الملاحظات الإدارية الخاصة', '5. Private Notes'),
+                        label: t('6. الملاحظات الإدارية الخاصة', '6. Private Notes'),
                       },
                     ]
                   ).map((mt) => (
@@ -5448,6 +6651,47 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                           <MessageCircle className="w-3 h-3" />
                           <span>{t('مراسلة واتساب', 'WhatsApp')}</span>
                         </button>
+
+                        {/* Priority Tier Selector in Modal */}
+                        <div className="inline-flex items-center rounded-lg border border-[#C6A052]/50 bg-white p-0.5 gap-0.5">
+                          <span className="px-1.5 text-[10px] font-black text-slate-500">
+                            {t('التصنيف:', 'Tier:')}
+                          </span>
+                          {CLIENT_PRIORITY_TIERS.map((tierOption) => {
+                            const optCfg = getClientTierConfig(tierOption, lang);
+                            const isSelectedTier = selectedClient.clientTier === tierOption;
+                            return (
+                              <button
+                                key={tierOption}
+                                type="button"
+                                disabled={updatingTierPhone === selectedClient.phone}
+                                onClick={() => void handleQuickUpdateClientTier(selectedClient, tierOption)}
+                                className={`px-2 py-1 rounded-md text-[10.5px] font-black transition cursor-pointer disabled:opacity-50 ${
+                                  isSelectedTier
+                                    ? tierOption === 'vip'
+                                      ? 'bg-[#C6A052] text-[#0A1926] shadow-xs'
+                                      : tierOption === 'new'
+                                      ? 'bg-sky-600 text-white shadow-xs'
+                                      : 'bg-red-600 text-white shadow-xs'
+                                    : 'text-slate-600 hover:bg-slate-100'
+                                }`}
+                              >
+                                {optCfg.shortLabel}
+                              </button>
+                            );
+                          })}
+                          {selectedClient.clientTier && (
+                            <button
+                              type="button"
+                              disabled={updatingTierPhone === selectedClient.phone}
+                              onClick={() => void handleQuickUpdateClientTier(selectedClient, null)}
+                              className="px-1.5 py-1 rounded-md text-[10px] font-bold text-slate-400 hover:text-red-600 cursor-pointer"
+                              title={t('إزالة التصنيف', 'Clear Tier')}
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -5543,35 +6787,97 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       )}
 
                       {evaluatePassportValidity(editPassportExpiry || selectedClient.passportExpiryDate)
-                        .isUnderSixMonths && (
-                        <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex items-start gap-2">
-                          <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
-                          <div>
-                            <span>
-                              {t(
-                                'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
-                                'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
-                              )}
-                            </span>
-                            {(() => {
-                              const ev = evaluatePassportValidity(
-                                editPassportExpiry || selectedClient.passportExpiryDate
-                              );
-                              if (ev.remainingDays === null) return null;
-                              return (
-                                <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
-                                  {ev.remainingDays <= 0
-                                    ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
-                                    : t(
-                                        `المتبقي في الجواز: ${ev.remainingDays} يوماً فقط.`,
-                                        `Remaining validity: ${ev.remainingDays} days.`
-                                      )}
+                        .isUnderSixMonths && (() => {
+                        const ev = evaluatePassportValidity(
+                          editPassportExpiry || selectedClient.passportExpiryDate
+                        );
+                        const clientDirectPassportUrl = buildPassportUpdateDirectUrl(
+                          'client',
+                          selectedClient.phone
+                        );
+                        const copyPassportKey = `direct-passport-${selectedClient.phone}`;
+                        return (
+                          <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex flex-wrap items-start justify-between gap-2.5">
+                            <div className="flex items-start gap-2 min-w-0 flex-1">
+                              <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
+                              <div className="min-w-0">
+                                <span>
+                                  {t(
+                                    'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                                    'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                                  )}
                                 </span>
-                              );
-                            })()}
+                                {ev.remainingDays !== null && (
+                                  <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                                    {ev.remainingDays <= 0
+                                      ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
+                                      : t(
+                                          `المتبقي في الجواز: ${ev.remainingDays} يوماً فقط.`,
+                                          `Remaining validity: ${ev.remainingDays} days.`
+                                        )}
+                                  </span>
+                                )}
+                                <span
+                                  className="block text-[10.5px] font-medium text-red-700/90 mt-1 break-all"
+                                  dir="ltr"
+                                >
+                                  {clientDirectPassportUrl}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleAdminCopyValue(
+                                    copyPassportKey,
+                                    clientDirectPassportUrl
+                                  )
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-red-100 border border-red-300 text-red-900 text-[10.5px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                              >
+                                {adminCopiedKey === copyPassportKey ? (
+                                  <Check className="w-3 h-3 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-3 h-3" />
+                                )}
+                                <span>
+                                  {t('نسخ رابط التحديث المباشر', 'Copy Direct Update Link')}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const perm = getBrowserNotificationPermission();
+                                  if (perm !== 'granted') {
+                                    const res = await requestAndGetFcmToken(
+                                      siteDraft.fcmVapidKey
+                                    );
+                                    setBellPermission(res.permission);
+                                    if (!res.ok) return;
+                                  }
+                                  const clientName =
+                                    getTravelerDisplayNames(selectedClient).fullDisplayName ||
+                                    selectedClient.phone;
+                                  await sendPassportExpiryBrowserNotification({
+                                    role: 'admin',
+                                    phone: selectedClient.phone,
+                                    clientName,
+                                    expiryDate: ev.expiryDate,
+                                    remainingDays: ev.remainingDays,
+                                    lang,
+                                    force: true,
+                                  });
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[10.5px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                              >
+                                <BellRing className="w-3 h-3" />
+                                <span>{t('تنبيه متصفح فوري', 'Browser Alert Now')}</span>
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
                         <div>
@@ -5665,6 +6971,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         </div>
                         <div>
                           <label className="block font-bold text-slate-600 mb-1">
+                            {t('المدينة / المحافظة', 'City / Governorate')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editCity}
+                            onChange={(e) => setEditCity(e.target.value)}
+                            placeholder={t('القاهرة / الدقهلية / الرياض', 'Cairo / Dakahlia / Riyadh')}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
                             {t('تاريخ الميلاد', 'Date of Birth')}
                           </label>
                           <input
@@ -5685,11 +7003,16 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
                           />
                         </div>
-                        <div>
+                        <div
+                          className={`rounded-xl transition ${
+                            highlightAdminPassport ? 'ring-2 ring-red-500 ring-offset-2 p-1.5 bg-red-50/40' : ''
+                          }`}
+                        >
                           <label className="block font-bold text-slate-600 mb-1">
                             {t('تاريخ انتهاء الجواز', 'Passport Expiry')}
                           </label>
                           <input
+                            ref={adminPassportExpiryInputRef}
                             type="date"
                             value={editPassportExpiry}
                             onChange={(e) => setEditPassportExpiry(e.target.value)}
@@ -6179,19 +7502,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                       </span>
                                       <span
                                         className={`px-2 py-0.5 rounded-full text-[9.5px] font-black border ${
-                                          docStatus === 'completed'
-                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                                            : docStatus === 'pending_completion'
-                                            ? 'bg-amber-50 border-amber-300 text-amber-900'
-                                            : 'bg-sky-50 border-sky-200 text-sky-900'
+                                          resolveDocumentReviewMeta(docStatus).badgeClass
                                         }`}
                                       >
-                                        {docStatus === 'completed'
-                                          ? t('مكتمل ✓', 'Completed ✓')
-                                          : docStatus === 'pending_completion'
-                                          ? t('مطلوب استكماله', 'Needs Completion')
-                                          : t('تم الاستلام', 'Received')}
+                                        {lang === 'en'
+                                          ? resolveDocumentReviewMeta(docStatus).shortLabelEn
+                                          : resolveDocumentReviewMeta(docStatus).shortLabelAr}
                                       </span>
+                                      {docItem.lastReviewedBy && (
+                                        <span className="text-[9.5px] font-bold text-slate-500">
+                                          · {t('المراجع:', 'Reviewer:')} {docItem.lastReviewedBy}
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
@@ -6217,8 +7539,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                       [
                                         {
                                           id: 'pending_completion' as DocumentReviewStatus,
-                                          label: t('مطلوب استكماله', 'Incomplete'),
-                                          activeCls: 'bg-amber-500 text-white border-amber-600',
+                                          label: t('مرفوض / استكمال', 'Reject / Incomplete'),
+                                          activeCls: 'bg-red-600 text-white border-red-700',
                                         },
                                         {
                                           id: 'received' as DocumentReviewStatus,
@@ -6227,7 +7549,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                         },
                                         {
                                           id: 'completed' as DocumentReviewStatus,
-                                          label: t('مكتمل ✓', 'Complete'),
+                                          label: t('تم القبول ✓', 'Approve ✓'),
                                           activeCls: 'bg-emerald-600 text-white border-emerald-700',
                                         },
                                       ]
@@ -6248,6 +7570,70 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                                     ))}
                                   </div>
                                 </div>
+
+                                {(() => {
+                                  const auditEntries = buildDocumentAuditTimeline(selectedClient, docItem);
+                                  const isAuditOpen = Boolean(expandedDocAuditIds[docItem.id]);
+                                  return (
+                                    <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setExpandedDocAuditIds((prev) => ({
+                                            ...prev,
+                                            [docItem.id]: !prev[docItem.id],
+                                          }))
+                                        }
+                                        className="w-full px-2.5 py-1.5 bg-[#FAF8F2]/80 hover:bg-amber-50 flex items-center justify-between text-[10.5px] font-black text-[#0F2438] cursor-pointer"
+                                      >
+                                        <span className="inline-flex items-center gap-1">
+                                          <History className="w-3 h-3 text-[#C6A052]" />
+                                          <span>
+                                            {t(
+                                              `السجل التاريخي للمستند (${auditEntries.length})`,
+                                              `Document Audit Log (${auditEntries.length})`
+                                            )}
+                                          </span>
+                                        </span>
+                                        {isAuditOpen ? (
+                                          <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
+                                        ) : (
+                                          <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                                        )}
+                                      </button>
+                                      {isAuditOpen && (
+                                        <div className="p-2 space-y-1.5 border-t border-slate-100 max-h-44 overflow-y-auto">
+                                          {auditEntries.map((ev) => (
+                                            <div
+                                              key={ev.id}
+                                              className="text-[10px] bg-slate-50 border border-slate-200 rounded-lg p-1.5 space-y-0.5"
+                                            >
+                                              <div className="flex items-center justify-between gap-1.5">
+                                                <span className="font-black text-[#0F2438]">
+                                                  {lang === 'en' ? ev.statusLabelEn : ev.statusLabelAr}
+                                                </span>
+                                                <span className="text-[9.5px] text-slate-400 tabular-nums">
+                                                  {ev.timestamp?.replace('T', ' ').slice(0, 16)}
+                                                </span>
+                                              </div>
+                                              <p className="text-slate-600 font-semibold">
+                                                {ev.actorRole === 'client'
+                                                  ? t('العميل:', 'Client:')
+                                                  : t('المراجع:', 'Reviewer:')}{' '}
+                                                {ev.actorName}
+                                              </p>
+                                              {ev.note && (
+                                                <p className="text-slate-700 bg-white px-1.5 py-0.5 rounded border border-slate-100">
+                                                  {ev.note}
+                                                </p>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
 
                                 <div className="grid grid-cols-2 gap-2">
                                   {isPdf ? (
@@ -6717,6 +8103,41 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         )}
                       </div>
 
+                      {/* WhatsApp Automation & Quick Replies Customization Bar */}
+                      <div className="bg-[#FAF8F2] border border-[#C6A052]/40 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleAutoWhatsApp(!isAutoWhatsAppEnabled)}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-black inline-flex items-center gap-1.5 transition cursor-pointer ${
+                              isAutoWhatsAppEnabled
+                                ? 'bg-[#25D366] text-white shadow-2xs'
+                                : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                            }`}
+                          >
+                            <span>
+                              {isAutoWhatsAppEnabled
+                                ? t('✓ إرسال واتساب تلقائي مفعّل', '✓ Auto-WhatsApp Enabled')
+                                : t('إرسال واتساب تلقائي معطّل', 'Auto-WhatsApp Disabled')}
+                            </span>
+                          </button>
+                          <span className="text-[10.5px] text-slate-500 hidden sm:inline">
+                            {isAutoWhatsAppEnabled
+                              ? t('يتم فتح وتجهيز رسالة واتساب المخصصة تلقائياً فور الضغط على أي مرحلة', 'Auto-dispatches WhatsApp template on stage click')
+                              : t('يتم تحديث المرحلة داخلياً فقط بدون واتساب تلقائي', 'Updates internally without opening WhatsApp')}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowStageTemplatesModal(true)}
+                          className="px-2.5 py-1 rounded-lg bg-white border border-[#C6A052]/50 hover:bg-[#FAF8F2] text-[#0F2438] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-2xs"
+                        >
+                          <Settings className="w-3.5 h-3.5 text-[#C6A052]" />
+                          <span>{t('تخصيص قوالب رسائل الواتساب ⚙️', 'Customize WhatsApp Templates ⚙️')}</span>
+                        </button>
+                      </div>
+
                       {!hasClientActiveOrder(selectedClient) &&
                         normalizeOrderStatusValue(editOrderStatus) === 'none' && (
                           <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
@@ -6783,14 +8204,24 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                             {t('بيانات بطاقة الموعد والباركود (Appointment QR Pass)', 'Appointment QR Pass Details')}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setShowAdminQrPreview(true)}
-                          className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          <span>{t('معاينة بطاقة QR', 'Preview QR Pass')}</span>
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setClientModalTab('appointment_calendar')}
+                            className="px-3 py-1.5 rounded-lg bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] text-[11px] font-black flex items-center gap-1 cursor-pointer transition shadow-xs"
+                          >
+                            <Calendar className="w-3.5 h-3.5" />
+                            <span>{t('واجهة التقويم وتذكير 24h 📅', 'Interactive Calendar & 24h Reminder 📅')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowAdminQrPreview(true)}
+                            className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <QrCode className="w-3.5 h-3.5" />
+                            <span>{t('معاينة بطاقة QR', 'Preview QR Pass')}</span>
+                          </button>
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -6872,7 +8303,18 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 </div>
                 )}
 
-                {/* TAB 4: B2C VISA MANAGEMENT */}
+                {/* TAB 4: INTERACTIVE APPOINTMENT CALENDAR & 24H WHATSAPP SYNC */}
+                {clientModalTab === 'appointment_calendar' && selectedClient && (
+                  <AppointmentCalendarWidget
+                    client={selectedClient}
+                    allTravelers={travelers}
+                    canManageClients={canManageClients}
+                    onOpenQrPassModal={() => setShowAdminQrPreview(true)}
+                    onSaveAppointment={handleSaveAppointmentFromWidget}
+                  />
+                )}
+
+                {/* TAB 5: B2C VISA MANAGEMENT */}
                 {clientModalTab === 'b2c_visa' && (
                   <div className="space-y-4 text-xs">
                     {/* Quick Actions Bar — B2C Visa Tab */}
@@ -8022,6 +9464,57 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               </form>
             </fieldset>
           </div>
+        )}
+
+        {/* ===================================================================== */}
+        {/* TAB 3.4: DOCUMENT MONITOR & HISTORICAL AUDIT LOG                      */}
+        {/* ===================================================================== */}
+        {activeTab === 'doc_monitor' && canManageClients && (
+          <DocumentMonitorPanel
+            travelers={travelers}
+            reviewerName={session?.name || 'المدير العام'}
+            onRefreshTravelers={loadTravelers}
+            onOpenClientDocs={(phone) => handleOpenClientFromAnyTab(phone, 'documents')}
+            onPreviewImage={(label, dataUrl, downloadName) =>
+              setPreviewDocImage({ label, dataUrl, downloadName })
+            }
+          />
+        )}
+
+        {/* ===================================================================== */}
+        {/* TAB 3.5: EXECUTIVE REPORTS (6-MONTH ORDER TRENDS & COMPLETED VISAS)  */}
+        {/* ===================================================================== */}
+        {activeTab === 'reports' && canManageClients && (
+          <AdminReportsPanel
+            travelers={travelers}
+            onFilterClientsByTier={(tier) => {
+              setActiveTab('individuals');
+              setSelectedClientPhone(null);
+              handleKpiFilterClick(
+                tier === 'vip'
+                  ? 'tier_vip'
+                  : tier === 'new'
+                  ? 'tier_new'
+                  : 'tier_delayed'
+              );
+            }}
+          />
+        )}
+
+        {/* ===================================================================== */}
+        {/* TAB 3.6: EXECUTION STAFF PERFORMANCE & LINKED AUDIT LOG KPIs          */}
+        {/* ===================================================================== */}
+        {activeTab === 'staff_performance' && canManageClients && (
+          <StaffPerformancePanel
+            travelers={travelers}
+            subAdmins={subAdmins}
+            chatMessagesByPhone={chatMessagesByPhone}
+            onOpenClientFolder={handleOpenClientFromAnyTab}
+            onOpenDocMonitor={() => {
+              setSelectedClientPhone(null);
+              setActiveTab('doc_monitor');
+            }}
+          />
         )}
 
         {/* ===================================================================== */}
@@ -9418,6 +10911,15 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           }}
         />
       )}
+
+      {/* Order Stages WhatsApp Templates Customization Modal */}
+      <StageWhatsAppTemplatesModal
+        isOpen={showStageTemplatesModal}
+        onClose={() => setShowStageTemplatesModal(false)}
+        adminName={session?.name || 'المدير العام'}
+        isAutoWhatsAppEnabled={isAutoWhatsAppEnabled}
+        onToggleAutoWhatsApp={handleToggleAutoWhatsApp}
+      />
     </div>
   );
 };

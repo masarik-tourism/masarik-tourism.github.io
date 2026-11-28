@@ -6,6 +6,7 @@ import { getSiteConfig } from './siteConfigStore';
 export type PushNotificationAction =
   | 'live_chat'
   | 'client_folder'
+  | 'passport_update'
   | 'quick_otp'
   | 'chat'
   | 'documents'
@@ -293,6 +294,21 @@ export function buildPushDeepLinkUrl(data: PushDeepLinkPayload): string {
   return `/?${params.toString()}`;
 }
 
+export function buildPassportUpdateDirectUrl(
+  role: 'admin' | 'client',
+  phone?: string
+): string {
+  const rel = buildPushDeepLinkUrl({
+    role,
+    action: 'passport_update',
+    phone,
+  });
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return `${window.location.origin}${rel}`;
+  }
+  return rel;
+}
+
 export function emitPushNavigate(payload: PushDeepLinkPayload): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new CustomEvent<PushDeepLinkPayload>(PUSH_NAVIGATE_EVENT, { detail: payload }));
@@ -437,6 +453,7 @@ export function subscribeForegroundFcmMessages(
         const validActions: PushNotificationAction[] = [
           'live_chat',
           'client_folder',
+          'passport_update',
           'quick_otp',
           'chat',
           'documents',
@@ -720,4 +737,88 @@ export async function sendTestCloudflareWorkerPush(opts: {
     body: opts.body || 'تم وصول إشعار Cloudflare Worker → FCM في الخلفية بنجاح ✅',
     data: { role: 'admin', action: 'live_chat' },
   });
+}
+
+const PASSPORT_EXPIRY_NOTIF_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const PASSPORT_EXPIRY_NOTIF_STORAGE_PREFIX = 'masarik_passport_expiry_notif_v1:';
+
+export async function sendPassportExpiryBrowserNotification(params: {
+  role: 'admin' | 'client';
+  phone: string;
+  clientName: string;
+  expiryDate: string;
+  remainingDays: number | null;
+  lang?: 'ar' | 'en';
+  force?: boolean;
+}): Promise<{ shown: boolean; directUrl: string; skippedByCooldown?: boolean }> {
+  const {
+    role,
+    phone,
+    clientName,
+    expiryDate,
+    remainingDays,
+    lang = 'ar',
+    force = false,
+  } = params;
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const directUrl = buildPassportUpdateDirectUrl(role, cleanPhone || phone);
+
+  if (typeof window === 'undefined') {
+    return { shown: false, directUrl };
+  }
+
+  const cooldownKey = `${PASSPORT_EXPIRY_NOTIF_STORAGE_PREFIX}${role}:${cleanPhone || phone}:${expiryDate}`;
+  if (!force) {
+    try {
+      const prevRaw = window.localStorage.getItem(cooldownKey);
+      const prevTs = prevRaw ? Number(prevRaw) : 0;
+      if (Number.isFinite(prevTs) && prevTs > 0 && Date.now() - prevTs < PASSPORT_EXPIRY_NOTIF_COOLDOWN_MS) {
+        return { shown: false, directUrl, skippedByCooldown: true };
+      }
+    } catch {
+      // Ignore storage read error
+    }
+  }
+
+  const isExpired = remainingDays !== null && remainingDays <= 0;
+  const safeName = clientName.trim() || (lang === 'en' ? 'Client' : 'العميل');
+
+  const title =
+    lang === 'en'
+      ? role === 'admin'
+        ? `Passport Alert (<6m) — ${safeName}`
+        : 'Masarik Alert — Passport Expiring Soon'
+      : role === 'admin'
+      ? `تنبيه صلاحية جواز (< 6 أشهر) — ${safeName}`
+      : 'تنبيه مسارك — اقتراب انتهاء جواز السفر';
+
+  const body =
+    lang === 'en'
+      ? isExpired
+        ? `${role === 'admin' ? `${safeName}'s passport` : 'Your passport'} expired on (${expiryDate}). Click to update passport details directly: ${directUrl}`
+        : `${role === 'admin' ? `${safeName}'s passport` : 'Your passport'} expires in ${remainingDays ?? '<180'} day(s) (${expiryDate}) — under the 6-month travel rule. Click to update: ${directUrl}`
+      : isExpired
+      ? `${role === 'admin' ? `جواز سفر العميل (${safeName})` : 'جواز سفرك'} منتهي الصلاحية (${expiryDate}). اضغط لفتح ملف الجواز وتحديثه مباشرة: ${directUrl}`
+      : `${role === 'admin' ? `جواز سفر العميل (${safeName})` : 'جواز سفرك'} متبقٍ على انتهائه ${remainingDays ?? 'أقل من 180'} يوماً (${expiryDate}) — أقل من 6 أشهر. اضغط لتحديث البيانات مباشرة: ${directUrl}`;
+
+  const shown = await showBrowserPushNotification({
+    title,
+    body,
+    tag: `masarik-passport-expiry-${role}-${cleanPhone || phone}`,
+    data: {
+      role,
+      action: 'passport_update',
+      phone: cleanPhone || phone,
+    },
+  });
+
+  if (shown) {
+    try {
+      window.localStorage.setItem(cooldownKey, String(Date.now()));
+    } catch {
+      // Ignore storage write error
+    }
+  }
+
+  return { shown, directUrl };
 }

@@ -31,6 +31,7 @@ import {
   CalendarCheck2,
   Check,
   Bell,
+  BellRing,
   FileCheck2,
   ExternalLink,
   QrCode,
@@ -97,8 +98,10 @@ import {
   setSavedClientPhone,
 } from '../utils/deviceTrust';
 import {
+  buildPassportUpdateDirectUrl,
   getBrowserNotificationPermission,
   requestAndGetFcmToken,
+  sendPassportExpiryBrowserNotification,
   showBrowserPushNotification,
 } from '../utils/fcmPushService';
 import { playChatNotificationChime } from '../utils/chatStore';
@@ -143,6 +146,7 @@ interface TravelerWorkspaceScreenProps {
   sessionMeta?: TravelerSessionMeta | null;
   subTab: TravelerSubTab;
   onChangeSubTab: (tab: TravelerSubTab) => void;
+  passportFocusNonce?: number;
   draft: TravelerProfileDraft;
   onUpdateDraft: (updater: (prev: TravelerProfileDraft) => TravelerProfileDraft) => void;
   onResetDraft: () => void;
@@ -164,6 +168,7 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   activeTraveler,
   subTab,
   onChangeSubTab,
+  passportFocusNonce,
   draft,
   onUpdateDraft,
   onResetDraft,
@@ -183,6 +188,25 @@ export const TravelerWorkspaceScreen: React.FC<TravelerWorkspaceScreenProps> = (
   const siteConfig = useSiteConfig();
   const BackArrow = isAr ? ArrowRight : ArrowLeft;
   const initialSavedPhone = !activeTraveler && !pendingOtpPhone && !pendingPostAuthFlow ? getSavedClientPhone() : '';
+  const passportExpiryInputRef = useRef<HTMLInputElement>(null);
+  const [highlightPassportUpdate, setHighlightPassportUpdate] = useState(false);
+
+  const focusPassportUpdateFields = () => {
+    if (subTab !== 'account') {
+      onChangeSubTab('account');
+    }
+    setHighlightPassportUpdate(true);
+    window.setTimeout(() => {
+      passportExpiryInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      passportExpiryInputRef.current?.focus();
+    }, 120);
+    window.setTimeout(() => setHighlightPassportUpdate(false), 3200);
+  };
+
+  useEffect(() => {
+    if (!passportFocusNonce || !activeTraveler) return;
+    focusPassportUpdateFields();
+  }, [passportFocusNonce, activeTraveler?.phone]);
 
   // Simple Auth Flow (1-Time Activation via OTP / Link / Admin -> Personal 6-Digit PIN + 12h Auto-Lock)
   const [authStage, setAuthStage] = useState<LoggedOutAuthStage>(() =>
@@ -3820,35 +3844,81 @@ Please advise on the next steps for my application.`
         {/* Passport 6-Month Validity Warning Banner - ONLY when passportExpiryDate is present */}
         {(draft.passportExpiryDate || activeTraveler.passportExpiryDate) &&
           evaluatePassportValidity(draft.passportExpiryDate || activeTraveler.passportExpiryDate)
-            .isUnderSixMonths && (
-          <div className="p-3.5 rounded-2xl border-2 border-red-300 bg-red-50 text-xs sm:text-sm font-black text-red-800 flex items-start gap-2.5 shadow-xs">
-            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-            <div>
-              <span>
-                {t(
-                  'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
-                  'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
-                )}
-              </span>
-              {(() => {
-                const ev = evaluatePassportValidity(
-                  draft.passportExpiryDate || activeTraveler.passportExpiryDate
-                );
-                if (ev.remainingDays === null) return null;
-                return (
-                  <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
-                    {ev.remainingDays <= 0
-                      ? t('جواز السفر منتهي الصلاحية حالياً.', 'Your passport is currently expired.')
-                      : t(
-                          `المتبقي على انتهاء الجواز: ${ev.remainingDays} يوماً فقط.`,
-                          `Remaining passport validity: ${ev.remainingDays} days.`
-                        )}
-                  </span>
-                );
-              })()}
-            </div>
-          </div>
-        )}
+            .isUnderSixMonths && (() => {
+            const ev = evaluatePassportValidity(
+              draft.passportExpiryDate || activeTraveler.passportExpiryDate
+            );
+            const directPassportUrl = buildPassportUpdateDirectUrl('client', activeTraveler.phone);
+            return (
+              <div className="p-3.5 rounded-2xl border-2 border-red-300 bg-red-50 text-xs sm:text-sm font-black text-red-800 flex flex-wrap items-start justify-between gap-3 shadow-xs">
+                <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                  <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span>
+                      {t(
+                        'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                        'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
+                      )}
+                    </span>
+                    {ev.remainingDays !== null && (
+                      <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                        {ev.remainingDays <= 0
+                          ? t('جواز السفر منتهي الصلاحية حالياً.', 'Your passport is currently expired.')
+                          : t(
+                              `المتبقي على انتهاء الجواز: ${ev.remainingDays} يوماً فقط.`,
+                              `Remaining passport validity: ${ev.remainingDays} days.`
+                            )}
+                      </span>
+                    )}
+                    <span className="block text-[10.5px] font-medium text-red-700/90 mt-1 break-all" dir="ltr">
+                      {directPassportUrl}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={focusPassportUpdateFields}
+                    className="px-3 py-1.5 rounded-xl bg-red-700 hover:bg-red-800 text-white text-[11px] font-black transition cursor-pointer shadow-xs"
+                  >
+                    {t('تحديث بيانات الجواز الآن', 'Update Passport Now')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const perm = getBrowserNotificationPermission();
+                      if (perm !== 'granted') {
+                        const res = await requestAndGetFcmToken(siteConfig.fcmVapidKey);
+                        setClientBellPermission(res.permission);
+                        if (!res.ok) return;
+                      }
+                      const clientName =
+                        getTravelerDisplayNames(activeTraveler).fullDisplayName ||
+                        activeTraveler.phone;
+                      await sendPassportExpiryBrowserNotification({
+                        role: 'client',
+                        phone: activeTraveler.phone,
+                        clientName,
+                        expiryDate: ev.expiryDate,
+                        remainingDays: ev.remainingDays,
+                        lang,
+                        force: true,
+                      });
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-red-100 border border-red-300 text-red-900 text-[11px] font-black transition cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <BellRing className="w-3.5 h-3.5 text-red-600" />
+                    <span>
+                      {clientBellPermission === 'granted'
+                        ? t('إرسال تنبيه متصفح', 'Send Browser Alert')
+                        : t('تفعيل تنبيه المتصفح', 'Enable Browser Alert')}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
 
         {/* Saudi Visa Application Validity Banner */}
         {(() => {
@@ -4540,11 +4610,17 @@ Please advise on the next steps for my application.`
                     />
                   </div>
 
-                  <div>
+                  <div
+                    id="passport-update-section"
+                    className={`rounded-xl transition ${
+                      highlightPassportUpdate ? 'ring-2 ring-red-500 ring-offset-2 p-1.5 bg-red-50/40' : ''
+                    }`}
+                  >
                     <label className="block font-bold text-[#0F2438] mb-1.5">
                       {t('تاريخ انتهاء جواز السفر', 'Passport Expiry Date')}
                     </label>
                     <input
+                      ref={passportExpiryInputRef}
                       type="date"
                       value={draft.passportExpiryDate}
                       onChange={(e) =>
@@ -4555,6 +4631,25 @@ Please advise on the next steps for my application.`
                         }))
                       }
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] tabular-nums focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0F2438] mb-1.5">
+                      {t('المدينة / المحافظة', 'City / Governorate')}
+                    </label>
+                    <input
+                      type="text"
+                      value={draft.city}
+                      onChange={(e) =>
+                        onUpdateDraft((prev) => ({
+                          ...prev,
+                          city: e.target.value,
+                          isDirty: true,
+                        }))
+                      }
+                      placeholder={t('مثال: القاهرة / الدقهلية / الرياض', 'e.g. Cairo / Dakahlia / Riyadh')}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-[#0F2438] placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
                     />
                   </div>
 

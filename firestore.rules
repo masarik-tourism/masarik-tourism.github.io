@@ -43,6 +43,7 @@ service cloud.firestore {
         'phoneNormalized',
         'orderCode',
         'accountType',
+        'clientTier',
         'companyName',
         'contactPersonName',
         'isOnline',
@@ -84,6 +85,7 @@ service cloud.firestore {
         'passportIssueDate',
         'passportExpiryDate',
         'nationality',
+        'city',
         'visaDocumentNumber',
         'saudiSponsorId',
         'sponsorName',
@@ -103,7 +105,10 @@ service cloud.firestore {
         'fcmToken',
         'fcmTokens',
         'fcmUpdatedAt',
-        'pushNotificationsEnabled'
+        'pushNotificationsEnabled',
+        'completedBy',
+        'completedAt',
+        'orderAuditLog'
       ])
       && data.phone is string
       && data.phone == phoneId
@@ -112,6 +117,7 @@ service cloud.firestore {
       && (!('phoneNormalized' in data) || (data.phoneNormalized.size() >= 8 && data.phoneNormalized.matches('^[0-9]{8,20}$') && data.phoneNormalized == phoneId))
       && isOptionalString(data, 'orderCode', 32)
       && (!('accountType' in data) || (data.accountType is string && data.accountType in ['individual', 'b2b_partner']))
+      && (!('clientTier' in data) || (data.clientTier is string && data.clientTier in ['vip', 'new', 'delayed']))
       && isOptionalString(data, 'companyName', 160)
       && isOptionalString(data, 'contactPersonName', 120)
       && (!('isOnline' in data) || data.isOnline is bool)
@@ -164,6 +170,7 @@ service cloud.firestore {
       && isOptionalString(data, 'passportIssueDate', 32)
       && isOptionalString(data, 'passportExpiryDate', 32)
       && isOptionalString(data, 'nationality', 100)
+      && isOptionalString(data, 'city', 100)
       && isOptionalString(data, 'visaDocumentNumber', 64)
       && isOptionalString(data, 'saudiSponsorId', 64)
       && isOptionalString(data, 'sponsorName', 200)
@@ -417,6 +424,9 @@ service cloud.firestore {
             'appointmentTime',
             'location',
             'referenceNumber',
+            'notes',
+            'reminder24hSentAt',
+            'autoReminderEnabled',
             'updatedAt'
           ])
           && data.appointmentDetails.serviceType is string
@@ -427,6 +437,9 @@ service cloud.firestore {
           && data.appointmentDetails.appointmentTime.size() <= 40
           && isOptionalString(data.appointmentDetails, 'location', 200)
           && isOptionalString(data.appointmentDetails, 'referenceNumber', 80)
+          && isOptionalString(data.appointmentDetails, 'notes', 500)
+          && isOptionalString(data.appointmentDetails, 'reminder24hSentAt', 64)
+          && (!('autoReminderEnabled' in data.appointmentDetails) || data.appointmentDetails.autoReminderEnabled is bool)
           && isOptionalString(data.appointmentDetails, 'updatedAt', 64)
         )
       )
@@ -471,7 +484,30 @@ service cloud.firestore {
         )
       )
       && isOptionalString(data, 'fcmUpdatedAt', 64)
-      && (!('pushNotificationsEnabled' in data) || data.pushNotificationsEnabled is bool);
+      && (!('pushNotificationsEnabled' in data) || data.pushNotificationsEnabled is bool)
+      && isOptionalString(data, 'completedBy', 120)
+      && isOptionalString(data, 'completedAt', 64)
+      && (
+        !('orderAuditLog' in data)
+        || (
+          data.orderAuditLog is list
+          && data.orderAuditLog.size() <= 30
+          && (
+            data.orderAuditLog.size() == 0
+            || (
+              data.orderAuditLog[0] is map
+              && data.orderAuditLog[0].id is string
+              && data.orderAuditLog[0].id.size() <= 80
+              && data.orderAuditLog[0].action is string
+              && data.orderAuditLog[0].action in ['order_opened', 'stage_updated', 'order_completed', 'deliverable_issued', 'account_verified']
+              && data.orderAuditLog[0].actorName is string
+              && data.orderAuditLog[0].actorName.size() <= 120
+              && data.orderAuditLog[0].timestamp is string
+              && data.orderAuditLog[0].timestamp.size() <= 64
+            )
+          )
+        )
+      );
     }
 
     // Validation Blueprint: SiteGeneralConfig (/site_config/general)
@@ -559,6 +595,33 @@ service cloud.firestore {
       && data.customItems.size() <= 100
       && (data.customItems.size() == 0 || (data.customItems[0] is map && data.customItems[0].id is string && data.customItems[0].id.size() <= 80))
       && isOptionalString(data, 'updatedAt', 64);
+    }
+
+    // Validation Blueprint: QuickRepliesConfig (/site_config/quick_replies)
+    function isValidQuickRepliesConfig(data) {
+      return data.keys().hasAll(['templates', 'updatedAt'])
+      && data.keys().hasOnly(['templates', 'updatedBy', 'updatedAt'])
+      && data.templates is list
+      && data.templates.size() <= 60
+      && (
+        data.templates.size() == 0
+        || (
+          data.templates[0] is map
+          && data.templates[0].id is string
+          && data.templates[0].id.size() >= 1
+          && data.templates[0].id.size() <= 80
+          && data.templates[0].title is string
+          && data.templates[0].title.size() <= 80
+          && data.templates[0].text is string
+          && data.templates[0].text.size() >= 1
+          && data.templates[0].text.size() <= 2000
+          && data.templates[0].category is string
+          && data.templates[0].category in ['general', 'documents', 'visas', 'appointments', 'payment']
+        )
+      )
+      && isOptionalString(data, 'updatedBy', 120)
+      && data.updatedAt is string
+      && data.updatedAt.size() <= 64;
     }
 
     // Validation Blueprint: AdminAccount (/admins/{adminId})
@@ -672,11 +735,12 @@ service cloud.firestore {
 
     // Public Site Configuration & Live Inline CMS
     match /site_config/{configId} {
-      allow get: if configId in ['general', 'cms'];
+      allow get: if configId in ['general', 'cms', 'quick_replies'];
       allow list: if resource.data.updatedAt is string;
       allow create, update: if (
         (configId == 'general' && isValidSiteGeneral(incoming()))
         || (configId == 'cms' && isValidSiteCms(incoming()))
+        || (configId == 'quick_replies' && isValidQuickRepliesConfig(incoming()))
       );
       allow delete: if false;
     }

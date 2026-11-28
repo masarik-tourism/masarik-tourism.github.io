@@ -15,23 +15,34 @@ import {
   Zap,
   MessageSquare,
   Trash2,
+  Settings2,
+  Plus,
+  Edit3,
+  RotateCcw,
+  BookmarkCheck,
 } from 'lucide-react';
 import {
   AccountType,
   ChatMessage,
+  ChatQuickReplyTemplate,
   ChatSenderRole,
+  QuickReplyCategory,
 } from '../types/travel';
 import {
-  ADMIN_CHAT_QUICK_REPLIES,
   clearAdminChatHistoryCloud,
   clearLocalChatCache,
+  deleteQuickReplyTemplateCloud,
   getLocalAdminClearedAt,
   markChatThreadReadCloud,
   permanentlyDeleteChatHistoryCloud,
   playChatNotificationChime,
+  resetQuickReplyTemplatesToDefaultsCloud,
+  resolveQuickReplyTextPlaceholders,
   sendChatMessageCloud,
   subscribeChatMessages,
   subscribeChatThread,
+  upsertQuickReplyTemplateCloud,
+  useQuickReplyTemplates,
 } from '../utils/chatStore';
 import {
   downloadCloudFile,
@@ -54,6 +65,7 @@ interface DirectChatPanelProps {
   senderName: string;
   clientName?: string;
   companyName?: string;
+  orderCode?: string;
   onInspectImage?: (url: string, title: string) => void;
   compactHeight?: boolean;
 }
@@ -71,10 +83,11 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
   senderName,
   clientName,
   companyName,
+  orderCode,
   onInspectImage,
   compactHeight = false,
 }) => {
-  const { lang, t } = useLanguage();
+  const { lang, dir, t } = useLanguage();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [text, setText] = useState('');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -85,6 +98,21 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
   const [showClearModal, setShowClearModal] = useState(false);
   const [clearingAction, setClearingAction] = useState(false);
   const [clearFeedback, setClearFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Admin Quick Reply Templates state
+  const quickReplyTemplates = useQuickReplyTemplates();
+  const [quickReplySendMode, setQuickReplySendMode] = useState<'instant' | 'insert'>('instant');
+  const [quickReplyCategoryFilter, setQuickReplyCategoryFilter] = useState<
+    'all' | QuickReplyCategory
+  >('all');
+  const [showTemplatesModal, setShowTemplatesModal] = useState(false);
+  const [tplSearch, setTplSearch] = useState('');
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
+  const [tplTitleDraft, setTplTitleDraft] = useState('');
+  const [tplCategoryDraft, setTplCategoryDraft] = useState<QuickReplyCategory>('general');
+  const [tplTextDraft, setTplTextDraft] = useState('');
+  const [isSavingTemplate, setIsSavingTemplate] = useState(false);
+  const [tplFeedback, setTplFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -287,6 +315,127 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
       setLightboxImage({ url, title });
     }
   };
+
+  const quickReplyCategories: { id: QuickReplyCategory; labelAr: string; labelEn: string }[] = [
+    { id: 'general', labelAr: 'عام', labelEn: 'General' },
+    { id: 'order_stages', labelAr: 'مراحل الطلبات وواتساب', labelEn: 'Order Stages & WA' },
+    { id: 'documents', labelAr: 'المستندات', labelEn: 'Documents' },
+    { id: 'appointments', labelAr: 'المواعيد', labelEn: 'Appointments' },
+    { id: 'visas', labelAr: 'التأشيرات', labelEn: 'Visas' },
+    { id: 'payment', labelAr: 'الدفع', labelEn: 'Payment' },
+  ];
+
+  const getCategoryLabel = (cat: QuickReplyCategory) => {
+    const found = quickReplyCategories.find((c) => c.id === cat);
+    return found ? (lang === 'en' ? found.labelEn : found.labelAr) : t('عام', 'General');
+  };
+
+  const resolveTemplateBody = (tpl: ChatQuickReplyTemplate) =>
+    resolveQuickReplyTextPlaceholders(tpl.text, {
+      clientName: clientName || recipientTitle,
+      orderCode: orderCode || `MSK-${phone.slice(-6)}`,
+    });
+
+  const handleUseQuickReplyTemplate = (
+    tpl: ChatQuickReplyTemplate,
+    forcedMode?: 'instant' | 'insert'
+  ) => {
+    const resolved = resolveTemplateBody(tpl);
+    const mode = forcedMode || quickReplySendMode;
+    if (mode === 'insert') {
+      setText((prev) => (prev.trim() ? `${prev.trim()}\n${resolved}` : resolved));
+      setShowTemplatesModal(false);
+      return;
+    }
+    setShowTemplatesModal(false);
+    void handleSend(resolved, 'quick_reply');
+  };
+
+  const handleStartNewTemplate = () => {
+    setEditingTemplateId(null);
+    setTplTitleDraft('');
+    setTplCategoryDraft('general');
+    setTplTextDraft('');
+    setTplFeedback(null);
+  };
+
+  const handleStartEditTemplate = (tpl: ChatQuickReplyTemplate) => {
+    setEditingTemplateId(tpl.id);
+    setTplTitleDraft(tpl.title);
+    setTplCategoryDraft(tpl.category);
+    setTplTextDraft(tpl.text);
+    setTplFeedback(null);
+  };
+
+  const handleSaveTemplate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tplTextDraft.trim() || isSavingTemplate) return;
+    setIsSavingTemplate(true);
+    setTplFeedback(null);
+    try {
+      const res = await upsertQuickReplyTemplateCloud({
+        id: editingTemplateId || undefined,
+        title: tplTitleDraft,
+        text: tplTextDraft,
+        category: tplCategoryDraft,
+        createdBy: senderName,
+      });
+      setTplFeedback({
+        ok: true,
+        text: res.cloudSynced
+          ? t('تم حفظ القالب ومزامنته سحابياً بنجاح ✓', 'Template saved & cloud-synced ✓')
+          : t('تم حفظ القالب محلياً بنجاح ✓', 'Template saved locally ✓'),
+      });
+      handleStartNewTemplate();
+    } finally {
+      setIsSavingTemplate(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (tplId: string) => {
+    if (isSavingTemplate) return;
+    setIsSavingTemplate(true);
+    try {
+      await deleteQuickReplyTemplateCloud(tplId, senderName);
+      if (editingTemplateId === tplId) {
+        handleStartNewTemplate();
+      }
+      setTplFeedback({
+        ok: true,
+        text: t('تم حذف القالب بنجاح.', 'Template deleted.'),
+      });
+    } finally {
+      setIsSavingTemplate(false);
+    }
+  };
+
+  const handleResetTemplates = async () => {
+    if (isSavingTemplate) return;
+    setIsSavingTemplate(true);
+    try {
+      await resetQuickReplyTemplatesToDefaultsCloud(senderName);
+      handleStartNewTemplate();
+      setTplFeedback({
+        ok: true,
+        text: t('تمت استعادة القوالب الافتراضية.', 'Default templates restored.'),
+      });
+    } finally {
+      setIsSavingTemplate(false);
+    }
+  };
+
+  const filteredQuickReplyBarTemplates = quickReplyTemplates.filter((tpl) =>
+    quickReplyCategoryFilter === 'all' ? true : tpl.category === quickReplyCategoryFilter
+  );
+
+  const filteredModalTemplates = quickReplyTemplates.filter((tpl) => {
+    if (quickReplyCategoryFilter !== 'all' && tpl.category !== quickReplyCategoryFilter) {
+      return false;
+    }
+    const q = tplSearch.trim().toLowerCase();
+    if (!q) return true;
+    return `${tpl.title} ${tpl.text}`.toLowerCase().includes(q);
+  });
 
   const formatTime = (iso?: string) => {
     if (!iso) return '';
@@ -666,24 +815,93 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Admin Quick-Reply Buttons directly above composer */}
+      {/* Admin Quick-Reply Templates Bar directly above composer */}
       {senderRole === 'admin' && (
-        <div className="bg-slate-50 border-t border-slate-200 px-3 py-2 flex items-center gap-1.5 overflow-x-auto shrink-0">
-          <span className="inline-flex items-center gap-1 text-[10.5px] font-black text-[#0F2438] shrink-0 pe-1">
-            <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
-            <span>{t('ردود سريعة:', 'Quick Replies:')}</span>
-          </span>
-          {ADMIN_CHAT_QUICK_REPLIES.map((tpl) => (
-            <button
-              key={tpl}
-              type="button"
-              disabled={isSending}
-              onClick={() => void handleSend(tpl, 'quick_reply')}
-              className="px-2.5 py-1 rounded-full bg-white hover:bg-[#0F2438] hover:text-[#E5C887] text-[#0F2438] border border-slate-300 text-[11px] font-bold transition whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-            >
-              {tpl}
-            </button>
-          ))}
+        <div className="bg-slate-50 border-t border-slate-200 px-3 py-2 space-y-1.5 shrink-0">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-[10.5px] font-black text-[#0F2438]">
+                <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                <span>{t('قوالب الردود السريعة:', 'Quick Reply Templates:')}</span>
+              </span>
+              <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-[10px] font-black">
+                <button
+                  type="button"
+                  onClick={() => setQuickReplySendMode('instant')}
+                  className={`px-2 py-0.5 rounded-md cursor-pointer transition ${
+                    quickReplySendMode === 'instant'
+                      ? 'bg-[#0F2438] text-[#E5C887]'
+                      : 'text-slate-600 hover:text-[#0F2438]'
+                  }`}
+                >
+                  {t('⚡ إرسال فوري', '⚡ 1-Click Send')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickReplySendMode('insert')}
+                  className={`px-2 py-0.5 rounded-md cursor-pointer transition ${
+                    quickReplySendMode === 'insert'
+                      ? 'bg-[#0284C7] text-white'
+                      : 'text-slate-600 hover:text-[#0F2438]'
+                  }`}
+                >
+                  {t('✏️ إدراج للنص', '✏️ Insert Text')}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <select
+                value={quickReplyCategoryFilter}
+                onChange={(e) =>
+                  setQuickReplyCategoryFilter(e.target.value as 'all' | QuickReplyCategory)
+                }
+                aria-label={t('تصنيف القوالب', 'Template category')}
+                className="px-2 py-1 rounded-lg border border-slate-200 bg-white text-[10.5px] font-bold text-[#0F2438]"
+              >
+                <option value="all">{t('كل القوالب', 'All')}</option>
+                {quickReplyCategories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {lang === 'en' ? c.labelEn : c.labelAr}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setTplFeedback(null);
+                  setShowTemplatesModal(true);
+                }}
+                className="px-2.5 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[10.5px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+              >
+                <Settings2 className="w-3 h-3" />
+                <span>{t('إدارة وحفظ القوالب', 'Manage Templates')}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            {filteredQuickReplyBarTemplates.length === 0 ? (
+              <span className="text-[11px] text-slate-500">
+                {t('لا توجد قوالب في هذا التصنيف.', 'No templates in this category.')}
+              </span>
+            ) : (
+              filteredQuickReplyBarTemplates.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  disabled={isSending}
+                  onClick={() => handleUseQuickReplyTemplate(tpl)}
+                  title={resolveTemplateBody(tpl)}
+                  className="px-2.5 py-1 rounded-full bg-white hover:bg-[#0F2438] hover:text-[#E5C887] text-[#0F2438] border border-slate-300 text-[11px] font-bold transition whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+                >
+                  <BookmarkCheck className="w-3 h-3 text-[#C6A052] shrink-0" />
+                  <span>{tpl.title}</span>
+                </button>
+              ))
+            )}
+          </div>
         </div>
       )}
 
@@ -907,6 +1125,245 @@ export const DirectChatPanel: React.FC<DirectChatPanelProps> = ({
                 >
                   {t('إلغاء', 'Cancel')}
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Quick Reply Templates Manager Modal */}
+      {showTemplatesModal && senderRole === 'admin' && (
+        <div
+          className="fixed inset-0 flex items-center justify-center z-50 bg-black/65 backdrop-blur-xs p-3 sm:p-4"
+          dir={dir}
+          onClick={() => setShowTemplatesModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-3xl w-full max-h-[88vh] flex flex-col overflow-hidden shadow-2xl border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-[#0F2438] text-white px-4 py-3.5 flex items-center justify-between gap-2 border-b border-[#C6A052]/40 shrink-0">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4.5 h-4.5 text-[#E5C887]" />
+                <div>
+                  <h4 className="text-sm font-black">
+                    {t('قوالب الردود السريعة للأسئلة الشائعة', 'Quick Reply Templates Manager')}
+                  </h4>
+                  <p className="text-[11px] text-slate-300">
+                    {t(
+                      'احفظ نصوصاً جاهزة وأرسلها بضغطة واحدة للعملاء مع تخصيص الاسم ورقم الطلب تلقائياً.',
+                      'Save reusable answers and send them in one click with auto-filled client variables.'
+                    )}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTemplatesModal(false)}
+                className="p-1.5 rounded-lg hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+              {tplFeedback && (
+                <div
+                  className={`px-3 py-2 rounded-xl text-xs font-bold border ${
+                    tplFeedback.ok
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : 'bg-red-50 border-red-200 text-red-800'
+                  }`}
+                >
+                  {tplFeedback.text}
+                </div>
+              )}
+
+              {/* Create / Edit Template Form */}
+              <form
+                onSubmit={(e) => void handleSaveTemplate(e)}
+                className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-black text-[#0F2438] flex items-center gap-1.5">
+                    {editingTemplateId ? (
+                      <Edit3 className="w-3.5 h-3.5 text-[#0284C7]" />
+                    ) : (
+                      <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                    )}
+                    <span>
+                      {editingTemplateId
+                        ? t('تعديل قالب محفوظ', 'Edit Saved Template')
+                        : t('إضافة قالب رد سريع جديد', 'Add New Quick Reply Template')}
+                    </span>
+                  </span>
+                  {editingTemplateId && (
+                    <button
+                      type="button"
+                      onClick={handleStartNewTemplate}
+                      className="text-[11px] font-bold text-slate-600 hover:text-red-600 cursor-pointer"
+                    >
+                      {t('إلغاء التعديل', 'Cancel Edit')}
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <input
+                    type="text"
+                    value={tplTitleDraft}
+                    onChange={(e) => setTplTitleDraft(e.target.value)}
+                    placeholder={t('عنوان مختصر للقالب (مثال: طلب جواز أوضح)', 'Short template title...')}
+                    className="sm:col-span-2 px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs text-[#0F2438]"
+                  />
+                  <select
+                    value={tplCategoryDraft}
+                    onChange={(e) => setTplCategoryDraft(e.target.value as QuickReplyCategory)}
+                    className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-bold text-[#0F2438]"
+                  >
+                    {quickReplyCategories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {lang === 'en' ? c.labelEn : c.labelAr}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <textarea
+                  rows={3}
+                  required
+                  value={tplTextDraft}
+                  onChange={(e) => setTplTextDraft(e.target.value)}
+                  placeholder={t(
+                    'اكتب نص الرد الجاهز هنا... يمكنك استخدام {clientName} لاسم العميل أو {orderCode} لرقم الطلب',
+                    'Type template text here... You can insert {clientName} or {orderCode}'
+                  )}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm text-[#0F2438]"
+                />
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10.5px]">
+                    <span className="text-slate-500 font-bold">
+                      {t('متغيرات ذكية:', 'Smart variables:')}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setTplTextDraft((prev) => `${prev} {clientName}`.trimStart())}
+                      className="px-2 py-0.5 rounded-lg bg-white border border-slate-300 hover:border-[#0F2438] text-[#0F2438] font-bold cursor-pointer"
+                    >
+                      + {'{clientName}'} ({t('اسم العميل', 'Client Name')})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTplTextDraft((prev) => `${prev} {orderCode}`.trimStart())}
+                      className="px-2 py-0.5 rounded-lg bg-white border border-slate-300 hover:border-[#0F2438] text-[#0F2438] font-bold cursor-pointer"
+                    >
+                      + {'{orderCode}'} ({t('رقم الطلب', 'Order Code')})
+                    </button>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isSavingTemplate || !tplTextDraft.trim()}
+                    className="px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {isSavingTemplate ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <BookmarkCheck className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {editingTemplateId
+                        ? t('حفظ التعديلات', 'Save Changes')
+                        : t('حفظ القالب', 'Save Template')}
+                    </span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Saved Templates List */}
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <input
+                    type="text"
+                    value={tplSearch}
+                    onChange={(e) => setTplSearch(e.target.value)}
+                    placeholder={t('ابحث داخل القوالب المحفوظة...', 'Search saved templates...')}
+                    className="flex-1 min-w-[200px] px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-xs text-[#0F2438]"
+                  />
+                  <button
+                    type="button"
+                    disabled={isSavingTemplate}
+                    onClick={() => void handleResetTemplates()}
+                    className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>{t('استعادة الافتراضية', 'Restore Defaults')}</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {filteredModalTemplates.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500 border border-dashed border-slate-200 rounded-xl">
+                      {t('لا توجد قوالب مطابقة.', 'No matching templates.')}
+                    </div>
+                  ) : (
+                    filteredModalTemplates.map((tpl) => (
+                      <div
+                        key={tpl.id}
+                        className="p-3 rounded-xl border border-slate-200 bg-white hover:border-[#C6A052]/60 transition space-y-2"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-xs font-black text-[#0F2438] truncate">
+                              {tpl.title}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
+                              {getCategoryLabel(tpl.category)}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              disabled={isSending}
+                              onClick={() => handleUseQuickReplyTemplate(tpl, 'instant')}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-black cursor-pointer disabled:opacity-50"
+                            >
+                              {t('⚡ إرسال فوري', '⚡ Send Now')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleUseQuickReplyTemplate(tpl, 'insert')}
+                              className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-900 text-[10.5px] font-black cursor-pointer"
+                            >
+                              {t('✏️ إدراج', '✏️ Insert')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditTemplate(tpl)}
+                              className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] cursor-pointer"
+                              title={t('تعديل', 'Edit')}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isSavingTemplate}
+                              onClick={() => void handleDeleteTemplate(tpl.id)}
+                              className="p-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 cursor-pointer disabled:opacity-50"
+                              title={t('حذف', 'Delete')}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">
+                          {tpl.text}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </div>
           </div>

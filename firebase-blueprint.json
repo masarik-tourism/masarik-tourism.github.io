@@ -29,6 +29,11 @@
           "description": "Account classification separating individuals from corporate B2B partners.",
           "enum": ["individual", "b2b_partner"]
         },
+        "clientTier": {
+          "type": "string",
+          "description": "Admin-assigned client priority classification (VIP, New, or Delayed).",
+          "enum": ["vip", "new", "delayed"]
+        },
         "companyName": {
           "type": "string",
           "description": "Registered company or agency name for B2B Partner accounts.",
@@ -240,6 +245,11 @@
           "description": "Traveler nationality.",
           "maxLength": 100
         },
+        "city": {
+          "type": "string",
+          "description": "Traveler residence city or governorate.",
+          "maxLength": 100
+        },
         "visaDocumentNumber": {
           "type": "string",
           "description": "Extracted Saudi visa or visit invitation document number.",
@@ -291,7 +301,7 @@
         },
         "documents": {
           "type": "array",
-          "description": "Bounded list (max 30) of uploaded document metadata with Google Drive download & view URLs."
+          "description": "Bounded list (max 30) of uploaded document metadata with Google Drive URLs, reviewer name (lastReviewedBy), uploader name (uploadedBy), and chronological auditLog history."
         },
         "familyMembers": {
           "type": "array",
@@ -307,7 +317,7 @@
         },
         "appointmentDetails": {
           "type": "object",
-          "description": "Structured booked appointment metadata (serviceType, date, time, location, referenceNumber) used for the client's high-contrast Appointment QR Pass."
+          "description": "Structured booked appointment metadata (serviceType, date, time, location, referenceNumber, notes, reminder24hSentAt, autoReminderEnabled) used for Tasheer / GAMCA appointment scheduling and client's high-contrast Appointment QR Pass."
         },
         "b2cVisa": {
           "type": "object",
@@ -330,6 +340,20 @@
         "pushNotificationsEnabled": {
           "type": "boolean",
           "description": "Whether the client has granted push notification permission on their device."
+        },
+        "completedBy": {
+          "type": "string",
+          "description": "Display name of the execution manager or sub-admin who completed or delivered the order.",
+          "maxLength": 120
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the client order reached completion.",
+          "maxLength": 64
+        },
+        "orderAuditLog": {
+          "type": "array",
+          "description": "Bounded chronological audit trail (max 30) recording execution staff order lifecycle actions."
         }
       },
       "required": [
@@ -451,6 +475,29 @@
         "textOverrides",
         "deletedKeys",
         "customItems"
+      ]
+    },
+    "QuickRepliesConfig": {
+      "title": "Admin Live Chat Quick Reply Templates",
+      "description": "Saved canned responses and templates (site_config/quick_replies) used by managers for 1-click replies in Live Chat.",
+      "type": "object",
+      "properties": {
+        "templates": {
+          "type": "array",
+          "description": "Bounded list (max 60) of saved Quick Reply template objects."
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "templates",
+        "updatedAt"
       ]
     },
     "AdminAccount": {
@@ -798,7 +845,7 @@
     },
     "/site_config/{configId}": {
       "schema": { "$ref": "#/entities/SiteGeneralConfig" },
-      "description": "Public site configuration documents ('general' for SiteGeneralConfig, 'cms' for SiteCmsState)."
+      "description": "Public site configuration documents ('general' for SiteGeneralConfig, 'cms' for SiteCmsState, 'quick_replies' for QuickRepliesConfig)."
     },
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminAccount" },

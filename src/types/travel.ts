@@ -84,7 +84,47 @@ export interface ClientNotification {
 
 export type AccountType = 'individual' | 'b2b_partner';
 
+export type ClientPriorityTier = 'vip' | 'new' | 'delayed';
+
 export type DocumentReviewStatus = 'pending_completion' | 'received' | 'completed';
+
+export type DocumentAuditAction =
+  | 'uploaded'
+  | 'replaced'
+  | 'received'
+  | 'approved'
+  | 'rejected'
+  | 'note_updated';
+
+export interface DocumentAuditEntry {
+  id: string;
+  action: DocumentAuditAction;
+  status?: DocumentReviewStatus;
+  statusLabelAr: string;
+  statusLabelEn: string;
+  actorName: string;
+  actorRole: 'client' | 'admin' | 'system';
+  note?: string;
+  timestamp: string;
+}
+
+export type OrderAuditAction =
+  | 'order_opened'
+  | 'stage_updated'
+  | 'order_completed'
+  | 'deliverable_issued'
+  | 'account_verified';
+
+export interface OrderAuditEntry {
+  id: string;
+  action: OrderAuditAction;
+  fromStatus?: VisaOrderStatus;
+  toStatus?: VisaOrderStatus;
+  actorName: string;
+  actorId?: string;
+  note?: string;
+  timestamp: string;
+}
 
 export interface TravelerDocument {
   id: string;
@@ -96,9 +136,12 @@ export interface TravelerDocument {
   storagePath?: string;
   sizeBytes?: number;
   uploadedAt: string;
+  uploadedBy?: string;
+  lastReviewedBy?: string;
   status?: DocumentReviewStatus;
   statusNote?: string;
   statusUpdatedAt?: string;
+  auditLog?: DocumentAuditEntry[];
 }
 
 export interface AppointmentDetails {
@@ -107,6 +150,9 @@ export interface AppointmentDetails {
   appointmentTime: string;
   location?: string;
   referenceNumber?: string;
+  notes?: string;
+  reminder24hSentAt?: string;
+  autoReminderEnabled?: boolean;
   updatedAt?: string;
 }
 
@@ -223,6 +269,7 @@ export interface TravelerProfile {
   phoneNormalized?: string;
   orderCode?: string;
   accountType?: AccountType;
+  clientTier?: ClientPriorityTier;
   companyName?: string;
   contactPersonName?: string;
   firstName?: string;
@@ -253,6 +300,9 @@ export interface TravelerProfile {
   updatedAt?: string;
   orderStatus: VisaOrderStatus;
   hasActiveOrder?: boolean;
+  completedBy?: string;
+  completedAt?: string;
+  orderAuditLog?: OrderAuditEntry[];
   adminNotes?: string;
   adminPrivateNotes?: string;
   preferredVisaType?: string;
@@ -264,6 +314,7 @@ export interface TravelerProfile {
   passportIssueDate?: string;
   passportExpiryDate?: string;
   nationality?: string;
+  city?: string;
   visaDocumentNumber?: string;
   saudiSponsorId?: string;
   sponsorName?: string;
@@ -348,6 +399,25 @@ export interface ChatMessage {
   readByAdmin: boolean;
   readByClient: boolean;
   createdAt: string;
+}
+
+export type QuickReplyCategory =
+  | 'general'
+  | 'documents'
+  | 'visas'
+  | 'appointments'
+  | 'payment'
+  | 'order_stages';
+
+export interface ChatQuickReplyTemplate {
+  id: string;
+  title: string;
+  text: string;
+  category: QuickReplyCategory;
+  orderStatusTrigger?: VisaOrderStatus | 'all_stages';
+  createdAt: string;
+  updatedAt?: string;
+  createdBy?: string;
 }
 
 export interface ChatThreadSummary {

@@ -23,10 +23,14 @@ import {
   B2cVisaType,
   CanonicalVisaOrderStatus,
   ClientNotification,
+  ClientPriorityTier,
+  DocumentAuditEntry,
   DocumentReviewStatus,
   FamilyMember,
   FamilyRelationship,
   IssuedDocument,
+  OrderAuditAction,
+  OrderAuditEntry,
   PendingDeviceRequest,
   PendingLoginRequest,
   PublicOrderStatusSummary,
@@ -38,6 +42,7 @@ import {
   VisaOrderStatus,
 } from '../types/travel';
 import { calculateExpectedExitDate } from './b2cVisaHelpers';
+import { createDocumentAuditEntry } from './documentAuditHelpers';
 import {
   TravelRepository,
   normalizeOrderStatusValue,
@@ -265,6 +270,7 @@ export interface TravelerProfileDraft {
   passportIssueDate: string;
   passportExpiryDate: string;
   nationality: string;
+  city: string;
   preferredVisaType: string;
   visaDocumentNumber: string;
   saudiSponsorId: string;
@@ -492,28 +498,57 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     'مسافر';
 
   const safeDocs = Array.isArray(profile.documents)
-    ? profile.documents.slice(0, 30).map((d) => ({
-        id: String(d.id || `${Date.now()}`).slice(0, 80),
-        label: String(d.label || 'مستند مسافر').slice(0, 160),
-        docType: d.docType || 'other',
-        fileName: String(d.fileName || 'document.jpg').slice(0, 200),
-        // Never push multi-KB raw base64 blobs into Firestore; store Storage/Drive URLs only
-        dataUrl: d.dataUrl && d.dataUrl.length <= 4096 ? d.dataUrl : '',
-        ...(d.viewUrl && d.viewUrl.length <= 4096 ? { viewUrl: String(d.viewUrl) } : {}),
-        ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
-        ...(typeof d.sizeBytes === 'number'
-          ? { sizeBytes: Math.max(0, Math.round(d.sizeBytes)) }
-          : {}),
-        uploadedAt: String(d.uploadedAt || new Date().toISOString()).slice(0, 64),
-        ...(d.status &&
-        ['pending_completion', 'received', 'completed'].includes(d.status)
-          ? { status: d.status }
-          : {}),
-        ...(d.statusNote ? { statusNote: String(d.statusNote).trim().slice(0, 300) } : {}),
-        ...(d.statusUpdatedAt
-          ? { statusUpdatedAt: String(d.statusUpdatedAt).slice(0, 64) }
-          : {}),
-      }))
+    ? profile.documents.slice(0, 30).map((d) => {
+        const sanitizedAudit: DocumentAuditEntry[] | undefined = Array.isArray(d.auditLog)
+          ? d.auditLog
+              .filter((e) => e && typeof e === 'object')
+              .slice(0, 25)
+              .map((e, idx) => ({
+                id: String(e.id || `aud-${idx}-${Date.now()}`).slice(0, 80),
+                action: e.action || 'uploaded',
+                ...(e.status && ['pending_completion', 'received', 'completed'].includes(e.status)
+                  ? { status: e.status }
+                  : {}),
+                statusLabelAr: String(e.statusLabelAr || '').slice(0, 120),
+                statusLabelEn: String(e.statusLabelEn || '').slice(0, 120),
+                actorName: String(e.actorName || '').slice(0, 120),
+                actorRole:
+                  e.actorRole === 'admin' || e.actorRole === 'system' ? e.actorRole : 'client',
+                ...(e.note ? { note: String(e.note).trim().slice(0, 300) } : {}),
+                timestamp: String(e.timestamp || d.uploadedAt || new Date().toISOString()).slice(
+                  0,
+                  64
+                ),
+              }))
+          : undefined;
+        return {
+          id: String(d.id || `${Date.now()}`).slice(0, 80),
+          label: String(d.label || 'مستند مسافر').slice(0, 160),
+          docType: d.docType || 'other',
+          fileName: String(d.fileName || 'document.jpg').slice(0, 200),
+          // Never push multi-KB raw base64 blobs into Firestore; store Storage/Drive URLs only
+          dataUrl: d.dataUrl && d.dataUrl.length <= 4096 ? d.dataUrl : '',
+          ...(d.viewUrl && d.viewUrl.length <= 4096 ? { viewUrl: String(d.viewUrl) } : {}),
+          ...(d.storagePath ? { storagePath: String(d.storagePath).slice(0, 300) } : {}),
+          ...(typeof d.sizeBytes === 'number'
+            ? { sizeBytes: Math.max(0, Math.round(d.sizeBytes)) }
+            : {}),
+          uploadedAt: String(d.uploadedAt || new Date().toISOString()).slice(0, 64),
+          ...(d.uploadedBy ? { uploadedBy: String(d.uploadedBy).trim().slice(0, 120) } : {}),
+          ...(d.lastReviewedBy
+            ? { lastReviewedBy: String(d.lastReviewedBy).trim().slice(0, 120) }
+            : {}),
+          ...(d.status &&
+          ['pending_completion', 'received', 'completed'].includes(d.status)
+            ? { status: d.status }
+            : {}),
+          ...(d.statusNote ? { statusNote: String(d.statusNote).trim().slice(0, 300) } : {}),
+          ...(d.statusUpdatedAt
+            ? { statusUpdatedAt: String(d.statusUpdatedAt).slice(0, 64) }
+            : {}),
+          ...(sanitizedAudit && sanitizedAudit.length > 0 ? { auditLog: sanitizedAudit } : {}),
+        };
+      })
     : [];
 
   const validRelations = new Set<FamilyRelationship>(FAMILY_RELATIONSHIPS);
@@ -727,11 +762,34 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
         }))
     : [];
 
+  const safeOrderAuditLog: OrderAuditEntry[] = Array.isArray(profile.orderAuditLog)
+    ? profile.orderAuditLog
+        .filter((e) => e && typeof e === 'object' && typeof e.actorName === 'string')
+        .slice(0, 30)
+        .map((e, idx) => ({
+          id: String(e.id || `oaud-${idx}-${Date.now()}`).slice(0, 80),
+          action: (['order_opened', 'stage_updated', 'order_completed', 'deliverable_issued', 'account_verified'].includes(
+            e.action
+          )
+            ? e.action
+            : 'stage_updated') as OrderAuditAction,
+          ...(e.fromStatus ? { fromStatus: e.fromStatus } : {}),
+          ...(e.toStatus ? { toStatus: e.toStatus } : {}),
+          actorName: String(e.actorName || 'المدير العام').trim().slice(0, 120),
+          ...(e.actorId ? { actorId: String(e.actorId).trim().slice(0, 64) } : {}),
+          ...(e.note ? { note: String(e.note).trim().slice(0, 300) } : {}),
+          timestamp: String(e.timestamp || new Date().toISOString()).slice(0, 64),
+        }))
+    : [];
+
   const payload: Record<string, unknown> = {
     phone: normalized,
     phoneNormalized: normalized,
     orderCode: String(profile.orderCode || buildOrderCodeFromPhone(normalized)).slice(0, 40),
     accountType: profile.accountType === 'b2b_partner' ? 'b2b_partner' : 'individual',
+    ...(profile.clientTier && ['vip', 'new', 'delayed'].includes(profile.clientTier)
+      ? { clientTier: profile.clientTier }
+      : {}),
     ...(profile.companyName
       ? { companyName: String(profile.companyName).trim().slice(0, 160) }
       : {}),
@@ -765,6 +823,13 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     updatedAt: new Date().toISOString(),
     orderStatus: safeStatus,
     hasActiveOrder: hasActive,
+    ...(profile.completedBy
+      ? { completedBy: String(profile.completedBy).trim().slice(0, 120) }
+      : {}),
+    ...(profile.completedAt
+      ? { completedAt: String(profile.completedAt).slice(0, 64) }
+      : {}),
+    ...(safeOrderAuditLog.length > 0 ? { orderAuditLog: safeOrderAuditLog } : {}),
     documents: safeDocs,
     familyMembers: safeFamilyMembers,
     trustedDevices: validDevices,
@@ -810,6 +875,8 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
     payload.passportExpiryDate = String(profile.passportExpiryDate).slice(0, 32);
   if (profile.nationality !== undefined)
     payload.nationality = String(profile.nationality).slice(0, 100);
+  if (profile.city !== undefined)
+    payload.city = String(profile.city).trim().slice(0, 100);
   if (profile.visaDocumentNumber !== undefined)
     payload.visaDocumentNumber = String(profile.visaDocumentNumber).trim().slice(0, 64);
   if (profile.saudiSponsorId !== undefined)
@@ -866,6 +933,13 @@ function sanitizeClientForFirestore(profile: TravelerProfile): Record<string, un
         appointmentTime: aTime,
         ...(aLoc ? { location: aLoc } : {}),
         ...(aRef ? { referenceNumber: aRef } : {}),
+        ...(appt.notes ? { notes: String(appt.notes).trim().slice(0, 500) } : {}),
+        ...(appt.reminder24hSentAt
+          ? { reminder24hSentAt: String(appt.reminder24hSentAt).trim().slice(0, 64) }
+          : {}),
+        ...(typeof appt.autoReminderEnabled === 'boolean'
+          ? { autoReminderEnabled: appt.autoReminderEnabled }
+          : {}),
         updatedAt: String(appt.updatedAt || new Date().toISOString()).slice(0, 64),
       };
       payload.appointmentDetails = cleanAppt;
@@ -996,6 +1070,12 @@ function mergeCloudClientWithLocal(
       cloudData.accountType === 'b2b_partner' || localExisting?.accountType === 'b2b_partner'
         ? cloudData.accountType || localExisting?.accountType || 'individual'
         : 'individual',
+    clientTier:
+      cloudData.clientTier === 'vip' ||
+      cloudData.clientTier === 'new' ||
+      cloudData.clientTier === 'delayed'
+        ? cloudData.clientTier
+        : undefined,
     companyName: cloudData.companyName ?? localExisting?.companyName,
     contactPersonName: cloudData.contactPersonName ?? localExisting?.contactPersonName,
     isOnline:
@@ -1048,6 +1128,7 @@ function mergeCloudClientWithLocal(
     birthDate: cloudData.birthDate ?? localExisting?.birthDate,
     passportIssueDate: cloudData.passportIssueDate ?? localExisting?.passportIssueDate,
     passportExpiryDate: cloudData.passportExpiryDate ?? localExisting?.passportExpiryDate,
+    city: cloudData.city ?? localExisting?.city,
     visaDocumentNumber: cloudData.visaDocumentNumber ?? localExisting?.visaDocumentNumber,
     saudiSponsorId: cloudData.saudiSponsorId ?? localExisting?.saudiSponsorId,
     applicantNameAr: cloudData.applicantNameAr ?? localExisting?.applicantNameAr,
@@ -3880,7 +3961,8 @@ export async function markB2cVisaExitedCloud(
  * Updates Firestore immediately so any waiting client screen transitions straight to PIN Setup / Device Trust.
  */
 export async function adminInstantActivateClientCloud(
-  rawPhone: string
+  rawPhone: string,
+  actorMeta?: { actorName?: string; actorId?: string }
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) return null;
@@ -3909,6 +3991,19 @@ export async function adminInstantActivateClientCloud(
   const nextOtp = generateSixDigitOtp();
   const nextVerifiedAt = existing.verifiedAt || nowIso;
   const nextOtpExpiresAt = new Date(0).toISOString();
+  const cleanActorName = String(actorMeta?.actorName || '').trim().slice(0, 120);
+  const nextOrderAuditLog: OrderAuditEntry[] | undefined = cleanActorName
+    ? [
+        {
+          id: `oaud-ver-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          action: 'account_verified' as const,
+          actorName: cleanActorName,
+          ...(actorMeta?.actorId ? { actorId: actorMeta.actorId.slice(0, 64) } : {}),
+          timestamp: nowIso,
+        },
+        ...(Array.isArray(existing.orderAuditLog) ? existing.orderAuditLog : []),
+      ].slice(0, 30)
+    : existing.orderAuditLog;
   const updated: TravelerProfile = {
     ...existing,
     phone,
@@ -3921,6 +4016,9 @@ export async function adminInstantActivateClientCloud(
     otp: nextOtp,
     otpConsumed: true,
     otpExpiresAt: nextOtpExpiresAt,
+    ...(nextOrderAuditLog && nextOrderAuditLog.length > 0
+      ? { orderAuditLog: nextOrderAuditLog }
+      : {}),
     updatedAt: nowIso,
   };
 
@@ -3938,6 +4036,9 @@ export async function adminInstantActivateClientCloud(
         otp: nextOtp,
         otpConsumed: true,
         otpExpiresAt: nextOtpExpiresAt,
+        ...(nextOrderAuditLog && nextOrderAuditLog.length > 0
+          ? { orderAuditLog: nextOrderAuditLog }
+          : {}),
         updatedAt: nowIso,
       });
     } catch (error) {
@@ -4834,6 +4935,7 @@ export function updateTravelerProfileDetails(
     Pick<
       TravelerProfile,
       | 'accountType'
+      | 'clientTier'
       | 'companyName'
       | 'contactPersonName'
       | 'firstName'
@@ -4850,6 +4952,7 @@ export function updateTravelerProfileDetails(
       | 'passportIssueDate'
       | 'passportExpiryDate'
       | 'nationality'
+      | 'city'
       | 'visaDocumentNumber'
       | 'saudiSponsorId'
       | 'applicantNameAr'
@@ -4868,7 +4971,8 @@ export function updateTravelerProfileDetails(
       | 'notifications'
       | 'appointmentDetails'
     >
-  >
+  >,
+  actorMeta?: { actorName?: string; actorId?: string }
 ): TravelerProfile | null {
   const phone = normalizePhone(rawPhone);
   const all = getAllTravelers();
@@ -4953,10 +5057,51 @@ export function updateTravelerProfileDetails(
     shouldDispatchOrderPush = true;
   }
 
+  const nowIso = new Date().toISOString();
+  const prevStatus = normalizeOrderStatusValue(existing.orderStatus);
+  const nextOrderAuditLog: OrderAuditEntry[] = Array.isArray(existing.orderAuditLog)
+    ? [...existing.orderAuditLog]
+    : [];
+  let nextCompletedBy = existing.completedBy;
+  let nextCompletedAt = existing.completedAt;
+
+  if (
+    cleanUpdates.orderStatus &&
+    nextNormalizedStatus &&
+    nextNormalizedStatus !== 'none' &&
+    nextNormalizedStatus !== prevStatus
+  ) {
+    const cleanActor = String(actorMeta?.actorName || 'المدير العام').trim().slice(0, 120) || 'المدير العام';
+    const isNowCompleted = isClientOrderCompleted({
+      ...existing,
+      orderStatus: nextNormalizedStatus,
+      hasActiveOrder: nextHasActiveOrder ?? true,
+    });
+    const entry: OrderAuditEntry = {
+      id: `oaud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      action: isNowCompleted ? 'order_completed' : 'stage_updated',
+      fromStatus: prevStatus,
+      toStatus: nextNormalizedStatus,
+      actorName: cleanActor,
+      ...(actorMeta?.actorId ? { actorId: actorMeta.actorId.slice(0, 64) } : {}),
+      timestamp: nowIso,
+    };
+    nextOrderAuditLog.unshift(entry);
+    if (isNowCompleted) {
+      nextCompletedBy = cleanActor;
+      nextCompletedAt = nowIso;
+    }
+  }
+
   const updated: TravelerProfile = {
     ...existing,
     ...cleanUpdates,
     ...(nextHasActiveOrder !== undefined ? { hasActiveOrder: nextHasActiveOrder } : {}),
+    ...(nextCompletedBy ? { completedBy: nextCompletedBy } : {}),
+    ...(nextCompletedAt ? { completedAt: nextCompletedAt } : {}),
+    ...(nextOrderAuditLog.length > 0
+      ? { orderAuditLog: nextOrderAuditLog.slice(0, 30) }
+      : {}),
     accountStatus:
       cleanUpdates.verified !== undefined
         ? cleanUpdates.verified
@@ -4971,6 +5116,9 @@ export function updateTravelerProfileDetails(
     lastName: nextLast,
     name: nextCombined,
   };
+  if ('clientTier' in cleanUpdates && !cleanUpdates.clientTier) {
+    delete updated.clientTier;
+  }
   all[phone] = updated;
   saveAllTravelersLocalOnly(all);
   void syncTravelerToCloud(updated);
@@ -4989,12 +5137,62 @@ export function updateTravelerProfileDetails(
 }
 
 /**
+ * Admin Action: Sets or clears a client's priority tier ('vip' | 'new' | 'delayed' | null)
+ * locally and in Firestore for immediate visual prioritization across devices.
+ */
+export async function adminUpdateClientTierCloud(
+  rawPhone: string,
+  tier: ClientPriorityTier | null
+): Promise<TravelerProfile | null> {
+  const phone = normalizePhone(rawPhone);
+  if (!/^[0-9]{8,20}$/.test(phone)) return null;
+
+  const all = getAllTravelers();
+  const existing = all[phone];
+  if (!existing) return null;
+
+  const nowIso = new Date().toISOString();
+  const nextTier =
+    tier === 'vip' || tier === 'new' || tier === 'delayed' ? tier : undefined;
+
+  const updated: TravelerProfile = {
+    ...existing,
+    updatedAt: nowIso,
+  };
+  if (nextTier) {
+    updated.clientTier = nextTier;
+  } else {
+    delete updated.clientTier;
+  }
+
+  all[phone] = updated;
+  saveAllTravelersLocalOnly(all);
+
+  const path = `clients/${phone}`;
+  try {
+    await updateDoc(doc(db, 'clients', phone), {
+      clientTier: nextTier ?? deleteField(),
+      updatedAt: nowIso,
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+    await syncTravelerToCloud(updated);
+  }
+
+  return updated;
+}
+
+/**
  * Activates a real service order on an existing client profile ONLY when they submit a service request,
  * upload execution documents, or when an Admin manually opens an order for the client.
  */
 export async function activateClientOrderCloud(
   rawPhone: string,
-  serviceTitle?: string
+  serviceTitle?: string,
+  actorMeta?: { actorName?: string; actorId?: string }
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
   if (!/^[0-9]{8,20}$/.test(phone)) return null;
@@ -5016,13 +5214,33 @@ export async function activateClientOrderCloud(
   const nextStatus: VisaOrderStatus =
     alreadyActive && currentNorm !== 'none' ? currentNorm : 'تم استلام الطلب';
   const cleanService = (serviceTitle || '').trim().slice(0, 200);
+  const nowIso = new Date().toISOString();
+  const cleanActorName = String(actorMeta?.actorName || '').trim().slice(0, 120);
+  const nextOrderAuditLog: OrderAuditEntry[] | undefined = cleanActorName
+    ? [
+        {
+          id: `oaud-open-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          action: 'order_opened' as const,
+          fromStatus: currentNorm,
+          toStatus: nextStatus,
+          actorName: cleanActorName,
+          ...(actorMeta?.actorId ? { actorId: actorMeta.actorId.slice(0, 64) } : {}),
+          ...(cleanService ? { note: cleanService } : {}),
+          timestamp: nowIso,
+        },
+        ...(Array.isArray(existing.orderAuditLog) ? existing.orderAuditLog : []),
+      ].slice(0, 30)
+    : existing.orderAuditLog;
 
   const updated: TravelerProfile = {
     ...existing,
     hasActiveOrder: true,
     orderStatus: nextStatus,
     ...(cleanService ? { preferredVisaType: cleanService } : {}),
-    updatedAt: new Date().toISOString(),
+    ...(nextOrderAuditLog && nextOrderAuditLog.length > 0
+      ? { orderAuditLog: nextOrderAuditLog }
+      : {}),
+    updatedAt: nowIso,
   };
 
   all[phone] = updated;
@@ -5154,10 +5372,28 @@ export async function approveAndDeliverDocumentCloud(
     read: false,
   };
 
+  const cleanAdminActor = String(input.adminName || 'المدير العام').trim().slice(0, 120) || 'المدير العام';
+  const prevOrderStatus = normalizeOrderStatusValue(latestExisting.orderStatus);
+  const deliverableAuditEntry: OrderAuditEntry = {
+    id: `oaud-del-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    action: 'deliverable_issued',
+    fromStatus: prevOrderStatus,
+    toStatus: 'تم تنفيذ الطلب',
+    actorName: cleanAdminActor,
+    note: cleanLabel.slice(0, 160),
+    timestamp: nowIso,
+  };
+
   const updated: TravelerProfile = {
     ...latestExisting,
     hasActiveOrder: true,
     orderStatus: 'تم تنفيذ الطلب',
+    completedBy: cleanAdminActor,
+    completedAt: nowIso,
+    orderAuditLog: [
+      deliverableAuditEntry,
+      ...(Array.isArray(latestExisting.orderAuditLog) ? latestExisting.orderAuditLog : []),
+    ].slice(0, 30),
     updatedAt: nowIso,
     issuedDocuments: [deliverable, ...remainingIssuedDocs].slice(0, 30),
     notifications: [deliverableNotification, ...(latestExisting.notifications || [])].slice(0, 30),
@@ -5522,6 +5758,11 @@ export async function attachPreOrderFilesToTravelerCloud(
       input.passportDataUrl,
       input.passportFileName || `Passport_${phone}_${docId}.jpg`
     );
+    const passUploadedAt = new Date().toISOString();
+    const clientActorName =
+      existing.accountType === 'b2b_partner' && existing.companyName
+        ? existing.companyName
+        : existing.name || phone;
     addedDocs.push({
       id: docId,
       label: 'صورة جواز السفر (مرفوعة مع الطلب)',
@@ -5531,7 +5772,19 @@ export async function attachPreOrderFilesToTravelerCloud(
       ...(upPass
         ? { viewUrl: upPass.viewUrl, storagePath: upPass.storagePath, sizeBytes: upPass.sizeBytes }
         : { sizeBytes: estimateDataUrlBytes(input.passportDataUrl) }),
-      uploadedAt: new Date().toISOString(),
+      uploadedAt: passUploadedAt,
+      uploadedBy: clientActorName,
+      status: 'received',
+      statusUpdatedAt: passUploadedAt,
+      auditLog: [
+        createDocumentAuditEntry({
+          action: 'uploaded',
+          status: 'received',
+          actorName: clientActorName,
+          actorRole: 'client',
+          timestamp: passUploadedAt,
+        }),
+      ],
     });
   }
 
@@ -5543,6 +5796,11 @@ export async function attachPreOrderFilesToTravelerCloud(
       input.receiptDataUrl,
       input.receiptFileName || `Receipt_${phone}_${receiptId}.jpg`
     );
+    const receiptUploadedAt = new Date().toISOString();
+    const clientActorName =
+      existing.accountType === 'b2b_partner' && existing.companyName
+        ? existing.companyName
+        : existing.name || phone;
     addedDocs.push({
       id: receiptId,
       label: 'إيصال دفع / تحويل مالي',
@@ -5556,7 +5814,19 @@ export async function attachPreOrderFilesToTravelerCloud(
             sizeBytes: upReceipt.sizeBytes,
           }
         : { sizeBytes: estimateDataUrlBytes(input.receiptDataUrl) }),
-      uploadedAt: new Date().toISOString(),
+      uploadedAt: receiptUploadedAt,
+      uploadedBy: clientActorName,
+      status: 'received',
+      statusUpdatedAt: receiptUploadedAt,
+      auditLog: [
+        createDocumentAuditEntry({
+          action: 'uploaded',
+          status: 'received',
+          actorName: clientActorName,
+          actorRole: 'client',
+          timestamp: receiptUploadedAt,
+        }),
+      ],
     });
   }
 
@@ -5623,6 +5893,11 @@ export async function uploadAndAddDocumentToTravelerCloud(
   const docId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const uploaded = await uploadTravelerDocumentToStorage(phone, docId, input.dataUrl, input.fileName);
 
+  const docUploadedAt = new Date().toISOString();
+  const clientActorName =
+    existing.accountType === 'b2b_partner' && existing.companyName
+      ? existing.companyName
+      : existing.name || phone;
   const newDoc: TravelerDocument = {
     id: docId,
     label: input.label.trim().slice(0, 160) || 'إيصال دفع / مستند',
@@ -5636,7 +5911,19 @@ export async function uploadAndAddDocumentToTravelerCloud(
           sizeBytes: uploaded.sizeBytes,
         }
       : { sizeBytes: estimateDataUrlBytes(input.dataUrl) }),
-    uploadedAt: new Date().toISOString(),
+    uploadedAt: docUploadedAt,
+    uploadedBy: clientActorName,
+    status: 'received',
+    statusUpdatedAt: docUploadedAt,
+    auditLog: [
+      createDocumentAuditEntry({
+        action: 'uploaded',
+        status: 'received',
+        actorName: clientActorName,
+        actorRole: 'client',
+        timestamp: docUploadedAt,
+      }),
+    ],
   };
 
   const latestAll = getAllTravelers();
@@ -5738,6 +6025,10 @@ export async function uploadBatchFilesToTravelerCloud(
     try {
       const uploaded = await uploadChatAttachmentToDrive(phone, file, 'client_docs');
       const nowIso = new Date().toISOString();
+      const clientActorName =
+        existing.accountType === 'b2b_partner' && existing.companyName
+          ? existing.companyName
+          : existing.name || phone;
       addedDocs.push({
         id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         label: labelPrefix ? `${labelPrefix} — ${file.name}` : file.name,
@@ -5748,8 +6039,18 @@ export async function uploadBatchFilesToTravelerCloud(
         storagePath: uploaded.storagePath,
         sizeBytes: uploaded.sizeBytes,
         uploadedAt: nowIso,
+        uploadedBy: clientActorName,
         status: 'received',
         statusUpdatedAt: nowIso,
+        auditLog: [
+          createDocumentAuditEntry({
+            action: 'uploaded',
+            status: 'received',
+            actorName: clientActorName,
+            actorRole: 'client',
+            timestamp: nowIso,
+          }),
+        ],
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5802,7 +6103,8 @@ export async function updateDocumentReviewStatusCloud(
   rawPhone: string,
   docId: string,
   status: DocumentReviewStatus,
-  statusNote?: string
+  statusNote?: string,
+  reviewerName?: string
 ): Promise<TravelerProfile | null> {
   const phone = normalizePhone(rawPhone);
   const all = getAllTravelers();
@@ -5823,22 +6125,56 @@ export async function updateDocumentReviewStatusCloud(
 
   const nowIso = new Date().toISOString();
   const cleanNote = String(statusNote || '').trim().slice(0, 300);
+  const cleanReviewer = String(reviewerName || '').trim().slice(0, 120) || 'إدارة مسارك';
+  const clientActorName =
+    existing.accountType === 'b2b_partner' && existing.companyName
+      ? existing.companyName
+      : existing.name || phone;
 
-  const nextDocs = (existing.documents || []).map((d) =>
-    d.id === docId
-      ? {
-          ...d,
-          status,
-          ...(cleanNote ? { statusNote: cleanNote } : { statusNote: undefined }),
-          statusUpdatedAt: nowIso,
-        }
-      : d
-  );
+  const auditAction =
+    status === 'completed'
+      ? 'approved'
+      : status === 'pending_completion'
+      ? 'rejected'
+      : 'received';
+  const newAuditEntry = createDocumentAuditEntry({
+    action: auditAction,
+    status,
+    actorName: cleanReviewer,
+    actorRole: 'admin',
+    note: cleanNote || undefined,
+    timestamp: nowIso,
+  });
+
+  const nextDocs = (existing.documents || []).map((d) => {
+    if (d.id !== docId) return d;
+    const baseLog =
+      Array.isArray(d.auditLog) && d.auditLog.length > 0
+        ? [...d.auditLog]
+        : [
+            createDocumentAuditEntry({
+              id: `aud-init-${d.id}`,
+              action: 'uploaded',
+              status: 'received',
+              actorName: d.uploadedBy || clientActorName,
+              actorRole: 'client',
+              timestamp: d.uploadedAt || nowIso,
+            }),
+          ];
+    return {
+      ...d,
+      status,
+      ...(cleanNote ? { statusNote: cleanNote } : { statusNote: undefined }),
+      statusUpdatedAt: nowIso,
+      lastReviewedBy: cleanReviewer,
+      auditLog: [...baseLog, newAuditEntry].slice(-25),
+    };
+  });
 
   const statusLabels: Record<DocumentReviewStatus, { ar: string; en: string }> = {
-    pending_completion: { ar: 'مطلوب استكماله / إعادة رفعه', en: 'Needs Completion / Re-upload' },
-    received: { ar: 'تم الاستلام', en: 'Received' },
-    completed: { ar: 'مكتمل ومعتمد', en: 'Completed & Approved' },
+    pending_completion: { ar: 'مرفوض / مطلوب استكماله', en: 'Rejected / Needs Completion' },
+    received: { ar: 'تم الاستلام (قيد المراجعة)', en: 'Received (Under Review)' },
+    completed: { ar: 'تم القبول (معتمد)', en: 'Approved & Completed' },
   };
   const labelInfo = statusLabels[status];
 
@@ -5846,8 +6182,12 @@ export async function updateDocumentReviewStatusCloud(
     id: `notif-doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     titleAr: `تحديث حالة مستند: ${targetDoc.label}`,
     titleEn: `Document Review: ${targetDoc.label}`,
-    bodyAr: `الحالة الجديدة: ${labelInfo.ar}${cleanNote ? ` — ملاحظة الإدارة: ${cleanNote}` : ''}`,
-    bodyEn: `New status: ${labelInfo.en}${cleanNote ? ` — Note: ${cleanNote}` : ''}`,
+    bodyAr: `الحالة الجديدة: ${labelInfo.ar} — المراجع: ${cleanReviewer}${
+      cleanNote ? ` — ملاحظة الإدارة: ${cleanNote}` : ''
+    }`,
+    bodyEn: `New status: ${labelInfo.en} — Reviewer: ${cleanReviewer}${
+      cleanNote ? ` — Note: ${cleanNote}` : ''
+    }`,
     type: 'status',
     docId,
     createdAt: nowIso,
@@ -5946,6 +6286,10 @@ export async function commitTravelerProfileDraftCloud(
 
   // 3. Upload newly staged documents to Google Drive
   const uploadedNewDocs: TravelerDocument[] = [];
+  const clientActorName =
+    existing.accountType === 'b2b_partner' && existing.companyName
+      ? existing.companyName
+      : `${draft.firstName} ${draft.lastName}`.trim() || existing.name || phone;
   for (const staged of draft.pendingDocuments || []) {
     const uploaded = await uploadTravelerDocumentToStorage(
       phone,
@@ -5953,6 +6297,7 @@ export async function commitTravelerProfileDraftCloud(
       staged.dataUrl,
       staged.fileName
     );
+    const uploadedAt = new Date().toISOString();
     uploadedNewDocs.push({
       id: staged.id,
       label: staged.label,
@@ -5966,7 +6311,19 @@ export async function commitTravelerProfileDraftCloud(
             sizeBytes: uploaded.sizeBytes,
           }
         : { sizeBytes: estimateDataUrlBytes(staged.dataUrl) }),
-      uploadedAt: new Date().toISOString(),
+      uploadedAt,
+      uploadedBy: clientActorName,
+      status: 'received',
+      statusUpdatedAt: uploadedAt,
+      auditLog: [
+        createDocumentAuditEntry({
+          action: 'uploaded',
+          status: 'received',
+          actorName: clientActorName,
+          actorRole: 'client',
+          timestamp: uploadedAt,
+        }),
+      ],
     });
   }
 
@@ -6006,6 +6363,7 @@ export async function commitTravelerProfileDraftCloud(
     passportIssueDate: draft.passportIssueDate,
     passportExpiryDate: draft.passportExpiryDate,
     nationality: draft.nationality.trim(),
+    city: draft.city.trim(),
     preferredVisaType: draft.preferredVisaType.trim(),
     visaDocumentNumber: draft.visaDocumentNumber.trim(),
     saudiSponsorId: draft.saudiSponsorId.trim(),
@@ -6272,10 +6630,27 @@ export function addDocumentToTraveler(
   const existing = all[phone];
   if (!existing) return null;
 
+  const docUploadedAt = new Date().toISOString();
+  const clientActorName =
+    existing.accountType === 'b2b_partner' && existing.companyName
+      ? existing.companyName
+      : existing.name || phone;
   const newDoc: TravelerDocument = {
     ...docInput,
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    uploadedAt: new Date().toISOString(),
+    uploadedAt: docUploadedAt,
+    uploadedBy: clientActorName,
+    status: docInput.status || 'received',
+    statusUpdatedAt: docUploadedAt,
+    auditLog: [
+      createDocumentAuditEntry({
+        action: 'uploaded',
+        status: docInput.status || 'received',
+        actorName: clientActorName,
+        actorRole: 'client',
+        timestamp: docUploadedAt,
+      }),
+    ],
   };
   const updated: TravelerProfile = {
     ...existing,
@@ -6304,6 +6679,11 @@ export async function uploadAndAddDocumentToTraveler(
     docInput.fileName
   );
 
+  const uploadedIso = new Date().toISOString();
+  const clientActorName =
+    existing.accountType === 'b2b_partner' && existing.companyName
+      ? existing.companyName
+      : existing.name || phone;
   const newDoc: TravelerDocument = {
     id: docId,
     label: docInput.label,
@@ -6317,7 +6697,19 @@ export async function uploadAndAddDocumentToTraveler(
           sizeBytes: uploaded.sizeBytes,
         }
       : { sizeBytes: estimateDataUrlBytes(docInput.dataUrl) }),
-    uploadedAt: new Date().toISOString(),
+    uploadedAt: uploadedIso,
+    uploadedBy: clientActorName,
+    status: docInput.status || 'received',
+    statusUpdatedAt: uploadedIso,
+    auditLog: [
+      createDocumentAuditEntry({
+        action: 'uploaded',
+        status: docInput.status || 'received',
+        actorName: clientActorName,
+        actorRole: 'client',
+        timestamp: uploadedIso,
+      }),
+    ],
   };
 
   // Re-read latest map in case snapshot updated while uploading

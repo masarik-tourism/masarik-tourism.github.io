@@ -53,13 +53,16 @@ import {
   PUSH_NAVIGATE_EVENT,
   PushDeepLinkPayload,
   PushNotificationAction,
+  getBrowserNotificationPermission,
   getNativeAndroidFcmToken,
   registerMessagingServiceWorker,
   requestAndGetFcmToken,
+  sendPassportExpiryBrowserNotification,
   showBrowserPushNotification,
   subscribeForegroundFcmMessages,
   waitForNativeAndroidFcmToken,
 } from './utils/fcmPushService';
+import { evaluatePassportValidity } from './utils/passportValidity';
 import { consumeSessionExpiredNotice } from './utils/deviceTrust';
 import { QuickOtpModal } from './components/QuickOtpModal';
 import {
@@ -99,6 +102,7 @@ function buildDraftFromTraveler(
       passportIssueDate: '',
       passportExpiryDate: '',
       nationality: lang === 'en' ? 'Egyptian' : 'مصري',
+      city: '',
       preferredVisaType: '',
       visaDocumentNumber: '',
       saudiSponsorId: '',
@@ -128,6 +132,7 @@ function buildDraftFromTraveler(
     passportIssueDate: traveler.passportIssueDate || '',
     passportExpiryDate: traveler.passportExpiryDate || '',
     nationality: traveler.nationality || (lang === 'en' ? 'Egyptian' : 'مصري'),
+    city: traveler.city || '',
     preferredVisaType: traveler.preferredVisaType || '',
     visaDocumentNumber: traveler.visaDocumentNumber || '',
     saudiSponsorId: traveler.saudiSponsorId || '',
@@ -197,7 +202,10 @@ export const App: React.FC = () => {
   const [adminRequestedFolder, setAdminRequestedFolder] = useState<{
     phone: string;
     nonce: number;
+    tab?: 'basic_passport';
+    focusPassport?: boolean;
   } | null>(null);
+  const [travelerPassportFocusNonce, setTravelerPassportFocusNonce] = useState<number>(0);
   const [adminRequestedTab, setAdminRequestedTab] = useState<{
     tab: 'messages_otp';
     nonce: number;
@@ -486,6 +494,70 @@ export const App: React.FC = () => {
     }
   }, [activeTraveler, t]);
 
+  // Automatic Browser Notification when signed-in Traveler's passport is within 6 months of expiry (or expired)
+  useEffect(() => {
+    if (!activeTraveler?.passportExpiryDate) return;
+    const validity = evaluatePassportValidity(activeTraveler.passportExpiryDate);
+    if (!validity.isUnderSixMonths) return;
+    if (getBrowserNotificationPermission() !== 'granted') return;
+
+    const clientName =
+      getTravelerDisplayNames(activeTraveler).fullDisplayName || activeTraveler.phone;
+    void sendPassportExpiryBrowserNotification({
+      role: 'client',
+      phone: activeTraveler.phone,
+      clientName,
+      expiryDate: validity.expiryDate,
+      remainingDays: validity.remainingDays,
+      lang,
+    });
+  }, [
+    activeTraveler?.phone,
+    activeTraveler?.passportExpiryDate,
+    activeTraveler?.name,
+    lang,
+  ]);
+
+  // Automatic Browser Notification for Admin when any client's passport is within 6 months of expiry
+  useEffect(() => {
+    if (!isAdminActive || adminTravelers.length === 0) return;
+    if (getBrowserNotificationPermission() !== 'granted') return;
+
+    const urgent = adminTravelers
+      .filter((tr) => tr.accountType !== 'b2b_partner' && tr.passportExpiryDate)
+      .map((tr) => ({
+        tr,
+        eval: evaluatePassportValidity(tr.passportExpiryDate),
+      }))
+      .filter((item) => item.eval.isUnderSixMonths && item.eval.isValidFormat)
+      .sort((a, b) => (a.eval.remainingDays ?? 999) - (b.eval.remainingDays ?? 999));
+
+    if (urgent.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      let dispatched = 0;
+      for (const item of urgent) {
+        if (cancelled || dispatched >= 3) break;
+        const clientName =
+          getTravelerDisplayNames(item.tr).fullDisplayName || item.tr.phone;
+        const res = await sendPassportExpiryBrowserNotification({
+          role: 'admin',
+          phone: item.tr.phone,
+          clientName,
+          expiryDate: item.eval.expiryDate,
+          remainingDays: item.eval.remainingDays,
+          lang,
+        });
+        if (res.shown) dispatched += 1;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminActive, adminTravelers, lang]);
+
   // Real-time cloud subscription for all clients & live chat threads when Admin/Sub-Admin session is active
   useEffect(() => {
     prevAdminUnreadRef.current = null;
@@ -655,6 +727,13 @@ export const App: React.FC = () => {
           if (payload.action === 'quick_otp') {
             setAdminRequestedTab({ tab: 'messages_otp', nonce: Date.now() });
             setQuickOtpModalOpen(true);
+          } else if (payload.action === 'passport_update' && payload.phone) {
+            setAdminRequestedFolder({
+              phone: payload.phone,
+              nonce: Date.now(),
+              tab: 'basic_passport',
+              focusPassport: true,
+            });
           } else if (payload.action === 'client_folder' && payload.phone) {
             setAdminRequestedFolder({ phone: payload.phone, nonce: Date.now() });
           } else {
@@ -665,6 +744,12 @@ export const App: React.FC = () => {
           openAdminLoginModal();
         }
         window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+
+      if (payload.action === 'passport_update') {
+        setTravelerSection('account');
+        setTravelerPassportFocusNonce(Date.now());
         return;
       }
 
@@ -807,6 +892,7 @@ export const App: React.FC = () => {
           const validActions: PushNotificationAction[] = [
             'live_chat',
             'client_folder',
+            'passport_update',
             'quick_otp',
             'chat',
             'documents',
@@ -1023,6 +1109,7 @@ export const App: React.FC = () => {
             sessionMeta={sessionMeta}
             subTab={travelerSection}
             onChangeSubTab={handleSelectTravelerSection}
+            passportFocusNonce={travelerPassportFocusNonce}
             draft={travelerDraft}
             onUpdateDraft={(updater) => setTravelerDraft((prev) => updater(prev))}
             onResetDraft={handleResetDraft}

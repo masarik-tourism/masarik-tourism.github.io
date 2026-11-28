@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import {
   collection,
   deleteDoc,
@@ -15,8 +16,10 @@ import {
   AccountType,
   ChatAttachment,
   ChatMessage,
+  ChatQuickReplyTemplate,
   ChatSenderRole,
   ChatThreadSummary,
+  QuickReplyCategory,
 } from '../types/travel';
 import { uploadChatAttachmentToDrive } from './firebaseStorageHelper';
 import { dispatchRemotePushNotification } from './fcmPushService';
@@ -412,6 +415,293 @@ export const ADMIN_CHAT_QUICK_REPLIES = [
   'تم حجز الموعد بنجاح وإرفاق التفاصيل',
 ] as const;
 
+export const DEFAULT_CHAT_QUICK_REPLY_TEMPLATES: ChatQuickReplyTemplate[] = [
+  {
+    id: 'qr-welcome',
+    title: 'ترحيب واستلام الملف',
+    text: 'مرحباً {clientName}، أهلاً بكم في مسارك للإنجاز السياحي. تم استلام رسالتكم وجاري المتابعة الفورية لملفكم.',
+    category: 'general',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'qr-stage-received',
+    title: 'مرحلة 1: تم التقديم واستلام الطلب',
+    text: 'السلام عليكم أ/ {اسم_العميل} 🌸\nتم استلام وتسجيل طلبكم رقم ({رقم_الطلب}) الخاص بخدمة ({نوع_الخدمة}) بنجاح لدى مسارك للإنجاز السياحي.\n• الحالة الحالية: تم استلام الطلب والبدء في الإجراءات ✓\nجاري مراجعة الأوراق والبيانات لدى المختصين.',
+    category: 'order_stages',
+    orderStatusTrigger: 'تم استلام الطلب',
+    createdAt: '2026-01-01T00:00:30.000Z',
+  },
+  {
+    id: 'qr-docs-received',
+    title: 'تم استلام الأوراق بنجاح',
+    text: 'تم استلام أوراقك ومستنداتك بنجاح ✓ وجاري مراجعتها والبدء في إجراءات التنفيذ.',
+    category: 'documents',
+    createdAt: '2026-01-01T00:01:00.000Z',
+  },
+  {
+    id: 'qr-stage-under-review',
+    title: 'مرحلة 2: قيد المراجعة والتنفيذ',
+    text: 'أهلاً بك أ/ {اسم_العميل} 🌸\nيود فريق مسارك للإنجاز السياحي إبلاغكم بأن طلبكم رقم ({رقم_الطلب}) الخاص بخدمة ({نوع_الخدمة}) هو الآن: (قيد المراجعة والتنفيذ) لدى الجهات المختصة.\nملفكم قيد المتابعة الحثيثة وسنوافيكم فور صدور أي مستجدات بإذن الله.',
+    category: 'order_stages',
+    orderStatusTrigger: 'قيد المراجعة والتنفيذ',
+    createdAt: '2026-01-01T00:01:30.000Z',
+  },
+  {
+    id: 'qr-clearer-passport',
+    title: 'طلب صورة جواز أوضح',
+    text: 'يرجى إرسال صورة واضحة ومكتملة لصفحة البيانات في جواز السفر بدون قص أو إضاءة عاكسة لاستكمال الطلب.',
+    category: 'documents',
+    createdAt: '2026-01-01T00:02:00.000Z',
+  },
+  {
+    id: 'qr-stage-booked-issued',
+    title: 'مرحلة 3: تم الحجز / الإصدار',
+    text: 'بشرى سارة أ/ {اسم_العميل} 🌸\nتم إنجاز مرحلة (تم الحجز / الإصدار) لطلبكم رقم ({رقم_الطلب}) بنجاح.\nيمكنكم الاطلاع على تفاصيل الحجز والمستندات عبر محفظتكم في مسارك.',
+    category: 'order_stages',
+    orderStatusTrigger: 'تم الحجز / الإصدار',
+    createdAt: '2026-01-01T00:02:30.000Z',
+  },
+  {
+    id: 'qr-tasheer-booked',
+    title: 'تم حجز موعد تساهيل',
+    text: 'تم حجز موعد تساهيل (VFS) الخاص بكم بنجاح، وتم إرفاق تفاصيل الموعد والباركود داخل حسابكم.',
+    category: 'appointments',
+    createdAt: '2026-01-01T00:03:00.000Z',
+  },
+  {
+    id: 'qr-payment-receipt',
+    title: 'طلب إيصال التحويل',
+    text: 'يرجى إرفاق صورة إيصال التحويل أو السداد هنا ليتم تأكيد الطلب وتفعيل المتابعة الفورية.',
+    category: 'payment',
+    createdAt: '2026-01-01T00:04:00.000Z',
+  },
+  {
+    id: 'qr-stage-completed',
+    title: 'مرحلة 4: تأشيرة جاهزة / تم التنفيذ',
+    text: 'تهانينا الحارة أ/ {اسم_العميل} 🎉\nتأشيرتكم / طلبكم رقم ({رقم_الطلب}) الخاص بخدمة ({نوع_الخدمة}) جاهز وتم تنفيذه بنجاح تام!\nتم إيداع المستندات ووثائق الإنجاز في محفظة حسابكم بمسارك.\nنتمنى لكم رحلة مباركة وموفقة بإذن الله.',
+    category: 'order_stages',
+    orderStatusTrigger: 'تم تنفيذ الطلب',
+    createdAt: '2026-01-01T00:04:30.000Z',
+  },
+  {
+    id: 'qr-completed',
+    title: 'تم إنجاز الطلب وإرفاق المستند',
+    text: 'تم إنجاز طلبكم بنجاح وإرفاق المستند النهائي في محفظة المستندات بحسابكم. رحلة موفقة بإذن الله.',
+    category: 'visas',
+    createdAt: '2026-01-01T00:05:00.000Z',
+  },
+];
+
+const QUICK_REPLIES_STORAGE_KEY = 'masarik_chat_quick_replies_v1';
+const QUICK_REPLIES_UPDATED_EVENT = 'masarik-quick-replies-updated';
+const QUICK_REPLIES_DOC_PATH = 'site_config/quick_replies';
+
+const VALID_QR_CATEGORIES = new Set<QuickReplyCategory>([
+  'general',
+  'documents',
+  'visas',
+  'appointments',
+  'payment',
+  'order_stages',
+]);
+
+function sanitizeQuickReplyTemplates(list: unknown): ChatQuickReplyTemplate[] {
+  if (!Array.isArray(list)) return DEFAULT_CHAT_QUICK_REPLY_TEMPLATES;
+  const cleaned = list
+    .filter((item): item is Partial<ChatQuickReplyTemplate> => Boolean(item && typeof item === 'object'))
+    .slice(0, 60)
+    .map((item, idx) => {
+      const title = String(item.title || '').trim().slice(0, 80);
+      const text = String(item.text || '').trim().slice(0, 2000);
+      const cat: QuickReplyCategory = VALID_QR_CATEGORIES.has(item.category as QuickReplyCategory)
+        ? (item.category as QuickReplyCategory)
+        : 'general';
+      const orderTrigger = item.orderStatusTrigger ? String(item.orderStatusTrigger).slice(0, 60) : undefined;
+      return {
+        id:
+          String(item.id || `qr-${Date.now()}-${idx}`)
+            .replace(/[^a-zA-Z0-9_-]/g, '')
+            .slice(0, 80) || `qr-${idx}`,
+        title: title || text.slice(0, 36) || `قالب ${idx + 1}`,
+        text,
+        category: cat,
+        ...(orderTrigger ? { orderStatusTrigger: orderTrigger as ChatQuickReplyTemplate['orderStatusTrigger'] } : {}),
+        createdAt: String(item.createdAt || new Date().toISOString()).slice(0, 64),
+        ...(item.updatedAt ? { updatedAt: String(item.updatedAt).slice(0, 64) } : {}),
+        ...(item.createdBy ? { createdBy: String(item.createdBy).trim().slice(0, 120) } : {}),
+      };
+    })
+    .filter((item) => item.text.length > 0);
+  return cleaned;
+}
+
+function emitQuickRepliesUpdate(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(QUICK_REPLIES_UPDATED_EVENT));
+  }
+}
+
+function writeQuickRepliesLocalOnly(templates: ChatQuickReplyTemplate[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(QUICK_REPLIES_STORAGE_KEY, JSON.stringify(templates));
+    emitQuickRepliesUpdate();
+  } catch {
+    // Ignore storage quota / privacy mode errors
+  }
+}
+
+export function getQuickReplyTemplates(): ChatQuickReplyTemplate[] {
+  if (typeof window === 'undefined') return DEFAULT_CHAT_QUICK_REPLY_TEMPLATES;
+  try {
+    const raw = window.localStorage.getItem(QUICK_REPLIES_STORAGE_KEY);
+    if (!raw) return DEFAULT_CHAT_QUICK_REPLY_TEMPLATES;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_CHAT_QUICK_REPLY_TEMPLATES;
+    return sanitizeQuickReplyTemplates(parsed);
+  } catch {
+    return DEFAULT_CHAT_QUICK_REPLY_TEMPLATES;
+  }
+}
+
+export function subscribeQuickReplyTemplatesCloud(): () => void {
+  const ref = doc(db, 'site_config', 'quick_replies');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as { templates?: unknown };
+      if (Array.isArray(data?.templates)) {
+        const sanitized = sanitizeQuickReplyTemplates(data.templates);
+        writeQuickRepliesLocalOnly(sanitized);
+      }
+    },
+    (error) => {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Graceful non-blocking fallback to local storage if Firestore rules haven't been refreshed yet
+      if (!msg.toLowerCase().includes('permission')) {
+        console.warn('Quick replies subscription warning:', msg);
+      }
+    }
+  );
+}
+
+export async function saveQuickReplyTemplatesCloud(
+  templates: ChatQuickReplyTemplate[],
+  updatedBy?: string
+): Promise<{ ok: boolean; cloudSynced: boolean; templates: ChatQuickReplyTemplate[]; error?: string }> {
+  const sanitized = sanitizeQuickReplyTemplates(templates);
+  writeQuickRepliesLocalOnly(sanitized);
+
+  try {
+    await setDoc(doc(db, 'site_config', 'quick_replies'), {
+      templates: sanitized,
+      updatedBy: String(updatedBy || 'المدير العام').trim().slice(0, 120),
+      updatedAt: new Date().toISOString(),
+    });
+    return { ok: true, cloudSynced: true, templates: sanitized };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`Quick replies cloud sync deferred (${QUICK_REPLIES_DOC_PATH}):`, msg);
+    return { ok: true, cloudSynced: false, templates: sanitized, error: msg };
+  }
+}
+
+export async function upsertQuickReplyTemplateCloud(
+  input: {
+    id?: string;
+    title: string;
+    text: string;
+    category: QuickReplyCategory;
+    createdBy?: string;
+  }
+): Promise<{ ok: boolean; cloudSynced: boolean; templates: ChatQuickReplyTemplate[]; saved: ChatQuickReplyTemplate }> {
+  const current = getQuickReplyTemplates();
+  const nowIso = new Date().toISOString();
+  const existing = input.id ? current.find((t) => t.id === input.id) : undefined;
+  const saved: ChatQuickReplyTemplate = {
+    id: existing?.id || `qr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: input.title.trim().slice(0, 80) || input.text.trim().slice(0, 36),
+    text: input.text.trim().slice(0, 2000),
+    category: VALID_QR_CATEGORIES.has(input.category) ? input.category : 'general',
+    createdAt: existing?.createdAt || nowIso,
+    updatedAt: nowIso,
+    ...(input.createdBy || existing?.createdBy
+      ? { createdBy: String(input.createdBy || existing?.createdBy).trim().slice(0, 120) }
+      : {}),
+  };
+
+  const next = existing
+    ? current.map((item) => (item.id === existing.id ? saved : item))
+    : [saved, ...current];
+
+  const res = await saveQuickReplyTemplatesCloud(next, input.createdBy);
+  return { ...res, saved };
+}
+
+export async function deleteQuickReplyTemplateCloud(
+  templateId: string,
+  actorName?: string
+): Promise<{ ok: boolean; cloudSynced: boolean; templates: ChatQuickReplyTemplate[] }> {
+  const current = getQuickReplyTemplates();
+  const next = current.filter((t) => t.id !== templateId);
+  const res = await saveQuickReplyTemplatesCloud(next, actorName);
+  return res;
+}
+
+export async function resetQuickReplyTemplatesToDefaultsCloud(
+  actorName?: string
+): Promise<{ ok: boolean; cloudSynced: boolean; templates: ChatQuickReplyTemplate[] }> {
+  return saveQuickReplyTemplatesCloud(DEFAULT_CHAT_QUICK_REPLY_TEMPLATES, actorName);
+}
+
+export function resolveQuickReplyTextPlaceholders(
+  rawText: string,
+  context: {
+    clientName?: string;
+    orderCode?: string;
+    serviceTitle?: string;
+    stageLabel?: string;
+    portalUrl?: string;
+    phone?: string;
+  }
+): string {
+  const name = String(context.clientName || '').trim() || 'عميلنا العزيز';
+  const orderCode = String(context.orderCode || '').trim() || 'MSK';
+  const service = String(context.serviceTitle || '').trim() || 'موعد خدمة سياحية';
+  const stage = String(context.stageLabel || '').trim() || 'قيد المراجعة';
+  const portalUrl = String(context.portalUrl || '').trim() || 'https://masarik-tourism.github.io/';
+  const phone = String(context.phone || '').trim();
+
+  return String(rawText || '')
+    .replace(/\{clientName\}|\{اسم_العميل\}/gi, name)
+    .replace(/\{orderCode\}|\{رقم_الطلب\}/gi, orderCode)
+    .replace(/\{serviceTitle\}|\{نوع_الخدمة\}/gi, service)
+    .replace(/\{stageLabel\}|\{المرحلة_الحالية\}/gi, stage)
+    .replace(/\{portalUrl\}|\{رابط_المنصة\}/gi, portalUrl)
+    .replace(/\{phone\}|\{الهاتف\}/gi, phone);
+}
+
+export function useQuickReplyTemplates(): ChatQuickReplyTemplate[] {
+  const [templates, setTemplates] = useState<ChatQuickReplyTemplate[]>(() =>
+    getQuickReplyTemplates()
+  );
+
+  useEffect(() => {
+    const syncLocal = () => setTemplates(getQuickReplyTemplates());
+    window.addEventListener(QUICK_REPLIES_UPDATED_EVENT, syncLocal);
+    window.addEventListener('storage', syncLocal);
+    const unsubCloud = subscribeQuickReplyTemplatesCloud();
+    return () => {
+      window.removeEventListener(QUICK_REPLIES_UPDATED_EVENT, syncLocal);
+      window.removeEventListener('storage', syncLocal);
+      unsubCloud();
+    };
+  }, []);
+
+  return templates;
+}
+
 const ADMIN_CLEARED_STORAGE_PREFIX = 'masarik_admin_chat_cleared_';
 
 export function getLocalAdminClearedAt(rawPhone: string): string | null {
@@ -555,4 +845,68 @@ export async function permanentlyDeleteChatHistoryCloud(
       error: 'تعذر إكمال الحذف السحابي من Firestore. يرجى التحقق من قواعد الأمان أو الاتصال.',
     };
   }
+}
+
+const chatAnalysisCache = new Map<
+  string,
+  { lastMessageAt: string; messages: ChatMessage[] }
+>();
+
+/**
+ * Fetches and caches chat messages for threads whose `lastMessageAt` changed,
+ * enabling accurate calculation of client response latency in AdminDashboardWorkspace
+ * without repeated Firestore reads.
+ */
+export async function fetchChatMessagesForResponseAnalysisCloud(
+  threads: Record<string, ChatThreadSummary>
+): Promise<Record<string, ChatMessage[]>> {
+  const result: Record<string, ChatMessage[]> = {};
+  const entries = Object.entries(threads || {})
+    .filter(([phoneId]) => /^[0-9]{8,20}$/.test(cleanDigits(phoneId)))
+    .sort((a, b) => Date.parse(b[1]?.lastMessageAt || '') - Date.parse(a[1]?.lastMessageAt || ''))
+    .slice(0, 60);
+
+  const staleTargets: { phone: string; lastMessageAt: string }[] = [];
+
+  for (const [rawPhone, summary] of entries) {
+    const phone = cleanDigits(rawPhone);
+    const stamp = String(summary?.lastMessageAt || summary?.updatedAt || '');
+    const cached = chatAnalysisCache.get(phone);
+    if (cached && cached.lastMessageAt === stamp) {
+      result[phone] = cached.messages;
+    } else {
+      if (cached) {
+        result[phone] = cached.messages;
+      }
+      staleTargets.push({ phone, lastMessageAt: stamp });
+    }
+  }
+
+  const batchSize = 6;
+  for (let i = 0; i < staleTargets.length; i += batchSize) {
+    const chunk = staleTargets.slice(i, i + batchSize);
+    await Promise.all(
+      chunk.map(async ({ phone, lastMessageAt }) => {
+        try {
+          const q = query(
+            collection(db, 'chats', phone, 'messages'),
+            where('phoneId', '==', phone)
+          );
+          const snap = await getDocs(q);
+          const items: ChatMessage[] = [];
+          snap.forEach((docSnap) => {
+            const data = docSnap.data() as ChatMessage;
+            items.push({ ...data, id: data.id || docSnap.id, phoneId: phone });
+          });
+          items.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+          chatAnalysisCache.set(phone, { lastMessageAt, messages: items });
+          result[phone] = items;
+        } catch {
+          // Keep existing cached snapshot on transient network errors
+        }
+      })
+    );
+  }
+
+  return result;
 }
