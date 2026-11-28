@@ -50,6 +50,7 @@ import {
   ChevronUp,
   Clock,
   Wifi,
+  Zap,
 } from 'lucide-react';
 import { testConnection } from '../firebase';
 import { subscribePlatformAnalytics, AnalyticsDashboardState } from '../utils/analyticsStore';
@@ -354,6 +355,8 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   } | null>(null);
   const [adminClarityWarning, setAdminClarityWarning] = useState<string | null>(null);
   const adminPassportInputRef = useRef<HTMLInputElement>(null);
+  const deliverableFormRef = useRef<HTMLDivElement>(null);
+  const [isBatchApprovingDocs, setIsBatchApprovingDocs] = useState(false);
   const [previewDocImage, setPreviewDocImage] = useState<{
     label: string;
     dataUrl: string;
@@ -570,7 +573,26 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     window.addEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
+
+    const checkLiveFirestore = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        setDbConnectionState('offline');
+        return;
+      }
+      const reachable = await testConnection(0);
+      setDbConnectionState(reachable ? 'connected' : 'offline');
+      if (reachable) {
+        setLastSyncedAt(new Date().toISOString());
+      }
+    };
+    void checkLiveFirestore();
+    const healthInterval = window.setInterval(() => {
+      void checkLiveFirestore();
+    }, 45000);
+
     return () => {
+      window.clearInterval(healthInterval);
       window.removeEventListener(TRAVELERS_UPDATED_EVENT, onTravelersUpdate);
       window.removeEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
       window.removeEventListener('online', onOnline);
@@ -1013,6 +1035,44 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     } finally {
       setUpdatingDocStatusId(null);
     }
+  };
+
+  const handleApproveAllClientDocs = async () => {
+    if (!selectedClient || !canManageClients || isBatchApprovingDocs) return;
+    const docs = (selectedClient.documents || []).filter((d) => d.status !== 'completed');
+    if (docs.length === 0) return;
+    setIsBatchApprovingDocs(true);
+    try {
+      for (const docItem of docs) {
+        await updateDocumentReviewStatusCloud(
+          selectedClient.phone,
+          docItem.id,
+          'completed',
+          docNoteDrafts[docItem.id]
+        );
+      }
+      loadTravelers();
+      setFolderSavedMsg(
+        t('تم اعتماد جميع مستندات العميل بنجاح ✓', 'All client documents marked completed ✓')
+      );
+      window.setTimeout(() => setFolderSavedMsg(''), 2500);
+    } finally {
+      setIsBatchApprovingDocs(false);
+    }
+  };
+
+  const handleRequestMissingDocsWhatsApp = (client: TravelerProfile) => {
+    const displayName = getTravelerDisplayNames(client).fullDisplayName;
+    const phoneDigits = client.phoneNormalized || normalizePhone(client.phone);
+    const pendingList = (client.documents || [])
+      .filter((d) => d.status === 'pending_completion')
+      .map((d) => d.label)
+      .join('، ');
+    const msg =
+      lang === 'en'
+        ? `Hello ${displayName}, Masarik Tourism team reviewed your file. Please upload a clearer/missing copy of ${pendingList || 'your required documents'} so we can proceed promptly.`
+        : `السلام عليكم ${displayName}، قام فريق مسارك للإنجاز السياحي بمراجعة ملفكم. يرجى استكمال أو رفع صورة أوضح لـ (${pendingList || 'المستندات المطلوبة'}) لاستكمال الإجراءات فوراً.`;
+    openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
   };
 
   const handleAdminAddClient = async (e: React.FormEvent) => {
@@ -3538,6 +3598,27 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
             {/* Search & Order Filter Pills */}
             <div ref={individualsListRef} className="bg-white border border-slate-200 rounded-2xl p-3.5 space-y-3 shadow-xs scroll-mt-4">
+              {orderFilter !== 'all' && (
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#FAF8F2] border border-[#C6A052]/60 text-xs">
+                  <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                    <span>
+                      {t(
+                        `تصفية نشطة من شريط المؤشرات — عدد النتائج: ${orderedRequests.length}`,
+                        `Active KPI filter — Showing ${orderedRequests.length} result(s)`
+                      )}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setOrderFilter('all')}
+                    className="px-2.5 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black cursor-pointer transition"
+                  >
+                    {t('عرض جميع العملاء', 'Show All Clients')}
+                  </button>
+                </div>
+              )}
+
               <div className="relative">
                 <Search className="w-4 h-4 text-slate-400 absolute start-3.5 top-1/2 -translate-y-1/2" />
                 <input
@@ -5318,6 +5399,58 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 {/* TAB 1: BASIC INFO & PASSPORT */}
                 {clientModalTab === 'basic_passport' && (
                   <div className="space-y-4">
+                    {/* Quick Actions Bar — Basic Info Tab */}
+                    <div className="bg-[#FAF8F2] border border-[#C6A052]/50 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                        <span>{t('إجراءات سريعة — البيانات الأساسية', 'Quick Actions — Basic Info')}</span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => adminPassportInputRef.current?.click()}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          <span>{t('رفع وقراءة الجواز بالذكاء ✨', 'AI Scan Passport ✨')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const summary = `${editPassportFullNameEn || getTravelerDisplayNames(selectedClient).fullDisplayName}${editPassportNumber ? ` | ${editPassportNumber}` : ''}`;
+                            void handleAdminCopyValue(`qa-basic-${selectedClient.phone}`, summary);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          {adminCopiedKey === `qa-basic-${selectedClient.phone}` ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          <span>{t('نسخ الاسم ورقم الجواز', 'Copy Name & Passport')}</span>
+                        </button>
+                        {canActivateOtp && !isClientAccountVerified(selectedClient) && (
+                          <button
+                            type="button"
+                            disabled={togglingVerifyPhone === selectedClient.phone}
+                            onClick={() => void handleAdminInstantActivate(selectedClient)}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                          >
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>{t('توثيق الحساب الآن', 'Verify Account')}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDirectWhatsAppChat(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>{t('مراسلة واتساب', 'WhatsApp')}</span>
+                        </button>
+                      </div>
+                    </div>
+
                     <form
                       onSubmit={handleSaveClientFolder}
                       className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xs"
@@ -5884,6 +6017,52 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 {/* TAB 2: DOCUMENTS & ATTACHMENTS + FINAL DELIVERABLE */}
                 {clientModalTab === 'documents' && (
                   <div className="space-y-4">
+                    {/* Quick Actions Bar — Documents Tab */}
+                    <div className="bg-[#FAF8F2] border border-[#C6A052]/50 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                        <span>{t('إجراءات سريعة — المستندات والمرفقات', 'Quick Actions — Documents')}</span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(selectedClient.documents || []).some((d) => d.status !== 'completed') && (
+                          <button
+                            type="button"
+                            disabled={isBatchApprovingDocs}
+                            onClick={() => void handleApproveAllClientDocs()}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                          >
+                            {isBatchApprovingDocs ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <CheckCircle2 className="w-3 h-3" />
+                            )}
+                            <span>{t('اعتماد جميع المرفقات', 'Approve All Docs')}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            deliverableFormRef.current?.scrollIntoView({
+                              behavior: 'smooth',
+                              block: 'start',
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <FileUp className="w-3 h-3" />
+                          <span>{t('إرفاق مستند التنفيذ النهائي', 'Deliver Final File')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRequestMissingDocsWhatsApp(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>{t('طلب استكمال النواقص واتساب', 'Request Docs on WA')}</span>
+                        </button>
+                      </div>
+                    </div>
+
                     <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h4 className="text-sm font-black text-[#0F2438]">
@@ -6148,7 +6327,10 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                     </div>
 
                     {/* FINAL COMPLETION DOCUMENT DELIVERY PANEL */}
-                    <div className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs">
+                    <div
+                      ref={deliverableFormRef}
+                      className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs scroll-mt-3"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#C6A052]/30">
                         <div className="flex items-center gap-2.5">
                           <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
@@ -6454,10 +6636,66 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
 
                 {/* TAB 3: ORDER STAGES, CLIENT-VISIBLE NOTE & APPOINTMENT QR */}
                 {clientModalTab === 'order_stages' && (
-                  <form
-                    onSubmit={handleSaveClientFolder}
-                    className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs text-xs"
-                  >
+                  <div className="space-y-4">
+                    {/* Quick Actions Bar — Order Stages Tab */}
+                    <div className="bg-[#FAF8F2] border border-[#C6A052]/50 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                        <span>{t('إجراءات سريعة — مراحل الطلب', 'Quick Actions — Order Stages')}</span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {!hasClientActiveOrder(selectedClient) &&
+                        normalizeOrderStatusValue(editOrderStatus) === 'none' ? (
+                          <button
+                            type="button"
+                            onClick={() => handleManualOpenOrder(selectedClient)}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>{t('فتح طلب خدمة الآن', 'Open Order Now')}</span>
+                          </button>
+                        ) : (
+                          normalizeOrderStatusValue(editOrderStatus) !== 'تم تنفيذ الطلب' && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleOneClickOrderStageUpdate(selectedClient, 'تم تنفيذ الطلب')
+                              }
+                              className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                            >
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>{t('إنهاء الطلب (تم التنفيذ)', 'Complete Order')}</span>
+                            </button>
+                          )
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleNotifyClientStageWhatsApp({
+                              ...selectedClient,
+                              orderStatus: editOrderStatus,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>{t('إبلاغ العميل بالمرحلة واتساب', 'Notify Stage via WA')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAdminQrPreview(true)}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <QrCode className="w-3 h-3" />
+                          <span>{t('معاينة بطاقة QR', 'QR Pass')}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <form
+                      onSubmit={handleSaveClientFolder}
+                      className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs text-xs"
+                    >
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h4 className="text-sm font-black text-[#0F2438]">
@@ -6631,11 +6869,81 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                       <span>{t('حفظ المرحلة وبيانات الموعد', 'Save Stage & Appointment')}</span>
                     </button>
                   </form>
+                </div>
                 )}
 
                 {/* TAB 4: B2C VISA MANAGEMENT */}
                 {clientModalTab === 'b2c_visa' && (
                   <div className="space-y-4 text-xs">
+                    {/* Quick Actions Bar — B2C Visa Tab */}
+                    <div className="bg-[#FAF8F2] border border-[#C6A052]/50 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                        <span>{t('إجراءات سريعة — تأشيرة B2C', 'Quick Actions — B2C Visa')}</span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setB2cDraftVisaType('umrah_b2c');
+                            setB2cDraftStayDays(30);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black cursor-pointer transition"
+                        >
+                          {t('عمرة B2C · 30 يوم', 'Umrah 30d Preset')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setB2cDraftVisaType('free_b2c');
+                            setB2cDraftStayDays(90);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black cursor-pointer transition"
+                        >
+                          {t('B2C حرة · 90 يوم', 'Free B2C 90d Preset')}
+                        </button>
+                        {selectedClient.b2cVisa && selectedClient.b2cVisa.status !== 'exited' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const b2c = selectedClient.b2cVisa!;
+                              const countdown = evaluateB2cExitCountdown(b2c);
+                              const displayName = getTravelerDisplayNames(selectedClient).fullDisplayName;
+                              const phoneDigits =
+                                selectedClient.phoneNormalized || normalizePhone(selectedClient.phone);
+                              const msg = buildB2cExitReminderWhatsAppMessage({
+                                clientName: displayName,
+                                passportNumber: selectedClient.passportNumber,
+                                visaType: b2c.visaType,
+                                expectedExitDate: countdown?.expectedExitDate || b2c.expectedExitDate,
+                                remainingDays: countdown?.remainingDays ?? 0,
+                                lang,
+                              });
+                              openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                          >
+                            <MessageCircle className="w-3 h-3" />
+                            <span>{t('تذكير موعد الخروج واتساب', 'WA Exit Reminder')}</span>
+                          </button>
+                        )}
+                        {selectedClient.b2cVisa && (
+                          <button
+                            type="button"
+                            disabled={isSavingB2cModal}
+                            onClick={() =>
+                              void handleToggleB2cExitFromModal(selectedClient.b2cVisa?.status !== 'exited')
+                            }
+                            className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black cursor-pointer transition"
+                          >
+                            {selectedClient.b2cVisa.status === 'exited'
+                              ? t('إعادة فتح كنشط', 'Reopen Active')
+                              : t('تسجيل مغادرة نهائية ✓', 'Mark Departed ✓')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
                     {selectedClient.b2cVisa && (() => {
                       const b2c = selectedClient.b2cVisa;
                       const countdown = evaluateB2cExitCountdown(b2c);
@@ -6896,6 +7204,53 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                 {/* TAB 5: PRIVATE ADMIN NOTES & RECORD SECURITY */}
                 {clientModalTab === 'private_notes' && (
                   <div className="space-y-4 text-xs">
+                    {/* Quick Actions Bar — Private Notes Tab */}
+                    <div className="bg-[#FAF8F2] border border-[#C6A052]/50 rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-[#C6A052]" />
+                        <span>{t('إجراءات سريعة — الملاحظات والمتابعة', 'Quick Actions — Admin Notes')}</span>
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const stamp = `[${new Date().toISOString().slice(0, 10)}]: `;
+                            setEditAdminPrivateNotes((prev) =>
+                              prev.trim() ? `${prev.trimEnd()}\n${stamp}` : stamp
+                            );
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black cursor-pointer transition"
+                        >
+                          {t('+ إدراج تاريخ اليوم', '+ Insert Today Date')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const orderCode =
+                              selectedClient.orderCode || buildOrderCodeFromPhone(selectedClient.phone);
+                            const summary = `${getTravelerDisplayNames(selectedClient).fullDisplayName} | ${orderCode} | ${formatPhoneForDisplay(selectedClient.phone)} | ${translateOrderStatus(normalizeOrderStatusValue(editOrderStatus), lang)}`;
+                            void handleAdminCopyValue(`qa-summary-${selectedClient.phone}`, summary);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#0F2438] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          {adminCopiedKey === `qa-summary-${selectedClient.phone}` ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          <span>{t('نسخ ملخص العميل', 'Copy Client Summary')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenClientChat(selectedClient.phone)}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#0284C7] hover:bg-[#0369A1] text-white text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>{t('فتح المحادثة الفورية', 'Open Live Chat')}</span>
+                        </button>
+                      </div>
+                    </div>
+
                     <form
                       onSubmit={handleSaveClientFolder}
                       className="bg-white border border-amber-300 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
