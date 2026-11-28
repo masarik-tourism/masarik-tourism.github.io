@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldCheck,
   X,
@@ -9,8 +9,6 @@ import {
   Send,
   CheckCircle2,
   FolderOpen,
-  ArrowRight,
-  ArrowLeft,
   Download,
   Eye,
   Trash2,
@@ -50,11 +48,15 @@ import {
   BarChart3,
   ChevronDown,
   ChevronUp,
+  Clock,
+  Wifi,
 } from 'lucide-react';
+import { testConnection } from '../firebase';
 import { subscribePlatformAnalytics, AnalyticsDashboardState } from '../utils/analyticsStore';
 import {
   AdminPermission,
   AppointmentDetails,
+  B2cVisaType,
   ChatThreadSummary,
   DocumentReviewStatus,
   DriveEndpointScope,
@@ -100,6 +102,7 @@ import {
   digitsOnly,
   ensureClientFourDigitCodeCloud,
   exportAllDataBackupJson,
+  forceRefreshClientsFromServerCloud,
   formatLastSeenRelative,
   formatPhoneForDisplay,
   getAllTravelers,
@@ -108,6 +111,7 @@ import {
   getTravelerDisplayNames,
   isOtpActiveAndUnexpired,
   isUserCurrentlyOnline,
+  markB2cVisaExitedCloud,
   normalizeOrderStatusValue,
   normalizePhone,
   previewOldCompletedAttachmentsCleanup,
@@ -119,6 +123,7 @@ import {
   updateDocumentReviewStatusCloud,
   updateTravelerProfileDetails,
   uploadAndAddDocumentToTravelerCloud,
+  upsertB2cVisaTravelerCloud,
 } from '../utils/travelerStore';
 import {
   getLocalAdminClearedAt,
@@ -179,7 +184,11 @@ import {
   isClientOrderCompleted,
 } from '../utils/whatsappHelpers';
 import {
+  buildB2cExitReminderWhatsAppMessage,
+  calculateExpectedExitDate,
   evaluateB2cExitCountdown,
+  formatB2cVisaTypeLabel,
+  getTodayIsoDate,
   isB2cUrgentOrWarning,
 } from '../utils/b2cVisaHelpers';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -193,6 +202,12 @@ type DashboardTab =
   | 'messages_otp'
   | 'ads'
   | 'settings';
+type ClientModalTab =
+  | 'basic_passport'
+  | 'documents'
+  | 'order_stages'
+  | 'b2c_visa'
+  | 'private_notes';
 type OrderFilter =
   | 'all'
   | 'verified'
@@ -228,7 +243,6 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     logoutAdmin,
   } = useAdmin();
   const cmsState = useCmsState();
-  const BackArrow = isAr ? ArrowRight : ArrowLeft;
 
   const canManageClients = hasPermission('manage_clients');
   const canActivateOtp = hasPermission('activate_otp');
@@ -252,9 +266,17 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [chatSearchQuery, setChatSearchQuery] = useState('');
   const [, setPresenceTick] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [orderFilter, setOrderFilter] = useState<OrderFilter>('all');
   const [b2bSearchQuery, setB2bSearchQuery] = useState('');
+  const deferredB2bSearchQuery = useDeferredValue(b2bSearchQuery);
   const [b2bOnlineOnly, setB2bOnlineOnly] = useState(false);
+  const [dbConnectionState, setDbConnectionState] = useState<'connected' | 'syncing' | 'offline'>(
+    () => (typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'connected')
+  );
+  const [lastSyncedAt, setLastSyncedAt] = useState<string>(() => new Date().toISOString());
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+  const [manualRefreshFeedback, setManualRefreshFeedback] = useState<string | null>(null);
   const [b2bCompanyName, setB2bCompanyName] = useState('');
   const [b2bContactName, setB2bContactName] = useState('');
   const [b2bPhone, setB2bPhone] = useState('');
@@ -283,8 +305,16 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
   const [platformAnalytics, setPlatformAnalytics] = useState<AnalyticsDashboardState | null>(null);
   const [showDailyAnalyticsModal, setShowDailyAnalyticsModal] = useState(false);
 
-  // Client Folder Detail
+  // Client Folder Detail (Unified Centered Control Modal)
   const [selectedClientPhone, setSelectedClientPhone] = useState<string | null>(null);
+  const [clientModalTab, setClientModalTab] = useState<ClientModalTab>('basic_passport');
+  const [b2cDraftVisaType, setB2cDraftVisaType] = useState<B2cVisaType>('umrah_b2c');
+  const [b2cDraftEntryDate, setB2cDraftEntryDate] = useState<string>(() => getTodayIsoDate());
+  const [b2cDraftStayDays, setB2cDraftStayDays] = useState<number>(30);
+  const [b2cDraftNotes, setB2cDraftNotes] = useState<string>('');
+  const [isSavingB2cModal, setIsSavingB2cModal] = useState(false);
+  const [b2cModalFeedback, setB2cModalFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [quickDeleteCardPhone, setQuickDeleteCardPhone] = useState<string | null>(null);
   const [editFirstName, setEditFirstName] = useState('');
   const [editLastName, setEditLastName] = useState('');
   const [editPassportFullName, setEditPassportFullName] = useState('');
@@ -518,15 +548,74 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         setGeminiKeyInput(fresh.geminiApiKey || '');
       }
     });
-    const onTravelersUpdate = () => loadTravelers();
+    const onTravelersUpdate = () => {
+      loadTravelers();
+      setLastSyncedAt(new Date().toISOString());
+      if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+        setDbConnectionState('connected');
+      }
+    };
     const onAuthUpdate = () => setSubAdmins(getSubAdmins());
+    const onOnline = () => {
+      setDbConnectionState('connected');
+      void forceRefreshClientsFromServerCloud().then((res) => {
+        if (res.ok) {
+          loadTravelers();
+          setLastSyncedAt(res.syncedAt);
+        }
+      });
+    };
+    const onOffline = () => setDbConnectionState('offline');
     window.addEventListener(TRAVELERS_UPDATED_EVENT, onTravelersUpdate);
     window.addEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
     return () => {
       window.removeEventListener(TRAVELERS_UPDATED_EVENT, onTravelersUpdate);
       window.removeEventListener(ADMIN_AUTH_UPDATED_EVENT, onAuthUpdate);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
     };
   }, []);
+
+  const handleManualCloudRefresh = async () => {
+    if (isManualRefreshing) return;
+    setIsManualRefreshing(true);
+    setDbConnectionState('syncing');
+    setManualRefreshFeedback(null);
+    try {
+      await testConnection(0);
+      const [clientsRes] = await Promise.all([
+        forceRefreshClientsFromServerCloud(),
+        fetchSiteConfigFromCloud(),
+      ]);
+      loadTravelers();
+      setLastSyncedAt(clientsRes.syncedAt || new Date().toISOString());
+      if (clientsRes.ok) {
+        setDbConnectionState('connected');
+        setManualRefreshFeedback(
+          t(
+            `تمت المزامنة الفورية (${clientsRes.count} عميل)`,
+            `Live synced (${clientsRes.count} clients)`
+          )
+        );
+      } else {
+        setDbConnectionState(
+          typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'connected'
+        );
+        setManualRefreshFeedback(
+          t('تم تحديث القائمة من التخزين المتاح', 'Refreshed from available cache')
+        );
+      }
+    } catch {
+      setDbConnectionState(
+        typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline' : 'connected'
+      );
+    } finally {
+      setIsManualRefreshing(false);
+      window.setTimeout(() => setManualRefreshFeedback(null), 3200);
+    }
+  };
 
   useEffect(() => {
     setSiteDraft((prev) =>
@@ -762,6 +851,11 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         }
       }
       setDocNoteDrafts(initialDocNotes);
+      setB2cDraftVisaType(selectedClient.b2cVisa?.visaType || 'umrah_b2c');
+      setB2cDraftEntryDate(selectedClient.b2cVisa?.entryDate || getTodayIsoDate());
+      setB2cDraftStayDays(selectedClient.b2cVisa?.stayDays || 30);
+      setB2cDraftNotes(selectedClient.b2cVisa?.notes || '');
+      setB2cModalFeedback(null);
     }
   }, [selectedClientPhone, travelers.length]);
 
@@ -769,13 +863,65 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     setAdminPassportAiBadge(false);
     setAdminPassportAiMsg(null);
     setAdminClarityWarning(null);
+    setClientModalTab('basic_passport');
+    setB2cModalFeedback(null);
   }, [selectedClientPhone]);
 
   const handleOpenClientFromAnyTab = (phone: string) => {
     if (!canManageClients) return;
-    const target = travelers.find((tr) => tr.phone === phone);
     setSelectedClientPhone(phone);
-    setActiveTab(target?.accountType === 'b2b_partner' ? 'b2b_partners' : 'individuals');
+  };
+
+  const handleSaveB2cFromModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedClient || !canManageClients || isSavingB2cModal) return;
+    setIsSavingB2cModal(true);
+    setB2cModalFeedback(null);
+    try {
+      const displayName = getTravelerDisplayNames(selectedClient).fullDisplayName;
+      const res = await upsertB2cVisaTravelerCloud({
+        existingPhone: selectedClient.phone,
+        name: displayName,
+        phone: selectedClient.phone,
+        passportNumber: editPassportNumber.trim() || selectedClient.passportNumber,
+        visaType: b2cDraftVisaType,
+        entryDate: b2cDraftEntryDate,
+        stayDays: b2cDraftStayDays,
+        notes: b2cDraftNotes.trim(),
+      });
+      if (!res.ok) {
+        setB2cModalFeedback({
+          ok: false,
+          text: res.error || t('تعذر حفظ بيانات تأشيرة B2C.', 'Could not save B2C visa details.'),
+        });
+        return;
+      }
+      loadTravelers();
+      setB2cModalFeedback({
+        ok: true,
+        text: t('تم حفظ وتحديث بيانات تأشيرة B2C وحساب موعد المغادرة بنجاح ✓', 'B2C visa record saved & exit date updated ✓'),
+      });
+    } finally {
+      setIsSavingB2cModal(false);
+    }
+  };
+
+  const handleToggleB2cExitFromModal = async (exited: boolean) => {
+    if (!selectedClient?.b2cVisa || !canManageClients || isSavingB2cModal) return;
+    setIsSavingB2cModal(true);
+    setB2cModalFeedback(null);
+    try {
+      await markB2cVisaExitedCloud(selectedClient.phone, exited);
+      loadTravelers();
+      setB2cModalFeedback({
+        ok: true,
+        text: exited
+          ? t('تم تسجيل المغادرة النهائية وإغلاق تنبيه B2C بنجاح ✓', 'Marked as departed and B2C alert closed ✓')
+          : t('تمت إعادة فتح ملف تأشيرة B2C كنشط بنجاح.', 'B2C visa record reopened as active.'),
+      });
+    } finally {
+      setIsSavingB2cModal(false);
+    }
   };
 
   const handleOpenClientChat = (phone: string) => {
@@ -2153,158 +2299,224 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
     return `${Math.max(1, Math.round(bytes / 1024))} ${isAr ? 'كيلوبايت' : 'KB'}`;
   };
 
-  const individualTravelers = travelers.filter((tr) => tr.accountType !== 'b2b_partner');
-  const b2bPartners = travelers.filter((tr) => tr.accountType === 'b2b_partner');
-
-  const individualsOnlineCount = individualTravelers.filter((tr) =>
-    isUserCurrentlyOnline(tr)
-  ).length;
-  const b2bOnlineCount = b2bPartners.filter((tr) => isUserCurrentlyOnline(tr)).length;
-  const totalUnreadChatCount = Object.values(chatThreads).reduce(
-    (sum, th) => sum + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
-    0
+  const individualTravelers = useMemo(
+    () => travelers.filter((tr) => tr.accountType !== 'b2b_partner'),
+    [travelers]
+  );
+  const b2bPartners = useMemo(
+    () => travelers.filter((tr) => tr.accountType === 'b2b_partner'),
+    [travelers]
   );
 
-  const filteredRequests = sortProfilesByPresence(
-    individualTravelers.filter((tr) => {
-      const hasActive = hasClientActiveOrder(tr);
-      const isCompleted = isClientOrderCompleted(tr);
-      const isVerified = isClientAccountVerified(tr);
-      const hasB2c = Boolean(tr.b2cVisa);
-      const hasFiles = (tr.documents?.length || 0) > 0;
-      const online = isUserCurrentlyOnline(tr);
-      const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
-
-      if (orderFilter === 'online' && !online) return false;
-      if (orderFilter === 'verified' && !isVerified) return false;
-      if (orderFilter === 'unverified' && isVerified) return false;
-      if (orderFilter === 'active' && (!hasActive || isCompleted)) return false;
-      if (orderFilter === 'no_orders' && hasActive) return false;
-      if (orderFilter === 'b2c' && !hasB2c) return false;
-      if (orderFilter === 'with_files' && !hasFiles) return false;
-      if (orderFilter === 'completed' && !isCompleted) return false;
-      if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
-
-      const q = searchQuery.trim().toLowerCase();
-      if (!q) return true;
-      const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
-      return (
-        tr.name.toLowerCase().includes(q) ||
-        tr.phone.includes(q) ||
-        formatPhoneForDisplay(tr.phone).includes(q) ||
-        orderCode.includes(q) ||
-        (tr.passportNumber || '').toLowerCase().includes(q)
-      );
-    })
+  const individualsOnlineCount = useMemo(
+    () => individualTravelers.filter((tr) => isUserCurrentlyOnline(tr)).length,
+    [individualTravelers]
+  );
+  const b2bOnlineCount = useMemo(
+    () => b2bPartners.filter((tr) => isUserCurrentlyOnline(tr)).length,
+    [b2bPartners]
+  );
+  const totalUnreadChatCount = useMemo(
+    () =>
+      Object.values(chatThreads).reduce(
+        (sum, th) => sum + (typeof th.unreadAdminCount === 'number' ? th.unreadAdminCount : 0),
+        0
+      ),
+    [chatThreads]
   );
 
-  const orderedRequests =
-    orderFilter === 'expiring_passports'
-      ? [...filteredRequests].sort((a, b) => {
-          const da = evaluatePassportValidity(a.passportExpiryDate).remainingDays ?? 9999;
-          const dbVal = evaluatePassportValidity(b.passportExpiryDate).remainingDays ?? 9999;
-          return da - dbVal;
+  const filteredRequests = useMemo(
+    () =>
+      sortProfilesByPresence(
+        individualTravelers.filter((tr) => {
+          const hasActive = hasClientActiveOrder(tr);
+          const isCompleted = isClientOrderCompleted(tr);
+          const isVerified = isClientAccountVerified(tr);
+          const hasB2c = Boolean(tr.b2cVisa);
+          const hasFiles = (tr.documents?.length || 0) > 0;
+          const online = isUserCurrentlyOnline(tr);
+          const passportEval = evaluatePassportValidity(tr.passportExpiryDate);
+
+          if (orderFilter === 'online' && !online) return false;
+          if (orderFilter === 'verified' && !isVerified) return false;
+          if (orderFilter === 'unverified' && isVerified) return false;
+          if (orderFilter === 'active' && (!hasActive || isCompleted)) return false;
+          if (orderFilter === 'no_orders' && hasActive) return false;
+          if (orderFilter === 'b2c' && !hasB2c) return false;
+          if (orderFilter === 'with_files' && !hasFiles) return false;
+          if (orderFilter === 'completed' && !isCompleted) return false;
+          if (orderFilter === 'expiring_passports' && !passportEval.isUnderSixMonths) return false;
+
+          const q = deferredSearchQuery.trim().toLowerCase();
+          if (!q) return true;
+          const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
+          return (
+            tr.name.toLowerCase().includes(q) ||
+            tr.phone.includes(q) ||
+            formatPhoneForDisplay(tr.phone).includes(q) ||
+            orderCode.includes(q) ||
+            (tr.passportNumber || '').toLowerCase().includes(q)
+          );
         })
-      : filteredRequests;
-
-  const filteredB2BPartners = sortProfilesByPresence(
-    b2bPartners.filter((tr) => {
-      if (b2bOnlineOnly && !isUserCurrentlyOnline(tr)) return false;
-      const q = b2bSearchQuery.trim().toLowerCase();
-      if (!q) return true;
-      const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
-      return (
-        (tr.companyName || tr.name || '').toLowerCase().includes(q) ||
-        (tr.contactPersonName || '').toLowerCase().includes(q) ||
-        tr.phone.includes(q) ||
-        formatPhoneForDisplay(tr.phone).includes(q) ||
-        orderCode.includes(q)
-      );
-    })
+      ),
+    [individualTravelers, orderFilter, deferredSearchQuery]
   );
 
-  const chatDirectoryClients = [...travelers]
-    .filter((tr) => {
-      if (chatInboxFilter === 'individual' && tr.accountType === 'b2b_partner') return false;
-      if (chatInboxFilter === 'b2b_partner' && tr.accountType !== 'b2b_partner') return false;
-      const q = chatSearchQuery.trim().toLowerCase();
-      if (!q) return true;
-      return (
-        (tr.companyName || '').toLowerCase().includes(q) ||
-        (tr.contactPersonName || '').toLowerCase().includes(q) ||
-        tr.name.toLowerCase().includes(q) ||
-        tr.phone.includes(q) ||
-        formatPhoneForDisplay(tr.phone).includes(q)
-      );
-    })
-    .sort((a, b) => {
-      const thA = chatThreads[a.phone];
-      const thB = chatThreads[b.phone];
-      const unA = thA?.unreadAdminCount || 0;
-      const unB = thB?.unreadAdminCount || 0;
-      if (unA > 0 && unB === 0) return -1;
-      if (unB > 0 && unA === 0) return 1;
-      const tMsgA = thA?.lastMessageAt ? Date.parse(thA.lastMessageAt) : 0;
-      const tMsgB = thB?.lastMessageAt ? Date.parse(thB.lastMessageAt) : 0;
-      if (tMsgA !== tMsgB) return tMsgB - tMsgA;
-      const onA = isUserCurrentlyOnline(a);
-      const onB = isUserCurrentlyOnline(b);
-      if (onA !== onB) return onA ? -1 : 1;
-      const seenA = Date.parse(a.lastSeenAt || a.createdAt || '');
-      const seenB = Date.parse(b.lastSeenAt || b.createdAt || '');
-      return (Number.isFinite(seenB) ? seenB : 0) - (Number.isFinite(seenA) ? seenA : 0);
-    });
+  const orderedRequests = useMemo(
+    () =>
+      orderFilter === 'expiring_passports'
+        ? [...filteredRequests].sort((a, b) => {
+            const da = evaluatePassportValidity(a.passportExpiryDate).remainingDays ?? 9999;
+            const dbVal = evaluatePassportValidity(b.passportExpiryDate).remainingDays ?? 9999;
+            return da - dbVal;
+          })
+        : filteredRequests,
+    [filteredRequests, orderFilter]
+  );
+
+  const filteredB2BPartners = useMemo(
+    () =>
+      sortProfilesByPresence(
+        b2bPartners.filter((tr) => {
+          if (b2bOnlineOnly && !isUserCurrentlyOnline(tr)) return false;
+          const q = deferredB2bSearchQuery.trim().toLowerCase();
+          if (!q) return true;
+          const orderCode = (tr.orderCode || buildOrderCodeFromPhone(tr.phone)).toLowerCase();
+          return (
+            (tr.companyName || tr.name || '').toLowerCase().includes(q) ||
+            (tr.contactPersonName || '').toLowerCase().includes(q) ||
+            tr.phone.includes(q) ||
+            formatPhoneForDisplay(tr.phone).includes(q) ||
+            orderCode.includes(q)
+          );
+        })
+      ),
+    [b2bPartners, b2bOnlineOnly, deferredB2bSearchQuery]
+  );
+
+  const chatDirectoryClients = useMemo(
+    () =>
+      [...travelers]
+        .filter((tr) => {
+          if (chatInboxFilter === 'individual' && tr.accountType === 'b2b_partner') return false;
+          if (chatInboxFilter === 'b2b_partner' && tr.accountType !== 'b2b_partner') return false;
+          const q = chatSearchQuery.trim().toLowerCase();
+          if (!q) return true;
+          return (
+            (tr.companyName || '').toLowerCase().includes(q) ||
+            (tr.contactPersonName || '').toLowerCase().includes(q) ||
+            tr.name.toLowerCase().includes(q) ||
+            tr.phone.includes(q) ||
+            formatPhoneForDisplay(tr.phone).includes(q)
+          );
+        })
+        .sort((a, b) => {
+          const thA = chatThreads[a.phone];
+          const thB = chatThreads[b.phone];
+          const unA = thA?.unreadAdminCount || 0;
+          const unB = thB?.unreadAdminCount || 0;
+          if (unA > 0 && unB === 0) return -1;
+          if (unB > 0 && unA === 0) return 1;
+          const tMsgA = thA?.lastMessageAt ? Date.parse(thA.lastMessageAt) : 0;
+          const tMsgB = thB?.lastMessageAt ? Date.parse(thB.lastMessageAt) : 0;
+          if (tMsgA !== tMsgB) return tMsgB - tMsgA;
+          const onA = isUserCurrentlyOnline(a);
+          const onB = isUserCurrentlyOnline(b);
+          if (onA !== onB) return onA ? -1 : 1;
+          const seenA = Date.parse(a.lastSeenAt || a.createdAt || '');
+          const seenB = Date.parse(b.lastSeenAt || b.createdAt || '');
+          return (Number.isFinite(seenB) ? seenB : 0) - (Number.isFinite(seenA) ? seenA : 0);
+        }),
+    [travelers, chatInboxFilter, chatSearchQuery, chatThreads]
+  );
 
   const activeChatClient =
     (activeChatPhone && travelers.find((tr) => tr.phone === activeChatPhone)) ||
     chatDirectoryClients[0] ||
     null;
 
-  const pendingOtpClients = getPendingOtpClients(travelers);
+  const pendingOtpClients = useMemo(() => getPendingOtpClients(travelers), [travelers]);
   const otpQueueClients = showAllOtpClients ? travelers : pendingOtpClients;
 
-  const clientMessagesAndReceipts = travelers.filter(
-    (tr) =>
-      Boolean(tr.preferredVisaType) ||
-      Boolean(tr.adminNotes) ||
-      (tr.documents || []).some((d) => d.docType === 'receipt')
+  const clientMessagesAndReceipts = useMemo(
+    () =>
+      travelers.filter(
+        (tr) =>
+          Boolean(tr.preferredVisaType) ||
+          Boolean(tr.adminNotes) ||
+          (tr.documents || []).some((d) => d.docType === 'receipt')
+      ),
+    [travelers]
   );
 
   const pendingCount = pendingOtpClients.length;
-  const verifiedClientsCount = individualTravelers.filter((tr) =>
-    isClientAccountVerified(tr)
-  ).length;
-  const unverifiedClientsCount = individualTravelers.length - verifiedClientsCount;
-  const noOrdersClientsCount = individualTravelers.filter(
-    (tr) => !hasClientActiveOrder(tr)
-  ).length;
-  const b2cIndividualCount = individualTravelers.filter((tr) => Boolean(tr.b2cVisa)).length;
-  const b2cActiveTravelers = travelers.filter(
-    (tr) => tr.b2cVisa && tr.b2cVisa.status !== 'exited'
-  );
-  const b2cUrgentAlertsCount = b2cActiveTravelers.filter((tr) =>
-    isB2cUrgentOrWarning(tr.b2cVisa)
-  ).length;
-  const activeOrdersCount = individualTravelers.filter(
-    (tr) => hasClientActiveOrder(tr) && !isClientOrderCompleted(tr)
-  ).length;
-  const withFilesCount = individualTravelers.filter(
-    (tr) => (tr.documents?.length || 0) > 0
-  ).length;
-  const expiringPassportCount = individualTravelers.filter(
-    (tr) => evaluatePassportValidity(tr.passportExpiryDate).isUnderSixMonths
-  ).length;
-  const completedCount = individualTravelers.filter((tr) =>
-    isClientOrderCompleted(tr)
-  ).length;
-  const messagesBadgeCount =
-    pendingCount +
-    travelers.filter(
-      (tr) => !isClientAccountVerified(tr) || (tr.documents || []).some((d) => d.docType === 'receipt')
-    ).length;
+  const kpiSummary = useMemo(() => {
+    let verified = 0;
+    let noOrders = 0;
+    let b2cInd = 0;
+    let activeOrders = 0;
+    let withFiles = 0;
+    let expiringPassports = 0;
+    let completed = 0;
+
+    for (const tr of individualTravelers) {
+      const isVer = isClientAccountVerified(tr);
+      const hasAct = hasClientActiveOrder(tr);
+      const isComp = isClientOrderCompleted(tr);
+      if (isVer) verified++;
+      if (!hasAct) noOrders++;
+      if (tr.b2cVisa) b2cInd++;
+      if (hasAct && !isComp) activeOrders++;
+      if ((tr.documents?.length || 0) > 0) withFiles++;
+      if (evaluatePassportValidity(tr.passportExpiryDate).isUnderSixMonths) expiringPassports++;
+      if (isComp) completed++;
+    }
+
+    const b2cActive = travelers.filter((tr) => tr.b2cVisa && tr.b2cVisa.status !== 'exited');
+    const b2cUrgent = b2cActive.filter((tr) => isB2cUrgentOrWarning(tr.b2cVisa)).length;
+    const msgBadge =
+      pendingCount +
+      travelers.filter(
+        (tr) =>
+          !isClientAccountVerified(tr) ||
+          (tr.documents || []).some((d) => d.docType === 'receipt')
+      ).length;
+
+    return {
+      verifiedClientsCount: verified,
+      unverifiedClientsCount: individualTravelers.length - verified,
+      noOrdersClientsCount: noOrders,
+      b2cIndividualCount: b2cInd,
+      b2cActiveTravelers: b2cActive,
+      b2cUrgentAlertsCount: b2cUrgent,
+      activeOrdersCount: activeOrders,
+      withFilesCount: withFiles,
+      expiringPassportCount: expiringPassports,
+      completedCount: completed,
+      messagesBadgeCount: msgBadge,
+    };
+  }, [individualTravelers, travelers, pendingCount]);
+
+  const {
+    verifiedClientsCount,
+    unverifiedClientsCount,
+    noOrdersClientsCount,
+    b2cIndividualCount,
+    b2cActiveTravelers,
+    b2cUrgentAlertsCount,
+    activeOrdersCount,
+    withFilesCount,
+    expiringPassportCount,
+    completedCount,
+    messagesBadgeCount,
+  } = kpiSummary;
+
   const overrideTextCount = Object.keys(cmsState.textOverrides).length;
-  const storageStats = computeStorageUsageStats(travelers);
-  const cleanupPreview = previewOldCompletedAttachmentsCleanup(travelers, cleanupAgeDays);
+  const storageStats = useMemo(() => computeStorageUsageStats(travelers), [travelers]);
+  const cleanupPreview = useMemo(
+    () => previewOldCompletedAttachmentsCleanup(travelers, cleanupAgeDays),
+    [travelers, cleanupAgeDays]
+  );
 
   const SafeLockBanner: React.FC<{ scopeLabelAr: string; scopeLabelEn: string }> = ({
     scopeLabelAr,
@@ -2386,13 +2598,65 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                   )}
                 </button>
               </div>
-              <p className="text-[11px] text-slate-300 mt-0.5 truncate">
-                {t('منظومة مسارك للإنجاز السياحي — إدارة العمليات والعملاء', 'Masarik Tourism — Operations & Client Directory')}
-              </p>
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <p className="text-[11px] text-slate-300 truncate">
+                  {t('منظومة مسارك للإنجاز السياحي — إدارة العمليات والعملاء', 'Masarik Tourism — Operations & Client Directory')}
+                </p>
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                    dbConnectionState === 'connected'
+                      ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                      : dbConnectionState === 'syncing'
+                      ? 'bg-sky-500/20 border-sky-400/50 text-sky-100'
+                      : 'bg-red-500/20 border-red-400/50 text-red-200'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      dbConnectionState === 'connected'
+                        ? 'bg-emerald-400 animate-pulse'
+                        : dbConnectionState === 'syncing'
+                        ? 'bg-sky-300 animate-ping'
+                        : 'bg-red-400'
+                    }`}
+                  />
+                  <span>
+                    {dbConnectionState === 'connected'
+                      ? t('متصل بقاعدة البيانات مباشرة 🟢', 'Live Firestore Connected 🟢')
+                      : dbConnectionState === 'syncing'
+                      ? t('جاري المزامنة الفورية...', 'Syncing Live...')
+                      : t('انقطع الاتصال بالسحابة 🔴', 'Cloud Offline 🔴')}
+                  </span>
+                  <span className="opacity-75 tabular-nums hidden sm:inline">
+                    ·{' '}
+                    {new Date(lastSyncedAt).toLocaleTimeString(isAr ? 'ar-EG' : 'en-US', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </span>
+                {manualRefreshFeedback && (
+                  <span className="px-2 py-0.5 rounded-full bg-[#C6A052]/25 border border-[#C6A052]/60 text-[#E5C887] text-[10px] font-bold">
+                    {manualRefreshFeedback}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 
           <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {/* Instant Cloud Refresh Button */}
+            <button
+              type="button"
+              disabled={isManualRefreshing}
+              onClick={() => void handleManualCloudRefresh()}
+              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-60 text-[#E5C887] border border-[#C6A052]/50 text-xs font-black flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+              title={t('سحب أحدث البيانات من Firestore مباشرة', 'Fetch latest data directly from Firestore')}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isManualRefreshing ? 'animate-spin' : ''}`} />
+              <span>{t('تحديث البيانات الفوري', 'Instant Data Sync')}</span>
+            </button>
+
             {/* Notifications Bell with Green Indicator & Centered Floating Modal */}
             <button
               type="button"
@@ -2650,19 +2914,24 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
           </div>
         )}
 
-        {/* Executive Top KPI Strip */}
-        {canManageClients && !selectedClient && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
+        {/* Executive Top KPI Strip (5 Clickable Cards with Instant Filtering) */}
+        {canManageClients && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-3 text-center tabular-nums">
             <button
               type="button"
               onClick={() => {
                 setActiveTab('individuals');
+                setSelectedClientPhone(null);
                 handleKpiFilterClick('all');
               }}
-              className="bg-white border border-slate-200 hover:border-[#0F2438] rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+              className={`rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start border ${
+                activeTab === 'individuals' && orderFilter === 'all'
+                  ? 'bg-white border-[#0F2438] ring-2 ring-[#0F2438]/15 shadow-md'
+                  : 'bg-white border-slate-200 hover:border-[#0F2438]'
+              }`}
             >
-              <div>
-                <span className="text-[11px] font-bold text-slate-500 block">
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold text-slate-500 block truncate">
                   {t('إجمالي العملاء', 'Total Clients')}
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-[#0F2438] font-mono">
@@ -2678,20 +2947,26 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               type="button"
               onClick={() => {
                 setActiveTab('individuals');
-                handleKpiFilterClick('verified');
+                setSelectedClientPhone(null);
+                handleKpiFilterClick('online');
               }}
-              className="bg-emerald-50/75 border border-emerald-200 hover:border-emerald-400 rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+              className={`rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start border ${
+                activeTab === 'individuals' && orderFilter === 'online'
+                  ? 'bg-emerald-50 border-emerald-600 ring-2 ring-emerald-500/20 shadow-md'
+                  : 'bg-emerald-50/75 border-emerald-200 hover:border-emerald-400'
+              }`}
             >
-              <div>
-                <span className="text-[11px] font-bold text-emerald-900 block">
-                  {t('الحسابات الموثقة', 'Verified Accounts')}
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold text-emerald-900 flex items-center gap-1 truncate">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="truncate">{t('العملاء المتصلون الآن', 'Online Clients')}</span>
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-emerald-800 font-mono">
-                  {verifiedClientsCount}
+                  {individualsOnlineCount}
                 </span>
               </div>
               <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                <ShieldCheck className="w-4 h-4" />
+                <Wifi className="w-4 h-4" />
               </div>
             </button>
 
@@ -2699,12 +2974,17 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
               type="button"
               onClick={() => {
                 setActiveTab('individuals');
+                setSelectedClientPhone(null);
                 handleKpiFilterClick('active');
               }}
-              className="bg-sky-50/75 border border-sky-200 hover:border-sky-400 rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start"
+              className={`rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start border ${
+                activeTab === 'individuals' && orderFilter === 'active'
+                  ? 'bg-sky-50 border-sky-600 ring-2 ring-sky-500/20 shadow-md'
+                  : 'bg-sky-50/75 border-sky-200 hover:border-sky-400'
+              }`}
             >
-              <div>
-                <span className="text-[11px] font-bold text-sky-900 block">
+              <div className="min-w-0">
+                <span className="text-[11px] font-bold text-sky-900 block truncate">
                   {t('الطلبات الجارية', 'Active Orders')}
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-sky-900 font-mono">
@@ -2719,22 +2999,67 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
             <button
               type="button"
               onClick={() => {
+                setActiveTab('individuals');
+                setSelectedClientPhone(null);
+                handleKpiFilterClick('unverified');
+              }}
+              className={`rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start border ${
+                activeTab === 'individuals' && orderFilter === 'unverified'
+                  ? 'bg-amber-50 border-amber-600 ring-2 ring-amber-500/20 shadow-md'
+                  : unverifiedClientsCount > 0
+                  ? 'bg-amber-50/80 border-amber-300 hover:border-amber-500'
+                  : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <div className="min-w-0">
+                <span
+                  className={`text-[11px] font-bold block truncate ${
+                    unverifiedClientsCount > 0 ? 'text-amber-950' : 'text-slate-600'
+                  }`}
+                >
+                  {t('بانتظار التوثيق', 'Pending Verification')}
+                </span>
+                <span
+                  className={`text-xl sm:text-2xl font-black font-mono ${
+                    unverifiedClientsCount > 0 ? 'text-amber-800' : 'text-slate-700'
+                  }`}
+                >
+                  {unverifiedClientsCount}
+                </span>
+              </div>
+              <div
+                className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                  unverifiedClientsCount > 0
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-slate-200 text-slate-600'
+                }`}
+              >
+                <Clock className="w-4 h-4" />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
                 setActiveTab('b2c_visas');
                 setSelectedClientPhone(null);
               }}
-              className={`border rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start ${
-                b2cUrgentAlertsCount > 0
+              className={`col-span-2 sm:col-span-1 border rounded-2xl p-3.5 shadow-xs transition cursor-pointer flex items-center justify-between text-start ${
+                activeTab === 'b2c_visas'
+                  ? 'ring-2 ring-[#C6A052] shadow-md ' +
+                    (b2cUrgentAlertsCount > 0 ? 'bg-red-50 border-red-500' : 'bg-[#FAF8F2] border-[#C6A052]')
+                  : b2cUrgentAlertsCount > 0
                   ? 'bg-red-50 border-red-300 hover:border-red-500'
                   : 'bg-[#FAF8F2] border-[#C6A052]/50 hover:border-[#C6A052]'
               }`}
             >
-              <div>
+              <div className="min-w-0">
                 <span
-                  className={`text-[11px] font-bold block ${
+                  className={`text-[11px] font-bold block truncate ${
                     b2cUrgentAlertsCount > 0 ? 'text-red-900' : 'text-[#0F2438]'
                   }`}
                 >
-                  {t('تنبيهات خروج B2C العاجلة', 'Urgent B2C Exits')}
+                  {t('تنبيهات خروج تأشيرات B2C العاجلة', 'Urgent B2C Exit Alerts')}
                 </span>
                 <span
                   className={`text-xl sm:text-2xl font-black font-mono ${
@@ -2925,7 +3250,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {/* ===================================================================== */}
         {/* TAB 1: INDIVIDUAL CLIENTS DIRECTORY (ONLINE-FIRST PRESENCE SORTING)   */}
         {/* ===================================================================== */}
-        {activeTab === 'individuals' && canManageClients && !selectedClient && (
+        {activeTab === 'individuals' && canManageClients && (
           <div className="space-y-4">
             {/* Platform Visitor Analytics Summary Card (General Manager Only) */}
             <div className="bg-gradient-to-l from-[#0F2438] via-[#163B65] to-[#0F2438] border-2 border-[#C6A052]/60 rounded-2xl p-4 sm:p-5 text-white shadow-lg space-y-3">
@@ -3558,42 +3883,160 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
                         </div>
                       </div>
 
-                      {/* Compact Action Strip + Expand Toggle */}
-                      <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setExpandedClientPhones((prev) => ({
-                              ...prev,
-                              [client.phone]: !prev[client.phone],
-                            }));
-                          }}
-                          className={`px-3 py-1.5 rounded-xl border text-xs font-black inline-flex items-center gap-1.5 transition cursor-pointer ${
-                            isExpanded
-                              ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438]'
-                              : 'bg-slate-50 hover:bg-slate-100 text-[#0F2438] border-slate-200'
-                          }`}
-                        >
-                          <span>{t('إدارة الحساب والطلب', 'Manage Account & Order')}</span>
-                          {isExpanded ? (
-                            <ChevronUp className="w-3.5 h-3.5" />
-                          ) : (
-                            <ChevronDown className="w-3.5 h-3.5" />
+                      {/* 1-Click Direct Quick Actions Bar + Expand Toggle */}
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-1.5"
+                      >
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {canActivateOtp && (
+                            isClientAccountVerified(client) ? (
+                              <button
+                                type="button"
+                                disabled={togglingVerifyPhone === client.phone}
+                                onClick={() => void handleAdminRevertUnverified(client)}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 disabled:opacity-60 border border-amber-300 text-amber-900 text-[11px] font-black transition cursor-pointer"
+                                title={t('تحويل إلى غير موثق', 'Revert to Unverified')}
+                              >
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التحديث...', 'Updating...')
+                                  : t('↩️ إلغاء التوثيق', '↩️ Unverify')}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={togglingVerifyPhone === client.phone}
+                                onClick={() => void handleAdminInstantActivate(client)}
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-[11px] font-black transition cursor-pointer shadow-xs"
+                                title={t('توثيق وتفعيل الحساب فوراً', 'Verify & Activate Instantly')}
+                              >
+                                {togglingVerifyPhone === client.phone
+                                  ? t('جاري التوثيق...', 'Verifying...')
+                                  : t('✅ توثيق الآن', '✅ Verify Now')}
+                              </button>
+                            )
                           )}
-                        </button>
 
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedClientPhone(client.phone);
-                          }}
-                          className="px-3 py-1.5 rounded-xl bg-[#FAF8F2] hover:bg-[#F3ECE0] border border-[#C6A052]/60 text-[#0F2438] text-xs font-black inline-flex items-center gap-1.5 transition cursor-pointer"
-                        >
-                          <FolderOpen className="w-3.5 h-3.5 text-[#9E7B33]" />
-                          <span>{t('فتح ملف العميل', 'Open Folder')}</span>
-                        </button>
+                          {!clientHasActiveOrder ? (
+                            <button
+                              type="button"
+                              onClick={() => handleManualOpenOrder(client)}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 transition cursor-pointer"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>{t('فتح طلب', 'Open Order')}</span>
+                            </button>
+                          ) : (
+                            <select
+                              value={normalizeOrderStatusValue(client.orderStatus)}
+                              onChange={(e) =>
+                                handleOneClickOrderStageUpdate(
+                                  client,
+                                  e.target.value as VisaOrderStatus
+                                )
+                              }
+                              aria-label={t('تحديث مرحلة الطلب', 'Update Order Stage')}
+                              className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white hover:border-[#0F2438] text-[#0F2438] text-[11px] font-bold cursor-pointer max-w-[160px]"
+                            >
+                              {VISA_ORDER_STATUSES.map((st, idx) => (
+                                <option key={st} value={st}>
+                                  {idx + 1}. {translateOrderStatus(st, lang)}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (clientHasActiveOrder && clientStageIdx >= 1) {
+                                handleNotifyClientStageWhatsApp(client);
+                              } else if (!isClientAccountVerified(client) && canActivateOtp) {
+                                void handleSendVerificationWhatsApp(client);
+                              } else {
+                                handleDirectWhatsAppChat(client);
+                              }
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1 transition cursor-pointer shadow-xs"
+                            title={t('إرسال رسالة واتساب جاهزة للعميل', 'Send Ready WhatsApp Message')}
+                          >
+                            <MessageCircle className="w-3 h-3" />
+                            <span>{t('واتساب جاهز', 'WhatsApp')}</span>
+                          </button>
+
+                          {canDeleteRecords && (
+                            !isEditUnlocked ? (
+                              <span
+                                className="px-2 py-1.5 rounded-lg border border-slate-200 bg-slate-100 text-slate-400 text-[10.5px] font-bold inline-flex items-center gap-1"
+                                title={t('افتح وضع التعديل للحذف', 'Unlock Edit Mode to delete')}
+                              >
+                                <Lock className="w-3 h-3" />
+                              </span>
+                            ) : quickDeleteCardPhone === client.phone ? (
+                              <span className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handleConfirmDeleteClient(client.phone);
+                                    setQuickDeleteCardPhone(null);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[10.5px] font-black cursor-pointer"
+                                >
+                                  {t('تأكيد الحذف', 'Confirm')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setQuickDeleteCardPhone(null)}
+                                  className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10.5px] font-bold cursor-pointer"
+                                >
+                                  {t('إلغاء', 'Cancel')}
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setQuickDeleteCardPhone(client.phone)}
+                                className="px-2 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 text-[11px] font-bold inline-flex items-center gap-1 transition cursor-pointer"
+                                title={t('حذف / أرشفة العميل', 'Delete / Archive Client')}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 ms-auto">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedClientPhones((prev) => ({
+                                ...prev,
+                                [client.phone]: !prev[client.phone],
+                              }))
+                            }
+                            className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-black inline-flex items-center gap-1 transition cursor-pointer ${
+                              isExpanded
+                                ? 'bg-[#0F2438] text-[#E5C887] border-[#0F2438]'
+                                : 'bg-slate-50 hover:bg-slate-100 text-[#0F2438] border-slate-200'
+                            }`}
+                          >
+                            <span>{t('المزيد', 'More')}</span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setSelectedClientPhone(client.phone)}
+                            className="px-3 py-1.5 rounded-xl bg-[#FAF8F2] hover:bg-[#F3ECE0] border border-[#C6A052]/70 text-[#0F2438] text-[11px] font-black inline-flex items-center gap-1.5 transition cursor-pointer"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5 text-[#9E7B33]" />
+                            <span>{t('فتح ملف العميل', 'Open File')}</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Expanded Controls Section */}
@@ -3824,7 +4267,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {/* ===================================================================== */}
         {/* TAB 2: B2B PARTNERS (TRAVEL COMPANIES & AGENCIES) DIRECTORY + CREATE  */}
         {/* ===================================================================== */}
-        {activeTab === 'b2b_partners' && canManageClients && !selectedClient && (
+        {activeTab === 'b2b_partners' && canManageClients && (
           <div className="space-y-5">
             {/* B2B Header & KPI Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center tabular-nums">
@@ -4247,7 +4690,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         {/* ===================================================================== */}
         {/* TAB 1.5: B2C VISAS (UMRAH & FREE B2C STAY TRACKER + EXIT ALERTS)       */}
         {/* ===================================================================== */}
-        {activeTab === 'b2c_visas' && canManageClients && !selectedClient && (
+        {activeTab === 'b2c_visas' && canManageClients && (
           <B2cVisasPanel
             travelers={travelers}
             canManageClients={canManageClients}
@@ -4557,1619 +5000,2025 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
         )}
 
         {/* ===================================================================== */}
-        {/* CLIENT / PARTNER FULL FOLDER DETAIL VIEW                              */}
+        {/* UNIFIED CLIENT CONTROL MODAL (CENTERED MODAL WITH 5 INTERNAL TABS)   */}
         {/* ===================================================================== */}
-        {(activeTab === 'individuals' || activeTab === 'b2b_partners') &&
-          canManageClients &&
-          selectedClient && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5 shadow-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200">
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setSelectedClientPhone(null)}
-                  className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                >
-                  <BackArrow className="w-4 h-4" />
-                  <span>
-                    {selectedClient.accountType === 'b2b_partner'
-                      ? t('العودة للشركات الشريكة', 'Back to B2B Partners')
-                      : t('العودة للعملاء الأفراد', 'Back to Individuals')}
-                  </span>
-                </button>
-
-                <div className="flex items-center gap-2.5">
-                  <div className="relative shrink-0">
-                    {selectedClient.avatarUrl ? (
-                      <img
-                        src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
-                        alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
-                        loading="lazy"
-                        decoding="async"
-                        className="w-10 h-10 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
-                      />
-                    ) : selectedClient.accountType === 'b2b_partner' ? (
-                      <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
-                        <Building2 className="w-5 h-5" />
-                      </div>
-                    ) : (
-                      <div className="w-10 h-10 rounded-full bg-[#0F2438] text-[#E5C887] border border-[#C6A052]/60 flex items-center justify-center text-xs font-black">
-                        {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
-                      </div>
-                    )}
-                    <span
-                      className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-white ${
-                        isUserCurrentlyOnline(selectedClient)
-                          ? 'bg-emerald-500 animate-pulse'
-                          : 'bg-slate-400'
-                      }`}
-                    />
-                  </div>
-                  <div className="leading-tight">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs sm:text-sm font-black text-[#0F2438]">
-                        {selectedClient.accountType === 'b2b_partner' && selectedClient.companyName
-                          ? selectedClient.companyName
-                          : getTravelerDisplayNames(selectedClient).fullDisplayName}
-                      </span>
-                      {selectedClient.accountType === 'b2b_partner' && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
-                          <Building2 className="w-3 h-3" />
-                          <span>{t('شركة شريكة B2B', 'B2B Partner')}</span>
-                        </span>
+        {canManageClients && selectedClient && (
+          <div
+            className="fixed inset-0 flex items-center justify-center z-50 bg-[#0A1926]/75 backdrop-blur-xs p-2 sm:p-4"
+            onClick={() => setSelectedClientPhone(null)}
+            dir={dir}
+          >
+            <div
+              className="bg-white border-2 border-[#C6A052]/75 rounded-3xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden shadow-2xl animate-in fade-in zoom-in-95"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label={getTravelerDisplayNames(selectedClient).fullDisplayName}
+            >
+              {/* Modal Top Header */}
+              <div className="bg-gradient-to-l from-[#0A1926] via-[#0F2438] to-[#163B65] text-white px-4 sm:px-6 py-3.5 sm:py-4 border-b border-[#C6A052]/40 shrink-0 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative shrink-0">
+                      {selectedClient.avatarUrl ? (
+                        <img
+                          src={getDisplayableDriveImageUrl(selectedClient.avatarUrl)}
+                          alt={getTravelerDisplayNames(selectedClient).fullDisplayName}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-11 h-11 rounded-full object-cover border-2 border-[#C6A052] bg-slate-100"
+                        />
+                      ) : selectedClient.accountType === 'b2b_partner' ? (
+                        <div className="w-11 h-11 rounded-full bg-[#C6A052]/20 text-[#E5C887] border-2 border-[#C6A052] flex items-center justify-center">
+                          <Building2 className="w-5 h-5" />
+                        </div>
+                      ) : (
+                        <div className="w-11 h-11 rounded-full bg-[#C6A052]/20 text-[#E5C887] border border-[#C6A052]/70 flex items-center justify-center text-sm font-black">
+                          {getTravelerDisplayNames(selectedClient).fullDisplayName.slice(0, 1) || 'م'}
+                        </div>
                       )}
                       <span
-                        className="px-2 py-0.5 rounded-md bg-[#FAF8F2] border border-[#E5C887] text-[10.5px] font-black text-[#0F2438] tabular-nums"
-                        dir="ltr"
-                      >
-                        {selectedClient.orderCode || buildOrderCodeFromPhone(selectedClient.phone)}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                        className={`absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full border-2 border-[#0F2438] ${
                           isUserCurrentlyOnline(selectedClient)
-                            ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                            : 'bg-slate-50 border-slate-200 text-slate-600'
+                            ? 'bg-emerald-400 animate-pulse'
+                            : 'bg-slate-400'
                         }`}
-                      >
-                        {formatLastSeenRelative(
-                          selectedClient.lastSeenAt,
-                          isUserCurrentlyOnline(selectedClient),
-                          lang
-                        )}
-                      </span>
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
-                          isClientAccountVerified(selectedClient)
-                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                            : 'bg-orange-50 border-orange-300 text-orange-800'
-                        }`}
-                      >
-                        {isClientAccountVerified(selectedClient)
-                          ? t('✅ موثق', '✅ Verified')
-                          : t('⚠️ غير موثق / غير مفعل', '⚠️ Unverified')}
-                      </span>
+                      />
                     </div>
-                    <span className="text-[11px] text-slate-500 tabular-nums block" dir="ltr">
-                      +{selectedClient.phoneNormalized || normalizePhone(selectedClient.phone)}
-                      {selectedClient.accountType === 'b2b_partner' &&
-                      selectedClient.contactPersonName
-                        ? ` · ${selectedClient.contactPersonName}`
-                        : ''}
-                    </span>
-                  </div>
-                </div>
-              </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {canActivateOtp && isClientAccountVerified(selectedClient) && (
-                  <button
-                    type="button"
-                    disabled={togglingVerifyPhone === selectedClient.phone}
-                    onClick={() => void handleAdminRevertUnverified(selectedClient)}
-                    className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60 bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100"
-                  >
-                    <span>
-                      {togglingVerifyPhone === selectedClient.phone
-                        ? t('جاري التحديث...', 'Updating...')
-                        : t('↩️ تحويل هذا الحساب إلى غير موثق', '↩️ Revert Account to Unverified')}
-                    </span>
-                  </button>
-                )}
+                    <div className="min-w-0 leading-tight">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h3 className="text-sm sm:text-base font-black text-white truncate">
+                          {selectedClient.accountType === 'b2b_partner' && selectedClient.companyName
+                            ? selectedClient.companyName
+                            : getTravelerDisplayNames(selectedClient).fullDisplayName}
+                        </h3>
+                        {selectedClient.accountType === 'b2b_partner' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#C6A052] text-[#0A1926] text-[10px] font-black">
+                            <Building2 className="w-3 h-3" />
+                            <span>B2B</span>
+                          </span>
+                        )}
+                        <span
+                          className="px-2 py-0.5 rounded-md bg-white/10 border border-[#C6A052]/50 text-[10.5px] font-black text-[#E5C887] tabular-nums"
+                          dir="ltr"
+                        >
+                          {selectedClient.orderCode || buildOrderCodeFromPhone(selectedClient.phone)}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
+                            isClientAccountVerified(selectedClient)
+                              ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                              : 'bg-orange-500/20 border-orange-400/50 text-orange-200'
+                          }`}
+                        >
+                          {isClientAccountVerified(selectedClient)
+                            ? t('✅ موثق', '✅ Verified')
+                            : t('⚠️ غير موثق', '⚠️ Unverified')}
+                        </span>
+                      </div>
 
-                {canActivateOtp && !isClientAccountVerified(selectedClient) && (
-                  <>
-                    <button
-                      type="button"
-                      disabled={togglingVerifyPhone === selectedClient.phone}
-                      onClick={() => void handleAdminInstantActivate(selectedClient)}
-                      className="px-3 py-2 rounded-xl text-xs font-black border transition cursor-pointer flex items-center gap-1.5 bg-emerald-600 border-emerald-700 text-white hover:bg-emerald-700 disabled:opacity-60 shadow-xs"
-                    >
-                      <span>
-                        {togglingVerifyPhone === selectedClient.phone
-                          ? t('جاري التوثيق...', 'Verifying...')
-                          : t('✅ توثيق وتفعيل هذا الحساب بيدي', '✅ Verify & Activate This Account')}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSendVerificationWhatsApp(selectedClient)}
-                      className="px-3 py-2 rounded-xl text-xs font-black border border-[#128C7E]/30 transition cursor-pointer flex items-center gap-1.5 bg-[#25D366] hover:bg-[#128C7E] text-white shadow-xs"
-                    >
-                      <span>{t('📲 إرسال الكود واتساب', '📲 WhatsApp Code')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={sendingVerifyNotifPhone === selectedClient.phone}
-                      onClick={() => void handleSendVerificationAppPush(selectedClient)}
-                      className="px-3 py-2 rounded-xl text-xs font-black border border-indigo-700 transition cursor-pointer flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white shadow-xs"
-                    >
-                      <span>
-                        {sendingVerifyNotifPhone === selectedClient.phone
-                          ? t('جاري الإرسال...', 'Sending...')
-                          : t('🔔 إشعار التطبيق', '🔔 App Push')}
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSendVerificationSms(selectedClient)}
-                      className="px-3 py-2 rounded-xl text-xs font-black border border-sky-700 transition cursor-pointer flex items-center gap-1.5 bg-sky-600 hover:bg-sky-700 text-white shadow-xs"
-                    >
-                      <span>{t('📱 SMS', '📱 SMS')}</span>
-                    </button>
-                  </>
-                )}
-
-                {selectedClient.accountType !== 'b2b_partner' && (
-                  <button
-                    type="button"
-                    onClick={() => setShowUpgradeB2B((v) => !v)}
-                    className="px-3 py-2 rounded-xl bg-[#FAF8F2] hover:bg-[#f2ebd7] border border-[#C6A052] text-[#0F2438] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
-                  >
-                    <Building2 className="w-3.5 h-3.5 text-[#9E7B33]" />
-                    <span>{t('ترقية إلى شركة شريكة B2B', 'Upgrade to B2B')}</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => handleOpenClientChat(selectedClient.phone)}
-                  className="px-3.5 py-2 rounded-xl bg-[#0284C7] hover:bg-[#0369A1] text-white text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
-                >
-                  <MessageCircle className="w-4 h-4" />
-                  <span>{t('المحادثة المباشرة', 'Direct Chat')}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleDirectWhatsAppChat(selectedClient)}
-                  className="px-3.5 py-2 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                >
-                  <MessageCircle className="w-4 h-4" />
-                  <span>{t('محادثة واتساب', 'Open WhatsApp')}</span>
-                </button>
-              </div>
-            </div>
-            {verifyActionFeedback?.phone === selectedClient.phone && (
-              <div
-                className={`rounded-xl border px-3.5 py-2 text-xs font-bold ${
-                  verifyActionFeedback.ok
-                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                    : 'bg-red-50 border-red-200 text-red-900'
-                }`}
-              >
-                {verifyActionFeedback.text}
-              </div>
-            )}
-
-            {showUpgradeB2B && selectedClient.accountType !== 'b2b_partner' && (
-              <form
-                onSubmit={handleUpgradeSelectedToB2B}
-                className="bg-[#FAF8F2] border-2 border-[#C6A052] rounded-2xl p-4 space-y-3"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-1.5">
-                    <Building2 className="w-4 h-4 text-[#9E7B33]" />
-                    <span>
-                      {t(
-                        'ترقية هذا الحساب إلى حساب شركة شريكة (B2B Partner)',
-                        'Upgrade Account to B2B Travel Company'
-                      )}
-                    </span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowUpgradeB2B(false)}
-                    className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer"
-                  >
-                    {t('إلغاء', 'Cancel')}
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-                  <input
-                    type="text"
-                    required
-                    value={upgradeCompanyName}
-                    onChange={(e) => setUpgradeCompanyName(e.target.value)}
-                    placeholder={t('اسم الشركة / الوكالة *', 'Company Name *')}
-                    className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                  />
-                  <input
-                    type="text"
-                    required
-                    value={upgradeContactName}
-                    onChange={(e) => setUpgradeContactName(e.target.value)}
-                    placeholder={t('اسم مسؤول التواصل *', 'Contact Person *')}
-                    className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isUpgradingB2B}
-                    className="min-h-[38px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] font-black flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    {isUpgradingB2B && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    <span>{t('تأكيد الترقية إلى B2B', 'Confirm B2B Upgrade')}</span>
-                  </button>
-                </div>
-                {upgradeB2BFeedback && (
-                  <p className={`text-xs font-bold ${upgradeB2BFeedback.ok ? 'text-emerald-700' : 'text-red-700'}`}>
-                    {upgradeB2BFeedback.text}
-                  </p>
-                )}
-              </form>
-            )}
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-              {/* Left/Start: Editable Details & Status */}
-              <form
-                onSubmit={handleSaveClientFolder}
-                className="lg:col-span-6 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h4 className="text-sm font-black text-[#0F2438]">
-                      {t('بيانات العميل وحالة الطلب', 'Client Details & Visa Stage')}
-                    </h4>
-                    {adminPassportAiBadge && (
-                      <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
-                        {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
-                      </span>
-                    )}
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300 mt-1">
+                        <span className="tabular-nums" dir="ltr">
+                          +{selectedClient.phoneNormalized || normalizePhone(selectedClient.phone)}
+                        </span>
+                        <span>·</span>
+                        <span>
+                          {formatLastSeenRelative(
+                            selectedClient.lastSeenAt,
+                            isUserCurrentlyOnline(selectedClient),
+                            lang
+                          )}
+                        </span>
+                        {selectedClient.accountType === 'b2b_partner' &&
+                          selectedClient.contactPersonName && (
+                            <>
+                              <span>·</span>
+                              <span>{selectedClient.contactPersonName}</span>
+                            </>
+                          )}
+                      </div>
+                    </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <input
-                      ref={adminPassportInputRef}
-                      type="file"
-                      accept="image/*,application/pdf"
-                      onChange={handleAdminUploadPassportWithAi}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      disabled={isAdminScanningPassport || isUploadingAdminPassport}
-                      onClick={() => adminPassportInputRef.current?.click()}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
-                    >
-                      {isUploadingAdminPassport ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Upload className="w-3.5 h-3.5" />
-                      )}
-                      <span>
-                        {t('رفع وقراءة جواز / تأشيرة (صورة أو PDF) ✨', 'Upload & Scan Passport / Visa ✨')}
-                      </span>
-                    </button>
-
-                    {(selectedClient.documents || []).some(
-                      (d) =>
-                        (d.docType === 'passport' || d.docType === 'visa') &&
-                        Boolean(d.dataUrl)
-                    ) && (
+                    {canActivateOtp && isClientAccountVerified(selectedClient) && (
                       <button
                         type="button"
-                        disabled={isAdminScanningPassport}
-                        onClick={() => void handleAdminScanExistingPassport()}
-                        className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
+                        disabled={togglingVerifyPhone === selectedClient.phone}
+                        onClick={() => void handleAdminRevertUnverified(selectedClient)}
+                        className="px-2.5 py-1.5 rounded-xl text-[11px] font-black border transition cursor-pointer disabled:opacity-60 bg-amber-500/20 border-amber-400/60 text-amber-100 hover:bg-amber-500/30"
                       >
-                        {isAdminScanningPassport ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Sparkles className="w-3.5 h-3.5" />
-                        )}
-                        <span>{t('قراءة المرفق بالذكاء ✨', 'AI Scan Attached ✨')}</span>
+                        {togglingVerifyPhone === selectedClient.phone
+                          ? t('جاري التحديث...', 'Updating...')
+                          : t('↩️ إلغاء التوثيق', '↩️ Unverify')}
                       </button>
                     )}
-                  </div>
-                </div>
 
-                {adminPassportAiMsg && (
-                  <div
-                    className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
-                      adminPassportAiMsg.ok
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                        : 'bg-amber-50 border-amber-200 text-amber-900'
-                    }`}
-                  >
-                    <Sparkles className="w-4 h-4 shrink-0" />
-                    <span>{adminPassportAiMsg.text}</span>
-                  </div>
-                )}
+                    {canActivateOtp && !isClientAccountVerified(selectedClient) && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={togglingVerifyPhone === selectedClient.phone}
+                          onClick={() => void handleAdminInstantActivate(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-xl text-[11px] font-black border transition cursor-pointer bg-emerald-600 border-emerald-500 text-white hover:bg-emerald-500 disabled:opacity-60"
+                        >
+                          {togglingVerifyPhone === selectedClient.phone
+                            ? t('جاري التوثيق...', 'Verifying...')
+                            : t('✅ توثيق وتفعيل بيدي', '✅ Verify Now')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSendVerificationWhatsApp(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-xl text-[11px] font-black bg-[#25D366] hover:bg-[#128C7E] text-white transition cursor-pointer"
+                        >
+                          {t('📲 كود واتساب', '📲 WA Code')}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={sendingVerifyNotifPhone === selectedClient.phone}
+                          onClick={() => void handleSendVerificationAppPush(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-xl text-[11px] font-black bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white transition cursor-pointer"
+                        >
+                          {sendingVerifyNotifPhone === selectedClient.phone
+                            ? t('إرسال...', 'Sending...')
+                            : t('🔔 إشعار التطبيق', '🔔 Push')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSendVerificationSms(selectedClient)}
+                          className="px-2.5 py-1.5 rounded-xl text-[11px] font-black bg-sky-600 hover:bg-sky-500 text-white transition cursor-pointer"
+                        >
+                          SMS
+                        </button>
+                      </>
+                    )}
 
-                {adminClarityWarning && (
-                  <div className="p-2.5 rounded-xl border-2 border-amber-300 bg-amber-50 text-xs font-bold text-amber-950 flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                      <span>{adminClarityWarning}</span>
-                    </div>
+                    {selectedClient.accountType !== 'b2b_partner' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setClientModalTab('basic_passport');
+                          setShowUpgradeB2B((v) => !v);
+                        }}
+                        className="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-[#C6A052]/50 text-[#E5C887] text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Building2 className="w-3.5 h-3.5" />
+                        <span>{t('ترقية B2B', 'To B2B')}</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      onClick={() => setAdminClarityWarning(null)}
-                      className="text-amber-700 hover:text-amber-950 cursor-pointer shrink-0"
+                      onClick={() => handleOpenClientChat(selectedClient.phone)}
+                      className="px-2.5 py-1.5 rounded-xl bg-[#0284C7] hover:bg-[#0369A1] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" />
+                      <span>{t('محادثة', 'Chat')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDirectWhatsAppChat(selectedClient)}
+                      className="px-2.5 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" />
+                      <span>{t('واتساب', 'WhatsApp')}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setSelectedClientPhone(null)}
+                      className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/25 text-white flex items-center justify-center transition cursor-pointer ms-1"
+                      aria-label={t('إغلاق ملف العميل', 'Close Client Modal')}
                     >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
-                )}
-
-                {evaluatePassportValidity(editPassportExpiry || selectedClient.passportExpiryDate)
-                  .isUnderSixMonths && (
-                  <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex items-start gap-2">
-                    <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
-                    <div>
-                      <span>
-                        {t(
-                          'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
-                          'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
-                        )}
-                      </span>
-                      {(() => {
-                        const ev = evaluatePassportValidity(
-                          editPassportExpiry || selectedClient.passportExpiryDate
-                        );
-                        if (ev.remainingDays === null) return null;
-                        return (
-                          <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
-                            {ev.remainingDays <= 0
-                              ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
-                              : t(
-                                  `المتبقي في الجواز: ${ev.remainingDays} يوماً فقط.`,
-                                  `Remaining validity: ${ev.remainingDays} days.`
-                                )}
-                          </span>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم الأول (حسب الجواز)', 'First Name')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editFirstName}
-                      onChange={(e) => setEditFirstName(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم الأخير (حسب الجواز)', 'Last Name')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editLastName}
-                      onChange={(e) => setEditLastName(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم الكامل بالإنجليزية (كما في الجواز)', 'Full Name (English)')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editPassportFullNameEn}
-                      onChange={(e) => {
-                        setEditPassportFullNameEn(e.target.value);
-                        setEditPassportFullName(e.target.value);
-                      }}
-                      dir="ltr"
-                      placeholder="AHMED MOHAMED ALI"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الاسم الكامل بالعربية (إن وجد)', 'Full Name (Arabic)')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editPassportFullNameAr}
-                      onChange={(e) => setEditPassportFullNameAr(e.target.value)}
-                      placeholder="أحمد محمد علي"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('رقم جواز السفر', 'Passport Number')}
-                    </label>
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={editPassportNumber}
-                        onChange={(e) => setEditPassportNumber(e.target.value.toUpperCase())}
-                        placeholder="A12345678"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void handleAdminCopyValue('passportNumber', editPassportNumber)}
-                        disabled={!editPassportNumber.trim()}
-                        title={t('نسخ رقم الجواز', 'Copy Passport Number')}
-                        className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
-                      >
-                        {adminCopiedKey === 'passportNumber' ? (
-                          <Check className="w-4 h-4 text-emerald-600" />
-                        ) : (
-                          <Copy className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('الجنسية', 'Nationality')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editNationality}
-                      onChange={(e) => setEditNationality(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('تاريخ الميلاد', 'Date of Birth')}
-                    </label>
-                    <input
-                      type="date"
-                      value={editBirthDate}
-                      onChange={(e) => setEditBirthDate(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('تاريخ الإصدار', 'Issue Date')}
-                    </label>
-                    <input
-                      type="date"
-                      value={editPassportIssueDate}
-                      onChange={(e) => setEditPassportIssueDate(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                    />
-                  </div>
-                  <div className="sm:col-span-2">
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('تاريخ انتهاء الجواز', 'Passport Expiry')}
-                    </label>
-                    <input
-                      type="date"
-                      value={editPassportExpiry}
-                      onChange={(e) => setEditPassportExpiry(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                    />
-                  </div>
-
-                  {/* Extracted Saudi Visa / Visit Invitation Section */}
-                  <div className="sm:col-span-2 bg-white border border-sky-200 rounded-xl p-3 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-sky-100">
-                      <span className="font-black text-[#0F2438] flex items-center gap-1.5">
-                        <FileText className="w-4 h-4 text-[#0284C7]" />
-                        <span>
-                          {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
-                        </span>
-                      </span>
-                      <span className="text-[10.5px] font-bold text-sky-700">
-                        {t('نسخ بضغطة واحدة لإنجاز وتساهيل', '1-Click Copy for Enjaz & Tasheer')}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('رقم المستند', 'Visa / Document Number')}
-                        </label>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            value={editVisaDocumentNumber}
-                            onChange={(e) => setEditVisaDocumentNumber(e.target.value)}
-                            placeholder="1001234567"
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAdminCopyValue('visaDocumentNumber', editVisaDocumentNumber)
-                            }
-                            disabled={!editVisaDocumentNumber.trim()}
-                            title={t('نسخ رقم المستند', 'Copy Document Number')}
-                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
-                          >
-                            {adminCopiedKey === 'visaDocumentNumber' ? (
-                              <Check className="w-4 h-4 text-emerald-600" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('رقم الكفيل / الإقامة أو الهوية', 'Sponsor / Iqama ID')}
-                        </label>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            value={editSaudiSponsorId}
-                            onChange={(e) => setEditSaudiSponsorId(e.target.value)}
-                            placeholder="2012345678"
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAdminCopyValue('saudiSponsorId', editSaudiSponsorId)
-                            }
-                            disabled={!editSaudiSponsorId.trim()}
-                            title={t('نسخ رقم الكفيل / الإقامة', 'Copy Sponsor ID')}
-                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
-                          >
-                            {adminCopiedKey === 'saudiSponsorId' ? (
-                              <Check className="w-4 h-4 text-emerald-600" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('اسم صاحب الطلب بالعربية', 'Applicant Name (Arabic)')}
-                        </label>
-                        <input
-                          type="text"
-                          value={editApplicantNameAr}
-                          onChange={(e) => setEditApplicantNameAr(e.target.value)}
-                          placeholder="الاسم بالعربية"
-                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('اسم صاحب الطلب بالإنجليزية', 'Applicant Name (English)')}
-                        </label>
-                        <input
-                          type="text"
-                          value={editApplicantNameEn}
-                          onChange={(e) => setEditApplicantNameEn(e.target.value)}
-                          dir="ltr"
-                          placeholder="Applicant Name in English"
-                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('رقم الجواز المدوّن في المستند', 'Passport No. on Document')}
-                        </label>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            value={editDocumentPassportNumber}
-                            onChange={(e) =>
-                              setEditDocumentPassportNumber(e.target.value.toUpperCase())
-                            }
-                            placeholder="A12345678"
-                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleAdminCopyValue(
-                                'documentPassportNumber',
-                                editDocumentPassportNumber
-                              )
-                            }
-                            disabled={!editDocumentPassportNumber.trim()}
-                            title={t('نسخ رقم الجواز', 'Copy Passport Number')}
-                            className="px-2.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
-                          >
-                            {adminCopiedKey === 'documentPassportNumber' ? (
-                              <Check className="w-4 h-4 text-emerald-600" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block font-bold text-slate-600 mb-1">
-                          {t('جهة القدوم', 'Port / Embassy of Entry')}
-                        </label>
-                        <input
-                          type="text"
-                          value={editPortOfEntry}
-                          onChange={(e) => setEditPortOfEntry(e.target.value)}
-                          placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
-                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="sm:col-span-2 space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label className="block font-bold text-slate-600">
-                        {t('مرحلة طلب التأشيرة / تساهيل (تحديث فوري بضغطة واحدة)', 'Order Stage (1-Click Live Update)')}
-                      </label>
-                      {getOrderStatusStageIndex(editOrderStatus) >= 1 && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleNotifyClientStageWhatsApp({
-                              ...selectedClient,
-                              orderStatus: editOrderStatus,
-                            })
-                          }
-                          className="px-3 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1.5 cursor-pointer transition shadow-xs"
-                        >
-                          <span>{t('📲 إبلاغ العميل واتساب', '📲 Notify Client via WhatsApp')}</span>
-                        </button>
-                      )}
-                    </div>
-                    {!hasClientActiveOrder(selectedClient) &&
-                      normalizeOrderStatusValue(editOrderStatus) === 'none' && (
-                        <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2">
-                          <span className="text-[11px] font-bold text-slate-600">
-                            {t(
-                              'هذا الحساب مسجل بدون طلب خدمة نشط حالياً.',
-                              'This account currently has no active service order.'
-                            )}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => handleManualOpenOrder(selectedClient)}
-                            className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>{t('+ فتح طلب يدوياً للعميل', '+ Open Order Manually')}</span>
-                          </button>
-                        </div>
-                      )}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      {VISA_ORDER_STATUSES.map((st, idx) => {
-                        const isActive =
-                          normalizeOrderStatusValue(editOrderStatus) === st;
-                        return (
-                          <button
-                            key={st}
-                            type="button"
-                            onClick={() => handleOneClickOrderStageUpdate(selectedClient, st)}
-                            className={`px-2.5 py-2.5 rounded-xl border text-[11px] font-black transition cursor-pointer text-center min-h-[42px] ${
-                              isActive
-                                ? 'bg-[#0F2438] text-[#E5C887] border-[#C6A052] shadow-xs'
-                                : 'bg-white text-slate-700 border-slate-300 hover:border-[#0F2438]'
-                            }`}
-                          >
-                            {idx + 1}. {translateOrderStatus(st, lang)}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
                 </div>
 
-                <div className="space-y-3 text-xs">
-                  <div>
-                    <label className="block font-bold text-slate-600 mb-1">
-                      {t('ملاحظة الإدارة للعميل', 'Client-Visible Admin Note')}
-                    </label>
-                    <input
-                      type="text"
-                      value={editAdminNotes}
-                      onChange={(e) => setEditAdminNotes(e.target.value)}
-                      placeholder={t(
-                        'مثال: موعد تساهيل يوم الثلاثاء 10 صباحاً',
-                        'e.g. Tasheer appointment Tuesday 10 AM'
-                      )}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
-                    />
-                  </div>
+                {/* 5 Smooth Internal Tabs */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                  {(
+                    [
+                      {
+                        id: 'basic_passport' as ClientModalTab,
+                        label: t('1. البيانات الأساسية والجواز', '1. Basic Info & Passport'),
+                      },
+                      {
+                        id: 'documents' as ClientModalTab,
+                        label: t(
+                          `2. المستندات والمرفقات (${(selectedClient.documents?.length || 0) + (selectedClient.issuedDocuments?.length || 0)})`,
+                          `2. Documents (${(selectedClient.documents?.length || 0) + (selectedClient.issuedDocuments?.length || 0)})`
+                        ),
+                      },
+                      {
+                        id: 'order_stages' as ClientModalTab,
+                        label: t('3. مراحل الطلب والتنفيذ', '3. Order Stages & QR'),
+                      },
+                      {
+                        id: 'b2c_visa' as ClientModalTab,
+                        label: selectedClient.b2cVisa
+                          ? t('4. تأشيرة B2C 🕋', '4. B2C Visa 🕋')
+                          : t('4. تأشيرة B2C', '4. B2C Visa'),
+                      },
+                      {
+                        id: 'private_notes' as ClientModalTab,
+                        label: t('5. الملاحظات الإدارية الخاصة', '5. Private Notes'),
+                      },
+                    ]
+                  ).map((mt) => (
+                    <button
+                      key={mt.id}
+                      type="button"
+                      onClick={() => setClientModalTab(mt.id)}
+                      className={`px-3 py-2 rounded-xl text-[11.5px] font-black whitespace-nowrap transition cursor-pointer ${
+                        clientModalTab === mt.id
+                          ? 'bg-[#C6A052] text-[#0A1926] shadow-xs'
+                          : 'bg-white/10 text-slate-200 hover:bg-white/20'
+                      }`}
+                    >
+                      {mt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-                  <div className="bg-amber-50/70 border border-amber-200/90 rounded-xl p-3 space-y-1.5">
-                    <label className="flex items-center justify-between gap-2 font-black text-amber-950">
-                      <span className="inline-flex items-center gap-1.5">
-                        <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              {/* Scrollable Modal Body */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 bg-[#F8FAFC]">
+                {verifyActionFeedback?.phone === selectedClient.phone && (
+                  <div
+                    className={`rounded-xl border px-3.5 py-2 text-xs font-bold ${
+                      verifyActionFeedback.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-red-50 border-red-200 text-red-900'
+                    }`}
+                  >
+                    {verifyActionFeedback.text}
+                  </div>
+                )}
+
+                {showUpgradeB2B && selectedClient.accountType !== 'b2b_partner' && (
+                  <form
+                    onSubmit={handleUpgradeSelectedToB2B}
+                    className="bg-[#FAF8F2] border-2 border-[#C6A052] rounded-2xl p-4 space-y-3"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs sm:text-sm font-black text-[#0F2438] flex items-center gap-1.5">
+                        <Building2 className="w-4 h-4 text-[#9E7B33]" />
                         <span>
                           {t(
-                            'ملاحظات إدارية خاصة (لا يراها العميل)',
-                            'Private Admin Notes (Hidden from Client)'
+                            'ترقية هذا الحساب إلى حساب شركة شريكة (B2B Partner)',
+                            'Upgrade Account to B2B Travel Company'
                           )}
                         </span>
                       </span>
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-black text-amber-900">
-                        {t('سري للإدارة فقط', 'Internal Only')}
-                      </span>
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={editAdminPrivateNotes}
-                      onChange={(e) => setEditAdminPrivateNotes(e.target.value)}
-                      placeholder={t(
-                        'سجّل هنا أي ملاحظات داخلية أو مدفوعات أو تنبيهات خاصة بفريق العمل فقط...',
-                        'Internal team notes, balances, or reminders (never visible to client)...'
-                      )}
-                      className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white text-[#0F2438] text-xs focus:outline-none focus:ring-2 focus:ring-amber-400"
-                    />
-                  </div>
-                </div>
-
-                {/* Appointment QR Pass Entry Section */}
-                <div className="bg-white border border-[#E5C887] rounded-xl p-3 space-y-2.5 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 text-[#0F2438] font-black">
-                      <QrCode className="w-4 h-4 text-[#9E7B33]" />
-                      <span>
-                        {t('بيانات بطاقة الموعد والباركود (Appointment QR Pass)', 'Appointment QR Pass Details')}
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowUpgradeB2B(false)}
+                        className="text-xs font-bold text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        {t('إلغاء', 'Cancel')}
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowAdminQrPreview(true)}
-                      className="px-2.5 py-1 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                    >
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>{t('معاينة بطاقة QR', 'Preview QR Pass')}</span>
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div className="sm:col-span-2">
-                      <label className="block font-bold text-slate-600 mb-1">
-                        {t('نوع الخدمة / الموعد', 'Service / Appointment Type')}
-                      </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
                       <input
                         type="text"
-                        value={editApptServiceType}
-                        onChange={(e) => setEditApptServiceType(e.target.value)}
-                        placeholder={t('موعد تساهيل (VFS) / كشف طبي جامكا / تذكرة طيران', 'Tasheer VFS / GAMCA / Flight Ticket')}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                        required
+                        value={upgradeCompanyName}
+                        onChange={(e) => setUpgradeCompanyName(e.target.value)}
+                        placeholder={t('اسم الشركة / الوكالة *', 'Company Name *')}
+                        className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                       />
-                    </div>
-                    <div>
-                      <label className="block font-bold text-slate-600 mb-1">
-                        {t('تاريخ الموعد', 'Appointment Date')}
-                      </label>
-                      <input
-                        type="date"
-                        value={editApptDate}
-                        onChange={(e) => setEditApptDate(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-bold text-slate-600 mb-1">
-                        {t('وقت الموعد', 'Appointment Time')}
-                      </label>
-                      <input
-                        type="time"
-                        value={editApptTime}
-                        onChange={(e) => setEditApptTime(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-bold text-slate-600 mb-1">
-                        {t('المركز / المطار / الموقع (اختياري)', 'Location / Branch (Optional)')}
-                      </label>
                       <input
                         type="text"
-                        value={editApptLocation}
-                        onChange={(e) => setEditApptLocation(e.target.value)}
-                        placeholder={t('مثال: فرع تساهيل المنصورة / مطار القاهرة', 'e.g. Tasheer Mansoura / Cairo Airport')}
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                        required
+                        value={upgradeContactName}
+                        onChange={(e) => setUpgradeContactName(e.target.value)}
+                        placeholder={t('اسم مسؤول التواصل *', 'Contact Person *')}
+                        className="px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
                       />
+                      <button
+                        type="submit"
+                        disabled={isUpgradingB2B}
+                        className="min-h-[38px] px-4 py-2 rounded-xl bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] font-black flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        {isUpgradingB2B && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        <span>{t('تأكيد الترقية إلى B2B', 'Confirm B2B Upgrade')}</span>
+                      </button>
                     </div>
-                    <div>
-                      <label className="block font-bold text-slate-600 mb-1">
-                        {t('رقم الحجز / المرجع (اختياري)', 'Booking Ref / PNR (Optional)')}
-                      </label>
-                      <input
-                        type="text"
-                        value={editApptReference}
-                        onChange={(e) => setEditApptReference(e.target.value)}
-                        placeholder="VFS-849201"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {folderSavedMsg && (
-                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
-                    {folderSavedMsg}
-                  </div>
+                    {upgradeB2BFeedback && (
+                      <p className={`text-xs font-bold ${upgradeB2BFeedback.ok ? 'text-emerald-700' : 'text-red-700'}`}>
+                        {upgradeB2BFeedback.text}
+                      </p>
+                    )}
+                  </form>
                 )}
 
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <button
-                    type="submit"
-                    className="min-h-[40px] px-4 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>{t('حفظ تعديلات الملف', 'Save Folder')}</span>
-                  </button>
+                {/* TAB 1: BASIC INFO & PASSPORT */}
+                {clientModalTab === 'basic_passport' && (
+                  <div className="space-y-4">
+                    <form
+                      onSubmit={handleSaveClientFolder}
+                      className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="text-sm font-black text-[#0F2438]">
+                            {t('البيانات الأساسية وجواز السفر', 'Basic Info & Passport Details')}
+                          </h4>
+                          {adminPassportAiBadge && (
+                            <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-[10.5px] font-black text-indigo-800">
+                              {t('تمت القراءة بالذكاء الاصطناعي ✨', 'Extracted with AI ✨')}
+                            </span>
+                          )}
+                        </div>
 
-                  {canDeleteRecords && (
-                    !isEditUnlocked ? (
-                      <span
-                        className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 text-slate-500 text-[11px] font-bold flex items-center gap-1"
-                        title={t('افتح وضع التعديل لحذف السجلات', 'Unlock Edit Mode to delete records')}
-                      >
-                        <Lock className="w-3.5 h-3.5" />
-                        <span>{t('الحذف مقفل', 'Delete Locked')}</span>
-                      </span>
-                    ) : confirmDeletePhone === selectedClient.phone ? (
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => handleConfirmDeleteClient(selectedClient.phone)}
-                          className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
-                        >
-                          {t('تأكيد الحذف', 'Confirm Delete')}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeletePhone(null)}
-                          className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-xs font-bold cursor-pointer"
-                        >
-                          {t('إلغاء', 'Cancel')}
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeletePhone(selectedClient.phone)}
-                        className="px-3 py-2 rounded-xl border border-red-200 bg-white text-red-700 hover:bg-red-50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>{t('حذف العميل', 'Delete Client')}</span>
-                      </button>
-                    )
-                  )}
-                </div>
-              </form>
-
-              {/* Right/End: Documents Gallery */}
-              <div className="lg:col-span-6 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h4 className="text-sm font-black text-[#0F2438]">
-                    {t(
-                      `صور الجواز والمستندات وإيصالات الدفع (${selectedClient.documents?.length || 0})`,
-                      `Uploaded Passports, Receipts & Docs (${selectedClient.documents?.length || 0})`
-                    )}
-                  </h4>
-
-                  {selectedClient.avatarUrl && (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setPreviewDocImage({
-                            label: `${getTravelerDisplayNames(selectedClient).fullDisplayName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
-                            dataUrl: selectedClient.avatarUrl || '',
-                            downloadName: buildDescriptiveFilename(
-                              'Photo',
-                              getTravelerDisplayNames(selectedClient).firstName,
-                              getTravelerDisplayNames(selectedClient).lastName
-                            ),
-                          })
-                        }
-                        className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer"
-                      >
-                        <Eye className="w-3 h-3" />
-                        <span>{t('الصورة الشخصية', 'Avatar')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void downloadCloudFile(
-                            selectedClient.avatarUrl || '',
-                            buildDescriptiveFilename(
-                              'Photo',
-                              getTravelerDisplayNames(selectedClient).firstName,
-                              getTravelerDisplayNames(selectedClient).lastName
-                            )
-                          )
-                        }
-                        className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                      >
-                        <Download className="w-3 h-3" />
-                        <span>{t('تحميل الشخصية', 'Download Photo')}</span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                {selectedClient.documents && selectedClient.documents.length > 0 ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {selectedClient.documents.map((docItem) => {
-                      const clientNames = getTravelerDisplayNames(selectedClient);
-                      const isPdf = docItem.fileName?.toLowerCase().endsWith('.pdf');
-                      const dlFilename =
-                        docItem.docType === 'passport'
-                          ? buildDescriptiveFilename(
-                              'Passport',
-                              clientNames.firstName,
-                              clientNames.lastName
-                            )
-                          : docItem.docType === 'photo'
-                          ? buildDescriptiveFilename(
-                              'Photo',
-                              clientNames.firstName,
-                              clientNames.lastName
-                            )
-                          : docItem.docType === 'receipt'
-                          ? buildDescriptiveFilename(
-                              'Receipt',
-                              clientNames.firstName,
-                              clientNames.lastName
-                            )
-                          : docItem.fileName || `${selectedClient.phone}-${docItem.docType}.jpg`;
-                      const docStatus: DocumentReviewStatus = docItem.status || 'received';
-                      const isUpdatingThisDoc = updatingDocStatusId === docItem.id;
-                      return (
-                        <div
-                          key={docItem.id}
-                          className={`bg-white border rounded-xl p-3 space-y-2.5 ${
-                            docStatus === 'pending_completion'
-                              ? 'border-amber-300 ring-1 ring-amber-100'
-                              : docStatus === 'completed'
-                              ? 'border-emerald-300'
-                              : 'border-slate-200'
-                          }`}
-                        >
-                          <div className="flex items-center gap-3">
-                            {isPdf ? (
-                              <div className="w-14 h-14 rounded-lg bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center shrink-0">
-                                <FileText className="w-6 h-6" />
-                                <span className="text-[9px] font-black">PDF</span>
-                              </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <input
+                            ref={adminPassportInputRef}
+                            type="file"
+                            accept="image/*,application/pdf"
+                            onChange={handleAdminUploadPassportWithAi}
+                            className="hidden"
+                          />
+                          <button
+                            type="button"
+                            disabled={isAdminScanningPassport || isUploadingAdminPassport}
+                            onClick={() => adminPassportInputRef.current?.click()}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
+                          >
+                            {isUploadingAdminPassport ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
-                              <img
-                                src={getDisplayableDriveImageUrl(docItem.dataUrl)}
-                                alt={docItem.label}
-                                loading="lazy"
-                                decoding="async"
-                                className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
-                              />
+                              <Upload className="w-3.5 h-3.5" />
                             )}
-                            <div className="min-w-0 flex-1 space-y-0.5">
-                              <span className="text-xs font-black text-[#0F2438] block truncate">
-                                {docItem.label}
-                              </span>
-                              <span className="text-[11px] text-slate-500 block truncate">
-                                {docItem.fileName}
-                              </span>
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[10px] text-slate-400 tabular-nums">
-                                  {docItem.uploadedAt?.slice(0, 10)}
-                                </span>
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[9.5px] font-black border ${
-                                    docStatus === 'completed'
-                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                                      : docStatus === 'pending_completion'
-                                      ? 'bg-amber-50 border-amber-300 text-amber-900'
-                                      : 'bg-sky-50 border-sky-200 text-sky-900'
-                                  }`}
-                                >
-                                  {docStatus === 'completed'
-                                    ? t('مكتمل ✓', 'Completed ✓')
-                                    : docStatus === 'pending_completion'
-                                    ? t('مطلوب استكماله', 'Needs Completion')
-                                    : t('تم الاستلام', 'Received')}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
+                            <span>
+                              {t('رفع وقراءة جواز / تأشيرة (صورة أو PDF) ✨', 'Upload & Scan Passport / Visa ✨')}
+                            </span>
+                          </button>
 
-                          {/* Per-Document Admin Review Status Controls */}
-                          <div className="bg-slate-50 border border-slate-200 rounded-lg p-2 space-y-1.5">
-                            <input
-                              type="text"
-                              value={docNoteDrafts[docItem.id] ?? docItem.statusNote ?? ''}
-                              onChange={(e) =>
-                                setDocNoteDrafts((prev) => ({
-                                  ...prev,
-                                  [docItem.id]: e.target.value,
-                                }))
-                              }
-                              placeholder={t(
-                                'ملاحظة على هذا المستند (مثال: يرجى توضيح الصورة)...',
-                                'Optional note on this document...'
-                              )}
-                              className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-[11px] text-[#0F2438]"
-                            />
-                            <div className="grid grid-cols-3 gap-1">
-                              {(
-                                [
-                                  {
-                                    id: 'pending_completion' as DocumentReviewStatus,
-                                    label: t('مطلوب استكماله', 'Incomplete'),
-                                    activeCls: 'bg-amber-500 text-white border-amber-600',
-                                  },
-                                  {
-                                    id: 'received' as DocumentReviewStatus,
-                                    label: t('تم الاستلام', 'Received'),
-                                    activeCls: 'bg-[#0284C7] text-white border-[#0284C7]',
-                                  },
-                                  {
-                                    id: 'completed' as DocumentReviewStatus,
-                                    label: t('مكتمل ✓', 'Complete'),
-                                    activeCls: 'bg-emerald-600 text-white border-emerald-700',
-                                  },
-                                ]
-                              ).map((stBtn) => (
-                                <button
-                                  key={stBtn.id}
-                                  type="button"
-                                  disabled={isUpdatingThisDoc}
-                                  onClick={() => void handleUpdateDocumentStatus(docItem.id, stBtn.id)}
-                                  className={`py-1 px-1.5 rounded-lg text-[10px] font-black border transition cursor-pointer disabled:opacity-50 ${
-                                    docStatus === stBtn.id
-                                      ? stBtn.activeCls
-                                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
-                                  }`}
-                                >
-                                  {stBtn.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2">
-                            {isPdf ? (
-                              <a
-                                href={getDriveViewUrl(
-                                  docItem.dataUrl,
-                                  docItem.viewUrl,
-                                  docItem.storagePath
-                                )}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5" />
-                                <span>{t('فتح PDF', 'Open PDF')}</span>
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPreviewDocImage({
-                                    label: docItem.label,
-                                    dataUrl: docItem.dataUrl,
-                                    downloadName: dlFilename,
-                                  })
-                                }
-                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                <span>{t('معاينة', 'Inspect')}</span>
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => void downloadCloudFile(docItem.dataUrl, dlFilename)}
-                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                              <span>{t('تحميل', 'Download')}</span>
-                            </button>
-                          </div>
-
-                          {docItem.dataUrl && (
+                          {(selectedClient.documents || []).some(
+                            (d) =>
+                              (d.docType === 'passport' || d.docType === 'visa') &&
+                              Boolean(d.dataUrl)
+                          ) && (
                             <button
                               type="button"
                               disabled={isAdminScanningPassport}
-                              onClick={() => void handleAdminScanExistingPassport(docItem)}
-                              className="w-full px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 disabled:opacity-50 text-indigo-800 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer transition"
+                              onClick={() => void handleAdminScanExistingPassport()}
+                              className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-black flex items-center gap-1 cursor-pointer transition"
                             >
                               {isAdminScanningPassport ? (
                                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                               ) : (
                                 <Sparkles className="w-3.5 h-3.5" />
                               )}
-                              <span>{t('قراءة واستخراج بالذكاء ✨', 'AI Read & Extract ✨')}</span>
+                              <span>{t('قراءة المرفق بالذكاء ✨', 'AI Scan Attached ✨')}</span>
                             </button>
                           )}
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="bg-white border border-dashed border-slate-300 rounded-xl p-6 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
-                    <FileText className="w-6 h-6 text-slate-400" />
-                    <span>
-                      {t(
-                        'لم يقم العميل برفع أي صور أو مستندات بعد.',
-                        'No passport photos or documents uploaded yet.'
-                      )}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* FINAL COMPLETION DOCUMENT DELIVERY PANEL (ADMIN -> CLIENT ACCOUNT) */}
-            <div className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#C6A052]/30">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
-                    <FileUp className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-sm sm:text-base font-black text-[#0F2438]">
-                      {t('إرفاق مستند التنفيذ النهائي', 'Attach Final Execution Document')}
-                    </h4>
-                    <p className="text-[11px] text-slate-600">
-                      {t(
-                        'ارفع ملف PDF أو صورة عالية الجودة لإرساله فوراً إلى حساب العميل وتحديث الطلب إلى "تم تنفيذ الطلب"',
-                        'Upload a PDF or high-quality image to deliver straight to client account and set status to Completed'
-                      )}
-                    </p>
-                  </div>
-                </div>
-
-                {(selectedClient.issuedDocuments?.length || 0) > 0 && (
-                  <span className="px-2.5 py-1 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black tabular-nums">
-                    {t(
-                      `تم تسليم ${selectedClient.issuedDocuments?.length} مستند`,
-                      `Delivered: ${selectedClient.issuedDocuments?.length}`
-                    )}
-                  </span>
-                )}
-              </div>
-
-              {replacingDeliverable && (
-                <div className="p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 font-black text-amber-950">
-                    <RefreshCw className="w-4 h-4 text-amber-700 shrink-0" />
-                    <span>
-                      {t(
-                        `وضع استبدال المستند: "${replacingDeliverable.docTypeLabel}" — اختر الملف الجديد ليحل محل النسخة السابقة تلقائياً.`,
-                        `Replacing document "${replacingDeliverable.docTypeLabel}" — select the new file to overwrite cleanly.`
-                      )}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setReplacingDeliverable(null)}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-900 font-bold cursor-pointer"
-                  >
-                    {t('إلغاء الاستبدال', 'Cancel Replace')}
-                  </button>
-                </div>
-              )}
-
-              <form onSubmit={handleApproveAndDeliverDocument} className="space-y-3.5 text-xs">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-bold text-[#0F2438] mb-1.5">
-                      {t('نوع المستند', 'Document Type')} <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={deliverableTypeChoice}
-                      onChange={(e) => setDeliverableTypeChoice(e.target.value)}
-                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                    >
-                      <option value="تذكرة طيران">{t('تذكرة طيران', 'Flight Ticket')}</option>
-                      <option value="موعد تساهيل">{t('موعد تساهيل', 'Tasheer VFS Appointment')}</option>
-                      <option value="كشف طبي جامكا">{t('كشف طبي جامكا', 'GAMCA / Wafid Medical Slip')}</option>
-                      <option value="تأشيرة">{t('تأشيرة صادرة', 'Issued Visa')}</option>
-                      <option value="شهادة تطعيم">{t('شهادة تطعيم', 'Vaccination Certificate')}</option>
-                      <option value="حجز فندق مؤكد">{t('حجز فندق مؤكد', 'Confirmed Hotel Voucher')}</option>
-                      <option value="تأمين طبي وإيصال إنجاز">{t('تأمين طبي وإيصال إنجاز', 'Medical Insurance & Enjaz Receipt')}</option>
-                      <option value="__custom__">{t('كتابة نوع مستند آخر...', 'Enter Custom Document Type...')}</option>
-                    </select>
-                  </div>
-
-                  {deliverableTypeChoice === '__custom__' ? (
-                    <div>
-                      <label className="block font-bold text-[#0F2438] mb-1.5">
-                        {t('اكتب اسم / نوع المستند', 'Custom Document Type')}{' '}
-                        <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={customDeliverableType}
-                        onChange={(e) => setCustomDeliverableType(e.target.value)}
-                        placeholder={t('مثال: تصديق وزارة الخارجية', 'e.g. MOFA Attested Contract')}
-                        className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                      />
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="block font-bold text-[#0F2438] mb-1.5">
-                        {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
-                      </label>
-                      <input
-                        type="text"
-                        value={deliverableNotes}
-                        onChange={(e) => setDeliverableNotes(e.target.value)}
-                        placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
-                        className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {deliverableTypeChoice === '__custom__' && (
-                  <div>
-                    <label className="block font-bold text-[#0F2438] mb-1.5">
-                      {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
-                    </label>
-                    <input
-                      type="text"
-                      value={deliverableNotes}
-                      onChange={(e) => setDeliverableNotes(e.target.value)}
-                      placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
-                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
-                    />
-                  </div>
-                )}
-
-                <div className="bg-white border border-dashed border-[#C6A052] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    {deliverablePreviewUrl ? (
-                      <img
-                        src={deliverablePreviewUrl}
-                        alt={deliverableFile?.name || 'Preview'}
-                        className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                      />
-                    ) : (
-                      <div className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-[#0F2438] shrink-0">
-                        <FileText className="w-6 h-6 text-[#0284C7]" />
                       </div>
-                    )}
-                    <div className="min-w-0">
-                      <span className="font-black text-[#0F2438] block truncate">
-                        {deliverableFile
-                          ? deliverableFile.name
-                          : t('اختر ملف المستند (PDF حتى 5 ميجا أو صورة)', 'Select Document File (PDF <= 5MB or Image)')}
-                      </span>
-                      <span className="text-[11px] text-slate-500 block">
-                        {deliverableFile
-                          ? `${formatStorageSize(deliverableFile.size)}${
-                              deliverableFile.type.startsWith('image/')
-                                ? t(' · سيتم ضغط الصورة تلقائياً < 500 ك.ب', ' · Auto-compressed < 500 KB')
-                                : ''
-                            }`
-                          : t(
-                              'حد أقصى 5 ميجابايت لملفات PDF، وضغط تلقائي للصور لأقل من 500 كيلوبايت',
-                              'Max 5 MB for PDFs; images are auto-compressed under 500 KB before upload'
-                            )}
-                      </span>
-                    </div>
-                  </div>
 
-                  <label className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] font-black flex items-center justify-center gap-1.5 cursor-pointer shrink-0 transition">
-                    <FileUp className="w-4 h-4 text-[#0284C7]" />
-                    <span>{t('اختيار ملف', 'Choose File')}</span>
-                    <input
-                      type="file"
-                      accept="image/*,application/pdf"
-                      onChange={handleSelectDeliverableFile}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
-
-                {deliverableFeedback && (
-                  <div
-                    className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 ${
-                      deliverableFeedback.ok
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                        : 'bg-red-50 border-red-200 text-red-900'
-                    }`}
-                  >
-                    {deliverableFeedback.ok ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    ) : (
-                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                    )}
-                    <span>{deliverableFeedback.text}</span>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={isSendingDeliverable}
-                  className="w-full sm:w-auto min-h-[44px] px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
-                >
-                  {isSendingDeliverable ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : replacingDeliverable ? (
-                    <RefreshCw className="w-4 h-4" />
-                  ) : (
-                    <CheckCircle2 className="w-4 h-4" />
-                  )}
-                  <span>
-                    {isSendingDeliverable
-                      ? t('جاري الضغط والرفع والاعتماد...', 'Compressing & Uploading...')
-                      : replacingDeliverable
-                      ? t('حفظ واستبدال المستند للعميل', 'Save & Replace Client Document')
-                      : t('اعتماد وإرسال المستند للعميل', 'Approve & Send Document to Client')}
-                  </span>
-                </button>
-              </form>
-
-              {/* Previously Issued Completion Deliverables */}
-              {selectedClient.issuedDocuments && selectedClient.issuedDocuments.length > 0 && (
-                <div className="pt-3 border-t border-slate-200 space-y-2.5">
-                  <h5 className="text-xs font-black text-[#0F2438]">
-                    {t('المستندات الصادرة والمسلمة للعميل:', 'Delivered Documents in Client Account:')}
-                  </h5>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    {selectedClient.issuedDocuments.map((delDoc) => {
-                      const isPdf =
-                        delDoc.mimeType === 'application/pdf' ||
-                        delDoc.fileName.toLowerCase().endsWith('.pdf');
-                      const isBeingReplaced = replacingDeliverable?.id === delDoc.id;
-                      return (
+                      {adminPassportAiMsg && (
                         <div
-                          key={delDoc.id}
-                          className={`bg-white border rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
-                            isBeingReplaced ? 'border-amber-400 ring-2 ring-amber-200' : 'border-emerald-200'
+                          className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                            adminPassportAiMsg.ok
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                              : 'bg-amber-50 border-amber-200 text-amber-900'
                           }`}
                         >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
-                              <FileText className="w-5 h-5" />
-                            </div>
-                            <div className="min-w-0">
-                              <span className="text-xs font-black text-[#0F2438] block truncate">
-                                {delDoc.docTypeLabel}
-                              </span>
-                              <span className="text-[10.5px] text-slate-500 block truncate tabular-nums">
-                                {delDoc.fileName} · {delDoc.issuedAt.slice(0, 10)}
-                                {typeof delDoc.fileSizeBytes === 'number'
-                                  ? ` · ${formatStorageSize(delDoc.fileSizeBytes)}`
-                                  : ''}
-                              </span>
-                            </div>
-                          </div>
+                          <Sparkles className="w-4 h-4 shrink-0" />
+                          <span>{adminPassportAiMsg.text}</span>
+                        </div>
+                      )}
 
-                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                            <a
-                              href={getDriveViewUrl(
-                                delDoc.downloadUrl,
-                                delDoc.viewUrl,
-                                delDoc.storagePath
+                      {adminClarityWarning && (
+                        <div className="p-2.5 rounded-xl border-2 border-amber-300 bg-amber-50 text-xs font-bold text-amber-950 flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-2">
+                            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                            <span>{adminClarityWarning}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setAdminClarityWarning(null)}
+                            className="text-amber-700 hover:text-amber-950 cursor-pointer shrink-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+
+                      {evaluatePassportValidity(editPassportExpiry || selectedClient.passportExpiryDate)
+                        .isUnderSixMonths && (
+                        <div className="p-3 rounded-xl bg-red-50 border-2 border-red-300 text-xs font-black text-red-800 flex items-start gap-2">
+                          <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
+                          <div>
+                            <span>
+                              {t(
+                                'تنبيه: صلاحية الجواز أقل من 6 أشهر ولا تصلح للسفر أو إصدار التأشيرات',
+                                'Warning: Passport validity is under 6 months and is not valid for travel or visa issuance'
                               )}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438]"
-                              title={t('معاينة وفتح في Google Drive', 'Preview & Open in Drive')}
-                            >
-                              {isPdf ? <ExternalLink className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                            </a>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                void downloadCloudFile(delDoc.downloadUrl, delDoc.fileName)
-                              }
-                              className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer"
-                            >
-                              <Download className="w-3 h-3" />
-                              <span>{t('تحميل', 'Download')}</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleStartReplaceDeliverable(delDoc.id, delDoc.docTypeLabel)
-                              }
-                              className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                              title={t('استبدال المستند', 'Replace Document')}
-                            >
-                              <RefreshCw className="w-3 h-3" />
-                              <span>{t('استبدال', 'Replace')}</span>
-                            </button>
-                            {isEditUnlocked && (
-                              confirmDeleteDeliverableId === delDoc.id ? (
-                                <button
-                                  type="button"
-                                  onClick={() => void handleRemoveIssuedDeliverable(delDoc.id)}
-                                  className="px-2 py-1 rounded-lg bg-red-600 text-white text-[10.5px] font-bold cursor-pointer"
-                                >
-                                  {t('تأكيد', 'Confirm')}
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => setConfirmDeleteDeliverableId(delDoc.id)}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
-                                  title={t('حذف', 'Delete')}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )
-                            )}
+                            </span>
+                            {(() => {
+                              const ev = evaluatePassportValidity(
+                                editPassportExpiry || selectedClient.passportExpiryDate
+                              );
+                              if (ev.remainingDays === null) return null;
+                              return (
+                                <span className="block text-[11px] font-bold text-red-700 mt-0.5 tabular-nums">
+                                  {ev.remainingDays <= 0
+                                    ? t('الجواز منتهي الصلاحية حالياً.', 'Passport is currently expired.')
+                                    : t(
+                                        `المتبقي في الجواز: ${ev.remainingDays} يوماً فقط.`,
+                                        `Remaining validity: ${ev.remainingDays} days.`
+                                      )}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
+                      )}
 
-            {/* Dedicated Family Members & Companions Cloud Section */}
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
-                <div className="flex items-center gap-2">
-                  <Users className="w-5 h-5 text-[#C6A052]" />
-                  <h4 className="text-sm font-black text-[#0F2438]">
-                    {t(
-                      `أفراد العائلة والمرافقون (${selectedClient.familyMembers?.length || 0})`,
-                      `Family Members & Companions (${selectedClient.familyMembers?.length || 0})`
-                    )}
-                  </h4>
-                </div>
-              </div>
-
-              {selectedClient.familyMembers && selectedClient.familyMembers.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                  {selectedClient.familyMembers.map((member) => {
-                    const memberName = `${member.firstName} ${member.lastName}`.trim();
-                    const passportFilename = buildDescriptiveFilename(
-                      'Passport',
-                      member.firstName,
-                      member.lastName
-                    );
-                    const photoFilename = buildDescriptiveFilename(
-                      'Photo',
-                      member.firstName,
-                      member.lastName
-                    );
-                    return (
-                      <div
-                        key={member.id}
-                        className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3"
-                      >
-                        <div className="flex items-center gap-3">
-                          {member.personalPhotoUrl ? (
-                            <img
-                              src={getDisplayableDriveImageUrl(member.personalPhotoUrl)}
-                              alt={memberName}
-                              loading="lazy"
-                              decoding="async"
-                              onClick={() =>
-                                setPreviewDocImage({
-                                  label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
-                                  dataUrl: member.personalPhotoUrl,
-                                  downloadName: photoFilename,
-                                })
-                              }
-                              className="w-12 h-12 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-slate-100 cursor-pointer"
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('الاسم الأول (حسب الجواز)', 'First Name')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editFirstName}
+                            onChange={(e) => setEditFirstName(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('الاسم الأخير (حسب الجواز)', 'Last Name')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editLastName}
+                            onChange={(e) => setEditLastName(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('رقم جواز السفر', 'Passport Number')}
+                          </label>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={editPassportNumber}
+                              onChange={(e) => setEditPassportNumber(e.target.value.toUpperCase())}
+                              placeholder="A12345678"
+                              className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
                             />
-                          ) : (
-                            <div className="w-12 h-12 rounded-full bg-[#0F2438] text-[#E5C887] flex items-center justify-center text-sm font-black shrink-0">
-                              {memberName.slice(0, 1) || 'ع'}
-                            </div>
-                          )}
-
-                          <div className="min-w-0 flex-1 space-y-0.5">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="text-xs sm:text-sm font-black text-[#0F2438] truncate">
-                                {memberName}
-                              </span>
-                              <span className="px-2 py-0.5 rounded-md bg-[#C6A052]/20 border border-[#C6A052]/50 text-[10px] font-black text-[#0F2438]">
-                                {getRelationshipLabel(member.relationship, lang)}
-                              </span>
-                            </div>
-                            <div className="text-[11px] text-slate-600 tabular-nums uppercase">
-                              {t('رقم الجواز:', 'Passport No:')}{' '}
-                              <strong className="text-[#0F2438]">{member.passportNumber}</strong>
-                              {member.passportExpiryDate && ` · ${member.passportExpiryDate}`}
-                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void handleAdminCopyValue('passportNumber', editPassportNumber)}
+                              disabled={!editPassportNumber.trim()}
+                              title={t('نسخ رقم الجواز', 'Copy Passport Number')}
+                              className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                            >
+                              {adminCopiedKey === 'passportNumber' ? (
+                                <Check className="w-4 h-4 text-emerald-600" />
+                              ) : (
+                                <Copy className="w-4 h-4" />
+                              )}
+                            </button>
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-2 border-t border-slate-100">
-                          {member.passportPhotoUrl && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPreviewDocImage({
-                                    label: `${memberName} — ${t('صورة جواز السفر', 'Passport Photo')}`,
-                                    dataUrl: member.passportPhotoUrl,
-                                    downloadName: passportFilename,
-                                  })
-                                }
-                                className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Eye className="w-3 h-3" />
-                                <span>{t('معاينة الجواز', 'Passport')}</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void downloadCloudFile(member.passportPhotoUrl, passportFilename)
-                                }
-                                className="px-2 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Download className="w-3 h-3" />
-                                <span>{t('تحميل الجواز', 'DL Passport')}</span>
-                              </button>
-                            </>
-                          )}
-
-                          {member.personalPhotoUrl && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPreviewDocImage({
-                                    label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
-                                    dataUrl: member.personalPhotoUrl,
-                                    downloadName: photoFilename,
-                                  })
-                                }
-                                className="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Eye className="w-3 h-3" />
-                                <span>{t('معاينة الصورة', 'Photo')}</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void downloadCloudFile(member.personalPhotoUrl, photoFilename)
-                                }
-                                className="px-2 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
-                              >
-                                <Download className="w-3 h-3" />
-                                <span>{t('تحميل الشخصية', 'DL Photo')}</span>
-                              </button>
-                            </>
-                          )}
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('الاسم الكامل بالإنجليزية (كما في الجواز)', 'Full Name (English)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editPassportFullNameEn}
+                            onChange={(e) => {
+                              setEditPassportFullNameEn(e.target.value);
+                              setEditPassportFullName(e.target.value);
+                            }}
+                            dir="ltr"
+                            placeholder="AHMED MOHAMED ALI"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('الاسم الكامل بالعربية (إن وجد)', 'Full Name (Arabic)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editPassportFullNameAr}
+                            onChange={(e) => setEditPassportFullNameAr(e.target.value)}
+                            placeholder="أحمد محمد علي"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('الجنسية', 'Nationality')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editNationality}
+                            onChange={(e) => setEditNationality(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('تاريخ الميلاد', 'Date of Birth')}
+                          </label>
+                          <input
+                            type="date"
+                            value={editBirthDate}
+                            onChange={(e) => setEditBirthDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('تاريخ الإصدار', 'Issue Date')}
+                          </label>
+                          <input
+                            type="date"
+                            value={editPassportIssueDate}
+                            onChange={(e) => setEditPassportIssueDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('تاريخ انتهاء الجواز', 'Passport Expiry')}
+                          </label>
+                          <input
+                            type="date"
+                            value={editPassportExpiry}
+                            onChange={(e) => setEditPassportExpiry(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="bg-white border border-dashed border-slate-300 rounded-xl p-5 text-center text-xs text-slate-500">
-                  {t(
-                    'لم يقم العميل بإضافة أفراد عائلة أو مرافقين حتى الآن.',
-                    'No family members or companions added by this client yet.'
-                  )}
-                </div>
-              )}
+
+                      {/* Extracted Saudi Visa / Visit Invitation Section */}
+                      <div className="bg-slate-50 border border-sky-200 rounded-xl p-3 space-y-2.5 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-sky-100">
+                          <span className="font-black text-[#0F2438] flex items-center gap-1.5">
+                            <FileText className="w-4 h-4 text-[#0284C7]" />
+                            <span>
+                              {t('بيانات التأشيرة والمستند المستخرجة', 'Extracted Visa & Document Details')}
+                            </span>
+                          </span>
+                          <span className="text-[10.5px] font-bold text-sky-700">
+                            {t('نسخ بضغطة واحدة لإنجاز وتساهيل', '1-Click Copy for Enjaz & Tasheer')}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('رقم المستند', 'Visa / Document Number')}
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={editVisaDocumentNumber}
+                                onChange={(e) => setEditVisaDocumentNumber(e.target.value)}
+                                placeholder="1001234567"
+                                className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleAdminCopyValue('visaDocumentNumber', editVisaDocumentNumber)
+                                }
+                                disabled={!editVisaDocumentNumber.trim()}
+                                title={t('نسخ رقم المستند', 'Copy Document Number')}
+                                className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                              >
+                                {adminCopiedKey === 'visaDocumentNumber' ? (
+                                  <Check className="w-4 h-4 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('رقم الكفيل / الإقامة أو الهوية', 'Sponsor / Iqama ID')}
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={editSaudiSponsorId}
+                                onChange={(e) => setEditSaudiSponsorId(e.target.value)}
+                                placeholder="2012345678"
+                                className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleAdminCopyValue('saudiSponsorId', editSaudiSponsorId)
+                                }
+                                disabled={!editSaudiSponsorId.trim()}
+                                title={t('نسخ رقم الكفيل / الإقامة', 'Copy Sponsor ID')}
+                                className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                              >
+                                {adminCopiedKey === 'saudiSponsorId' ? (
+                                  <Check className="w-4 h-4 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('رقم الجواز المدوّن في المستند', 'Passport No. on Document')}
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={editDocumentPassportNumber}
+                                onChange={(e) =>
+                                  setEditDocumentPassportNumber(e.target.value.toUpperCase())
+                                }
+                                placeholder="A12345678"
+                                className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleAdminCopyValue(
+                                    'documentPassportNumber',
+                                    editDocumentPassportNumber
+                                  )
+                                }
+                                disabled={!editDocumentPassportNumber.trim()}
+                                title={t('نسخ رقم الجواز', 'Copy Passport Number')}
+                                className="px-2.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 text-[#0F2438] shrink-0 cursor-pointer transition"
+                              >
+                                {adminCopiedKey === 'documentPassportNumber' ? (
+                                  <Check className="w-4 h-4 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('اسم صاحب الطلب بالعربية', 'Applicant Name (Arabic)')}
+                            </label>
+                            <input
+                              type="text"
+                              value={editApplicantNameAr}
+                              onChange={(e) => setEditApplicantNameAr(e.target.value)}
+                              placeholder="الاسم بالعربية"
+                              className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('اسم صاحب الطلب بالإنجليزية', 'Applicant Name (English)')}
+                            </label>
+                            <input
+                              type="text"
+                              value={editApplicantNameEn}
+                              onChange={(e) => setEditApplicantNameEn(e.target.value)}
+                              dir="ltr"
+                              placeholder="Applicant Name in English"
+                              className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block font-bold text-slate-600 mb-1">
+                              {t('جهة القدوم', 'Port / Embassy of Entry')}
+                            </label>
+                            <input
+                              type="text"
+                              value={editPortOfEntry}
+                              onChange={(e) => setEditPortOfEntry(e.target.value)}
+                              placeholder={t('مثال: القاهرة / الإسكندرية', 'e.g. Cairo / Alexandria')}
+                              className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {folderSavedMsg && (
+                        <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                          {folderSavedMsg}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <button
+                          type="submit"
+                          className="min-h-[40px] px-5 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                        >
+                          <Save className="w-4 h-4" />
+                          <span>{t('حفظ البيانات الأساسية والجواز', 'Save Basic Info & Passport')}</span>
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* Family Members & Companions Cloud Section */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                        <div className="flex items-center gap-2">
+                          <Users className="w-5 h-5 text-[#C6A052]" />
+                          <h4 className="text-sm font-black text-[#0F2438]">
+                            {t(
+                              `أفراد العائلة والمرافقون (${selectedClient.familyMembers?.length || 0})`,
+                              `Family Members & Companions (${selectedClient.familyMembers?.length || 0})`
+                            )}
+                          </h4>
+                        </div>
+                      </div>
+
+                      {selectedClient.familyMembers && selectedClient.familyMembers.length > 0 ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                          {selectedClient.familyMembers.map((member) => {
+                            const memberName = `${member.firstName} ${member.lastName}`.trim();
+                            const passportFilename = buildDescriptiveFilename(
+                              'Passport',
+                              member.firstName,
+                              member.lastName
+                            );
+                            const photoFilename = buildDescriptiveFilename(
+                              'Photo',
+                              member.firstName,
+                              member.lastName
+                            );
+                            return (
+                              <div
+                                key={member.id}
+                                className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3"
+                              >
+                                <div className="flex items-center gap-3">
+                                  {member.personalPhotoUrl ? (
+                                    <img
+                                      src={getDisplayableDriveImageUrl(member.personalPhotoUrl)}
+                                      alt={memberName}
+                                      loading="lazy"
+                                      decoding="async"
+                                      onClick={() =>
+                                        setPreviewDocImage({
+                                          label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                                          dataUrl: member.personalPhotoUrl,
+                                          downloadName: photoFilename,
+                                        })
+                                      }
+                                      className="w-12 h-12 rounded-full object-cover border-2 border-[#C6A052] shrink-0 bg-white cursor-pointer"
+                                    />
+                                  ) : (
+                                    <div className="w-12 h-12 rounded-full bg-[#0F2438] text-[#E5C887] flex items-center justify-center text-sm font-black shrink-0">
+                                      {memberName.slice(0, 1) || 'ع'}
+                                    </div>
+                                  )}
+
+                                  <div className="min-w-0 flex-1 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-xs sm:text-sm font-black text-[#0F2438] truncate">
+                                        {memberName}
+                                      </span>
+                                      <span className="px-2 py-0.5 rounded-md bg-[#C6A052]/20 border border-[#C6A052]/50 text-[10px] font-black text-[#0F2438]">
+                                        {getRelationshipLabel(member.relationship, lang)}
+                                      </span>
+                                    </div>
+                                    <div className="text-[11px] text-slate-600 tabular-nums uppercase">
+                                      {t('رقم الجواز:', 'Passport No:')}{' '}
+                                      <strong className="text-[#0F2438]">{member.passportNumber}</strong>
+                                      {member.passportExpiryDate && ` · ${member.passportExpiryDate}`}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-2 border-t border-slate-200/80">
+                                  {member.passportPhotoUrl && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setPreviewDocImage({
+                                            label: `${memberName} — ${t('صورة جواز السفر', 'Passport Photo')}`,
+                                            dataUrl: member.passportPhotoUrl,
+                                            downloadName: passportFilename,
+                                          })
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                        <span>{t('معاينة الجواز', 'Passport')}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void downloadCloudFile(member.passportPhotoUrl, passportFilename)
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        <Download className="w-3 h-3" />
+                                        <span>{t('تحميل الجواز', 'DL Passport')}</span>
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {member.personalPhotoUrl && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setPreviewDocImage({
+                                            label: `${memberName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                                            dataUrl: member.personalPhotoUrl,
+                                            downloadName: photoFilename,
+                                          })
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        <Eye className="w-3 h-3" />
+                                        <span>{t('معاينة الصورة', 'Photo')}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void downloadCloudFile(member.personalPhotoUrl, photoFilename)
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10.5px] font-black flex items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        <Download className="w-3 h-3" />
+                                        <span>{t('تحميل الشخصية', 'DL Photo')}</span>
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-5 text-center text-xs text-slate-500">
+                          {t(
+                            'لم يقم العميل بإضافة أفراد عائلة أو مرافقين حتى الآن.',
+                            'No family members or companions added by this client yet.'
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* TAB 2: DOCUMENTS & ATTACHMENTS + FINAL DELIVERABLE */}
+                {clientModalTab === 'documents' && (
+                  <div className="space-y-4">
+                    <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h4 className="text-sm font-black text-[#0F2438]">
+                          {t(
+                            `صور الجواز والمستندات وإيصالات الدفع (${selectedClient.documents?.length || 0})`,
+                            `Uploaded Passports, Receipts & Docs (${selectedClient.documents?.length || 0})`
+                          )}
+                        </h4>
+
+                        {selectedClient.avatarUrl && (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewDocImage({
+                                  label: `${getTravelerDisplayNames(selectedClient).fullDisplayName} — ${t('الصورة الشخصية', 'Personal Photo')}`,
+                                  dataUrl: selectedClient.avatarUrl || '',
+                                  downloadName: buildDescriptiveFilename(
+                                    'Photo',
+                                    getTravelerDisplayNames(selectedClient).firstName,
+                                    getTravelerDisplayNames(selectedClient).lastName
+                                  ),
+                                })
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 hover:bg-slate-200 text-[11px] font-bold text-[#0F2438] flex items-center gap-1 cursor-pointer"
+                            >
+                              <Eye className="w-3 h-3" />
+                              <span>{t('الصورة الشخصية', 'Avatar')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void downloadCloudFile(
+                                  selectedClient.avatarUrl || '',
+                                  buildDescriptiveFilename(
+                                    'Photo',
+                                    getTravelerDisplayNames(selectedClient).firstName,
+                                    getTravelerDisplayNames(selectedClient).lastName
+                                  )
+                                )
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>{t('تحميل الشخصية', 'Download Photo')}</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {selectedClient.documents && selectedClient.documents.length > 0 ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {selectedClient.documents.map((docItem) => {
+                            const clientNames = getTravelerDisplayNames(selectedClient);
+                            const isPdf = docItem.fileName?.toLowerCase().endsWith('.pdf');
+                            const dlFilename =
+                              docItem.docType === 'passport'
+                                ? buildDescriptiveFilename(
+                                    'Passport',
+                                    clientNames.firstName,
+                                    clientNames.lastName
+                                  )
+                                : docItem.docType === 'photo'
+                                ? buildDescriptiveFilename(
+                                    'Photo',
+                                    clientNames.firstName,
+                                    clientNames.lastName
+                                  )
+                                : docItem.docType === 'receipt'
+                                ? buildDescriptiveFilename(
+                                    'Receipt',
+                                    clientNames.firstName,
+                                    clientNames.lastName
+                                  )
+                                : docItem.fileName || `${selectedClient.phone}-${docItem.docType}.jpg`;
+                            const docStatus: DocumentReviewStatus = docItem.status || 'received';
+                            const isUpdatingThisDoc = updatingDocStatusId === docItem.id;
+                            return (
+                              <div
+                                key={docItem.id}
+                                className={`bg-slate-50 border rounded-xl p-3 space-y-2.5 ${
+                                  docStatus === 'pending_completion'
+                                    ? 'border-amber-300 ring-1 ring-amber-100'
+                                    : docStatus === 'completed'
+                                    ? 'border-emerald-300'
+                                    : 'border-slate-200'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  {isPdf ? (
+                                    <div className="w-14 h-14 rounded-lg bg-red-50 border border-red-200 text-red-600 flex flex-col items-center justify-center shrink-0">
+                                      <FileText className="w-6 h-6" />
+                                      <span className="text-[9px] font-black">PDF</span>
+                                    </div>
+                                  ) : (
+                                    <img
+                                      src={getDisplayableDriveImageUrl(docItem.dataUrl)}
+                                      alt={docItem.label}
+                                      loading="lazy"
+                                      decoding="async"
+                                      className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0 bg-white"
+                                    />
+                                  )}
+                                  <div className="min-w-0 flex-1 space-y-0.5">
+                                    <span className="text-xs font-black text-[#0F2438] block truncate">
+                                      {docItem.label}
+                                    </span>
+                                    <span className="text-[11px] text-slate-500 block truncate">
+                                      {docItem.fileName}
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="text-[10px] text-slate-400 tabular-nums">
+                                        {docItem.uploadedAt?.slice(0, 10)}
+                                      </span>
+                                      <span
+                                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-black border ${
+                                          docStatus === 'completed'
+                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                            : docStatus === 'pending_completion'
+                                            ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                            : 'bg-sky-50 border-sky-200 text-sky-900'
+                                        }`}
+                                      >
+                                        {docStatus === 'completed'
+                                          ? t('مكتمل ✓', 'Completed ✓')
+                                          : docStatus === 'pending_completion'
+                                          ? t('مطلوب استكماله', 'Needs Completion')
+                                          : t('تم الاستلام', 'Received')}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="bg-white border border-slate-200 rounded-lg p-2 space-y-1.5">
+                                  <input
+                                    type="text"
+                                    value={docNoteDrafts[docItem.id] ?? docItem.statusNote ?? ''}
+                                    onChange={(e) =>
+                                      setDocNoteDrafts((prev) => ({
+                                        ...prev,
+                                        [docItem.id]: e.target.value,
+                                      }))
+                                    }
+                                    placeholder={t(
+                                      'ملاحظة على هذا المستند (مثال: يرجى توضيح الصورة)...',
+                                      'Optional note on this document...'
+                                    )}
+                                    className="w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 text-[11px] text-[#0F2438]"
+                                  />
+                                  <div className="grid grid-cols-3 gap-1">
+                                    {(
+                                      [
+                                        {
+                                          id: 'pending_completion' as DocumentReviewStatus,
+                                          label: t('مطلوب استكماله', 'Incomplete'),
+                                          activeCls: 'bg-amber-500 text-white border-amber-600',
+                                        },
+                                        {
+                                          id: 'received' as DocumentReviewStatus,
+                                          label: t('تم الاستلام', 'Received'),
+                                          activeCls: 'bg-[#0284C7] text-white border-[#0284C7]',
+                                        },
+                                        {
+                                          id: 'completed' as DocumentReviewStatus,
+                                          label: t('مكتمل ✓', 'Complete'),
+                                          activeCls: 'bg-emerald-600 text-white border-emerald-700',
+                                        },
+                                      ]
+                                    ).map((stBtn) => (
+                                      <button
+                                        key={stBtn.id}
+                                        type="button"
+                                        disabled={isUpdatingThisDoc}
+                                        onClick={() => void handleUpdateDocumentStatus(docItem.id, stBtn.id)}
+                                        className={`py-1 px-1.5 rounded-lg text-[10px] font-black border transition cursor-pointer disabled:opacity-50 ${
+                                          docStatus === stBtn.id
+                                            ? stBtn.activeCls
+                                            : 'bg-white text-slate-600 border-slate-200 hover:border-slate-400'
+                                        }`}
+                                      >
+                                        {stBtn.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                  {isPdf ? (
+                                    <a
+                                      href={getDriveViewUrl(
+                                        docItem.dataUrl,
+                                        docItem.viewUrl,
+                                        docItem.storagePath
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                      <span>{t('فتح PDF', 'Open PDF')}</span>
+                                    </a>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setPreviewDocImage({
+                                          label: docItem.label,
+                                          dataUrl: docItem.dataUrl,
+                                          downloadName: dlFilename,
+                                        })
+                                      }
+                                      className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[#0F2438] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                                    >
+                                      <Eye className="w-3.5 h-3.5" />
+                                      <span>{t('معاينة', 'Inspect')}</span>
+                                    </button>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => void downloadCloudFile(docItem.dataUrl, dlFilename)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                    <span>{t('تحميل', 'Download')}</span>
+                                  </button>
+                                </div>
+
+                                {docItem.dataUrl && (
+                                  <button
+                                    type="button"
+                                    disabled={isAdminScanningPassport}
+                                    onClick={() => {
+                                      setClientModalTab('basic_passport');
+                                      void handleAdminScanExistingPassport(docItem);
+                                    }}
+                                    className="w-full px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 disabled:opacity-50 text-indigo-800 text-[11px] font-black flex items-center justify-center gap-1 cursor-pointer transition"
+                                  >
+                                    {isAdminScanningPassport ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Sparkles className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>{t('قراءة واستخراج بالذكاء ✨', 'AI Read & Extract ✨')}</span>
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-6 text-center text-xs text-slate-500 flex flex-col items-center gap-2">
+                          <FileText className="w-6 h-6 text-slate-400" />
+                          <span>
+                            {t(
+                              'لم يقم العميل برفع أي صور أو مستندات بعد.',
+                              'No passport photos or documents uploaded yet.'
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* FINAL COMPLETION DOCUMENT DELIVERY PANEL */}
+                    <div className="bg-gradient-to-br from-[#FAF8F2] to-white border-2 border-[#C6A052]/70 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#C6A052]/30">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-10 h-10 rounded-xl bg-[#0F2438] text-[#E5C887] flex items-center justify-center shrink-0">
+                            <FileUp className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="text-sm sm:text-base font-black text-[#0F2438]">
+                              {t('إرفاق مستند التنفيذ النهائي', 'Attach Final Execution Document')}
+                            </h4>
+                            <p className="text-[11px] text-slate-600">
+                              {t(
+                                'ارفع ملف PDF أو صورة عالية الجودة لإرساله فوراً إلى حساب العميل وتحديث الطلب إلى "تم تنفيذ الطلب"',
+                                'Upload a PDF or high-quality image to deliver straight to client account and set status to Completed'
+                              )}
+                            </p>
+                          </div>
+                        </div>
+
+                        {(selectedClient.issuedDocuments?.length || 0) > 0 && (
+                          <span className="px-2.5 py-1 rounded-full bg-emerald-100 border border-emerald-200 text-emerald-900 text-[11px] font-black tabular-nums">
+                            {t(
+                              `تم تسليم ${selectedClient.issuedDocuments?.length} مستند`,
+                              `Delivered: ${selectedClient.issuedDocuments?.length}`
+                            )}
+                          </span>
+                        )}
+                      </div>
+
+                      {replacingDeliverable && (
+                        <div className="p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <div className="flex items-center gap-2 font-black text-amber-950">
+                            <RefreshCw className="w-4 h-4 text-amber-700 shrink-0" />
+                            <span>
+                              {t(
+                                `وضع استبدال المستند: "${replacingDeliverable.docTypeLabel}" — اختر الملف الجديد ليحل محل النسخة السابقة تلقائياً.`,
+                                `Replacing document "${replacingDeliverable.docTypeLabel}" — select the new file to overwrite cleanly.`
+                              )}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setReplacingDeliverable(null)}
+                            className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-900 font-bold cursor-pointer"
+                          >
+                            {t('إلغاء الاستبدال', 'Cancel Replace')}
+                          </button>
+                        </div>
+                      )}
+
+                      <form onSubmit={handleApproveAndDeliverDocument} className="space-y-3.5 text-xs">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block font-bold text-[#0F2438] mb-1.5">
+                              {t('نوع المستند', 'Document Type')} <span className="text-red-500">*</span>
+                            </label>
+                            <select
+                              value={deliverableTypeChoice}
+                              onChange={(e) => setDeliverableTypeChoice(e.target.value)}
+                              className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] font-bold focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                            >
+                              <option value="تذكرة طيران">{t('تذكرة طيران', 'Flight Ticket')}</option>
+                              <option value="موعد تساهيل">{t('موعد تساهيل', 'Tasheer VFS Appointment')}</option>
+                              <option value="كشف طبي جامكا">{t('كشف طبي جامكا', 'GAMCA / Wafid Medical Slip')}</option>
+                              <option value="تأشيرة">{t('تأشيرة صادرة', 'Issued Visa')}</option>
+                              <option value="شهادة تطعيم">{t('شهادة تطعيم', 'Vaccination Certificate')}</option>
+                              <option value="حجز فندق مؤكد">{t('حجز فندق مؤكد', 'Confirmed Hotel Voucher')}</option>
+                              <option value="تأمين طبي وإيصال إنجاز">{t('تأمين طبي وإيصال إنجاز', 'Medical Insurance & Enjaz Receipt')}</option>
+                              <option value="__custom__">{t('كتابة نوع مستند آخر...', 'Enter Custom Document Type...')}</option>
+                            </select>
+                          </div>
+
+                          {deliverableTypeChoice === '__custom__' ? (
+                            <div>
+                              <label className="block font-bold text-[#0F2438] mb-1.5">
+                                {t('اكتب اسم / نوع المستند', 'Custom Document Type')}{' '}
+                                <span className="text-red-500">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                value={customDeliverableType}
+                                onChange={(e) => setCustomDeliverableType(e.target.value)}
+                                placeholder={t('مثال: تصديق وزارة الخارجية', 'e.g. MOFA Attested Contract')}
+                                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                              />
+                            </div>
+                          ) : (
+                            <div>
+                              <label className="block font-bold text-[#0F2438] mb-1.5">
+                                {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
+                              </label>
+                              <input
+                                type="text"
+                                value={deliverableNotes}
+                                onChange={(e) => setDeliverableNotes(e.target.value)}
+                                placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
+                                className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {deliverableTypeChoice === '__custom__' && (
+                          <div>
+                            <label className="block font-bold text-[#0F2438] mb-1.5">
+                              {t('ملاحظة مرفقة مع المستند (اختياري)', 'Optional Note for Client')}
+                            </label>
+                            <input
+                              type="text"
+                              value={deliverableNotes}
+                              onChange={(e) => setDeliverableNotes(e.target.value)}
+                              placeholder={t('مثال: الحضور قبل الموعد بـ 30 دقيقة', 'e.g. Arrive 30 mins early')}
+                              className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-[#0F2438] focus:outline-none focus:ring-2 focus:ring-[#0284C7]"
+                            />
+                          </div>
+                        )}
+
+                        <div className="bg-white border border-dashed border-[#C6A052] rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {deliverablePreviewUrl ? (
+                              <img
+                                src={deliverablePreviewUrl}
+                                alt={deliverableFile?.name || 'Preview'}
+                                className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-[#0F2438] shrink-0">
+                                <FileText className="w-6 h-6 text-[#0284C7]" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <span className="font-black text-[#0F2438] block truncate">
+                                {deliverableFile
+                                  ? deliverableFile.name
+                                  : t('اختر ملف المستند (PDF حتى 5 ميجا أو صورة)', 'Select Document File (PDF <= 5MB or Image)')}
+                              </span>
+                              <span className="text-[11px] text-slate-500 block">
+                                {deliverableFile
+                                  ? `${formatStorageSize(deliverableFile.size)}${
+                                      deliverableFile.type.startsWith('image/')
+                                        ? t(' · سيتم ضغط الصورة تلقائياً < 500 ك.ب', ' · Auto-compressed < 500 KB')
+                                        : ''
+                                    }`
+                                  : t(
+                                      'حد أقصى 5 ميجابايت لملفات PDF، وضغط تلقائي للصور لأقل من 500 كيلوبايت',
+                                      'Max 5 MB for PDFs; images are auto-compressed under 500 KB before upload'
+                                    )}
+                              </span>
+                            </div>
+                          </div>
+
+                          <label className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-[#0F2438] font-black flex items-center justify-center gap-1.5 cursor-pointer shrink-0 transition">
+                            <FileUp className="w-4 h-4 text-[#0284C7]" />
+                            <span>{t('اختيار ملف', 'Choose File')}</span>
+                            <input
+                              type="file"
+                              accept="image/*,application/pdf"
+                              onChange={handleSelectDeliverableFile}
+                              className="hidden"
+                            />
+                          </label>
+                        </div>
+
+                        {deliverableFeedback && (
+                          <div
+                            className={`p-3 rounded-xl border text-xs font-bold flex items-center gap-2 ${
+                              deliverableFeedback.ok
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                                : 'bg-red-50 border-red-200 text-red-900'
+                            }`}
+                          >
+                            {deliverableFeedback.ok ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                            )}
+                            <span>{deliverableFeedback.text}</span>
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={isSendingDeliverable}
+                          className="w-full sm:w-auto min-h-[44px] px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-2 shadow-sm transition cursor-pointer"
+                        >
+                          {isSendingDeliverable ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : replacingDeliverable ? (
+                            <RefreshCw className="w-4 h-4" />
+                          ) : (
+                            <CheckCircle2 className="w-4 h-4" />
+                          )}
+                          <span>
+                            {isSendingDeliverable
+                              ? t('جاري الضغط والرفع والاعتماد...', 'Compressing & Uploading...')
+                              : replacingDeliverable
+                              ? t('حفظ واستبدال المستند للعميل', 'Save & Replace Client Document')
+                              : t('اعتماد وإرسال المستند للعميل', 'Approve & Send Document to Client')}
+                          </span>
+                        </button>
+                      </form>
+
+                      {selectedClient.issuedDocuments && selectedClient.issuedDocuments.length > 0 && (
+                        <div className="pt-3 border-t border-slate-200 space-y-2.5">
+                          <h5 className="text-xs font-black text-[#0F2438]">
+                            {t('المستندات الصادرة والمسلمة للعميل:', 'Delivered Documents in Client Account:')}
+                          </h5>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                            {selectedClient.issuedDocuments.map((delDoc) => {
+                              const isPdf =
+                                delDoc.mimeType === 'application/pdf' ||
+                                delDoc.fileName.toLowerCase().endsWith('.pdf');
+                              const isBeingReplaced = replacingDeliverable?.id === delDoc.id;
+                              return (
+                                <div
+                                  key={delDoc.id}
+                                  className={`bg-white border rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                                    isBeingReplaced ? 'border-amber-400 ring-2 ring-amber-200' : 'border-emerald-200'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                                      <FileText className="w-5 h-5" />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <span className="text-xs font-black text-[#0F2438] block truncate">
+                                        {delDoc.docTypeLabel}
+                                      </span>
+                                      <span className="text-[10.5px] text-slate-500 block truncate tabular-nums">
+                                        {delDoc.fileName} · {delDoc.issuedAt.slice(0, 10)}
+                                        {typeof delDoc.fileSizeBytes === 'number'
+                                          ? ` · ${formatStorageSize(delDoc.fileSizeBytes)}`
+                                          : ''}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                    <a
+                                      href={getDriveViewUrl(
+                                        delDoc.downloadUrl,
+                                        delDoc.viewUrl,
+                                        delDoc.storagePath
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-[#0F2438]"
+                                      title={t('معاينة وفتح في Google Drive', 'Preview & Open in Drive')}
+                                    >
+                                      {isPdf ? <ExternalLink className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void downloadCloudFile(delDoc.downloadUrl, delDoc.fileName)
+                                      }
+                                      className="px-2.5 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                      <span>{t('تحميل', 'Download')}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleStartReplaceDeliverable(delDoc.id, delDoc.docTypeLabel)
+                                      }
+                                      className="px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-900 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                                      title={t('استبدال المستند', 'Replace Document')}
+                                    >
+                                      <RefreshCw className="w-3 h-3" />
+                                      <span>{t('استبدال', 'Replace')}</span>
+                                    </button>
+                                    {isEditUnlocked && (
+                                      confirmDeleteDeliverableId === delDoc.id ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleRemoveIssuedDeliverable(delDoc.id)}
+                                          className="px-2 py-1 rounded-lg bg-red-600 text-white text-[10.5px] font-bold cursor-pointer"
+                                        >
+                                          {t('تأكيد', 'Confirm')}
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => setConfirmDeleteDeliverableId(delDoc.id)}
+                                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                                          title={t('حذف', 'Delete')}
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      )
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* TAB 3: ORDER STAGES, CLIENT-VISIBLE NOTE & APPOINTMENT QR */}
+                {clientModalTab === 'order_stages' && (
+                  <form
+                    onSubmit={handleSaveClientFolder}
+                    className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xs text-xs"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h4 className="text-sm font-black text-[#0F2438]">
+                          {t('مراحل طلب التأشيرة / تساهيل والتنفيذ', 'Order Execution Stages (1-Click Live Update)')}
+                        </h4>
+                        {getOrderStatusStageIndex(editOrderStatus) >= 1 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleNotifyClientStageWhatsApp({
+                                ...selectedClient,
+                                orderStatus: editOrderStatus,
+                              })
+                            }
+                            className="px-3 py-1.5 rounded-xl bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black inline-flex items-center gap-1.5 cursor-pointer transition shadow-xs"
+                          >
+                            <span>{t('📲 إبلاغ العميل واتساب', '📲 Notify Client via WhatsApp')}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {!hasClientActiveOrder(selectedClient) &&
+                        normalizeOrderStatusValue(editOrderStatus) === 'none' && (
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-[11px] font-bold text-slate-600">
+                              {t(
+                                'هذا الحساب مسجل بدون طلب خدمة نشط حالياً.',
+                                'This account currently has no active service order.'
+                              )}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleManualOpenOrder(selectedClient)}
+                              className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-black inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>{t('+ فتح طلب يدوياً للعميل', '+ Open Order Manually')}</span>
+                            </button>
+                          </div>
+                        )}
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {VISA_ORDER_STATUSES.map((st, idx) => {
+                          const isActive = normalizeOrderStatusValue(editOrderStatus) === st;
+                          return (
+                            <button
+                              key={st}
+                              type="button"
+                              onClick={() => handleOneClickOrderStageUpdate(selectedClient, st)}
+                              className={`px-2.5 py-2.5 rounded-xl border text-[11px] font-black transition cursor-pointer text-center min-h-[44px] ${
+                                isActive
+                                  ? 'bg-[#0F2438] text-[#E5C887] border-[#C6A052] shadow-xs'
+                                  : 'bg-slate-50 text-slate-700 border-slate-300 hover:border-[#0F2438]'
+                              }`}
+                            >
+                              {idx + 1}. {translateOrderStatus(st, lang)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-slate-600 mb-1">
+                        {t('ملاحظة الإدارة للعميل (تظهر في محفظة العميل)', 'Client-Visible Admin Note')}
+                      </label>
+                      <input
+                        type="text"
+                        value={editAdminNotes}
+                        onChange={(e) => setEditAdminNotes(e.target.value)}
+                        placeholder={t(
+                          'مثال: موعد تساهيل يوم الثلاثاء 10 صباحاً',
+                          'e.g. Tasheer appointment Tuesday 10 AM'
+                        )}
+                        className="w-full px-3 py-2.5 rounded-xl border border-slate-300 bg-slate-50 text-[#0F2438]"
+                      />
+                    </div>
+
+                    {/* Appointment QR Pass Entry Section */}
+                    <div className="bg-[#FAF8F2] border border-[#E5C887] rounded-2xl p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-[#0F2438] font-black">
+                          <QrCode className="w-4 h-4 text-[#9E7B33]" />
+                          <span>
+                            {t('بيانات بطاقة الموعد والباركود (Appointment QR Pass)', 'Appointment QR Pass Details')}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowAdminQrPreview(true)}
+                          className="px-3 py-1.5 rounded-lg bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887] text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                        >
+                          <QrCode className="w-3.5 h-3.5" />
+                          <span>{t('معاينة بطاقة QR', 'Preview QR Pass')}</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('نوع الخدمة / الموعد', 'Service / Appointment Type')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editApptServiceType}
+                            onChange={(e) => setEditApptServiceType(e.target.value)}
+                            placeholder={t('موعد تساهيل (VFS) / كشف طبي جامكا / تذكرة طيران', 'Tasheer VFS / GAMCA / Flight Ticket')}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('تاريخ الموعد', 'Appointment Date')}
+                          </label>
+                          <input
+                            type="date"
+                            value={editApptDate}
+                            onChange={(e) => setEditApptDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('وقت الموعد', 'Appointment Time')}
+                          </label>
+                          <input
+                            type="time"
+                            value={editApptTime}
+                            onChange={(e) => setEditApptTime(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('المركز / المطار / الموقع (اختياري)', 'Location / Branch (Optional)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editApptLocation}
+                            onChange={(e) => setEditApptLocation(e.target.value)}
+                            placeholder={t('مثال: فرع تساهيل المنصورة / مطار القاهرة', 'e.g. Tasheer Mansoura / Cairo Airport')}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('رقم المرجع / الحجز (اختياري)', 'Reference / Booking No. (Optional)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={editApptReference}
+                            onChange={(e) => setEditApptReference(e.target.value.toUpperCase())}
+                            placeholder="VFS-849201"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums uppercase"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {folderSavedMsg && (
+                      <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                        {folderSavedMsg}
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      className="min-h-[40px] px-5 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                    >
+                      <Save className="w-4 h-4" />
+                      <span>{t('حفظ المرحلة وبيانات الموعد', 'Save Stage & Appointment')}</span>
+                    </button>
+                  </form>
+                )}
+
+                {/* TAB 4: B2C VISA MANAGEMENT */}
+                {clientModalTab === 'b2c_visa' && (
+                  <div className="space-y-4 text-xs">
+                    {selectedClient.b2cVisa && (() => {
+                      const b2c = selectedClient.b2cVisa;
+                      const countdown = evaluateB2cExitCountdown(b2c);
+                      const isExited = b2c.status === 'exited';
+                      const isUrgent = countdown?.alertLevel === 'urgent';
+                      const isWarn = countdown?.alertLevel === 'warning';
+                      return (
+                        <div
+                          className={`rounded-2xl border-2 p-4 space-y-3 shadow-xs ${
+                            isExited
+                              ? 'bg-slate-50 border-slate-300'
+                              : isUrgent
+                              ? 'bg-red-50 border-red-400'
+                              : isWarn
+                              ? 'bg-amber-50 border-amber-400'
+                              : 'bg-emerald-50/75 border-emerald-300'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="px-2.5 py-1 rounded-full bg-[#0F2438] text-[#E5C887] font-black text-[11px]">
+                                🕋 {formatB2cVisaTypeLabel(b2c.visaType, lang)}
+                              </span>
+                              <span
+                                className={`px-2.5 py-1 rounded-full font-black text-[11px] border ${
+                                  isExited
+                                    ? 'bg-slate-200 text-slate-700 border-slate-300'
+                                    : isUrgent
+                                    ? 'bg-red-600 text-white border-red-700'
+                                    : isWarn
+                                    ? 'bg-amber-500 text-white border-amber-600'
+                                    : 'bg-emerald-600 text-white border-emerald-700'
+                                }`}
+                              >
+                                {isExited
+                                  ? t('تم تسجيل المغادرة ✓', 'Departed ✓')
+                                  : countdown
+                                  ? countdown.remainingDays < 0
+                                    ? t(`متجاوز منذ ${Math.abs(countdown.remainingDays)} يوم`, `Overdue by ${Math.abs(countdown.remainingDays)}d`)
+                                    : countdown.remainingDays === 0
+                                    ? t('أقصى موعد خروج اليوم!', 'Max Exit Today!')
+                                    : t(`متبقي ${countdown.remainingDays} يوم`, `${countdown.remainingDays} days left`)
+                                  : t('نشط', 'Active')}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {countdown && !isExited && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const displayName = getTravelerDisplayNames(selectedClient).fullDisplayName;
+                                    const phoneDigits =
+                                      selectedClient.phoneNormalized || normalizePhone(selectedClient.phone);
+                                    const msg = buildB2cExitReminderWhatsAppMessage({
+                                      clientName: displayName,
+                                      passportNumber: selectedClient.passportNumber,
+                                      visaType: b2c.visaType,
+                                      expectedExitDate: countdown.expectedExitDate,
+                                      remainingDays: countdown.remainingDays,
+                                      lang,
+                                    });
+                                    openWhatsApp(buildWhatsAppSendUrl(phoneDigits, msg));
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#128C7E] text-white text-[11px] font-black cursor-pointer transition"
+                                >
+                                  {t('📲 تذكير الخروج واتساب', '📲 WA Exit Reminder')}
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                disabled={isSavingB2cModal}
+                                onClick={() => void handleToggleB2cExitFromModal(!isExited)}
+                                className={`px-3 py-1.5 rounded-lg text-[11px] font-black cursor-pointer transition ${
+                                  isExited
+                                    ? 'bg-[#0F2438] hover:bg-[#163B65] text-[#E5C887]'
+                                    : 'bg-white border border-slate-300 hover:bg-slate-100 text-[#0F2438]'
+                                }`}
+                              >
+                                {isExited
+                                  ? t('إعادة فتح كنشط', 'Reopen Active')
+                                  : t('تسجيل مغادرة نهائية ✓', 'Mark Departed ✓')}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2 text-center bg-white/80 rounded-xl p-2.5 border border-black/5 tabular-nums">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block font-bold">
+                                {t('تاريخ الدخول', 'Entry Date')}
+                              </span>
+                              <strong className="text-[#0F2438]">{b2c.entryDate}</strong>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-500 block font-bold">
+                                {t('مدة الإقامة', 'Stay Days')}
+                              </span>
+                              <strong className="text-[#0F2438]">
+                                {b2c.stayDays} {t('يوم', 'days')}
+                              </strong>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-500 block font-bold">
+                                {t('أقصى موعد خروج', 'Expected Exit')}
+                              </span>
+                              <strong className="text-[#0F2438]">
+                                {countdown?.expectedExitDate || b2c.expectedExitDate}
+                              </strong>
+                            </div>
+                          </div>
+
+                          {countdown && !isExited && (
+                            <div className="w-full h-2 rounded-full bg-white/90 overflow-hidden border border-slate-200">
+                              <div
+                                className={`h-full transition-all ${
+                                  isUrgent ? 'bg-red-600' : isWarn ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${countdown.progressPercent}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    <form
+                      onSubmit={handleSaveB2cFromModal}
+                      className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xs"
+                    >
+                      <h4 className="text-sm font-black text-[#0F2438]">
+                        {selectedClient.b2cVisa
+                          ? t('تحديث بيانات تأشيرة B2C وموعد المغادرة', 'Update B2C Visa & Exit Tracking')
+                          : t('تسجيل وتفعيل تأشيرة B2C لهذا المسافر', 'Assign B2C Visa Tracking to Client')}
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('نوع تأشيرة B2C', 'B2C Visa Type')}
+                          </label>
+                          <div className="grid grid-cols-2 gap-2">
+                            {(
+                              [
+                                { id: 'umrah_b2c' as B2cVisaType, label: t('عمرة B2C', 'Umrah B2C') },
+                                { id: 'free_b2c' as B2cVisaType, label: t('B2C حرة', 'Free B2C') },
+                              ]
+                            ).map((vt) => (
+                              <button
+                                key={vt.id}
+                                type="button"
+                                onClick={() => setB2cDraftVisaType(vt.id)}
+                                className={`py-2 px-3 rounded-xl border font-black transition cursor-pointer ${
+                                  b2cDraftVisaType === vt.id
+                                    ? 'bg-[#0F2438] text-[#E5C887] border-[#C6A052]'
+                                    : 'bg-slate-50 text-slate-700 border-slate-300'
+                                }`}
+                              >
+                                {vt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('تاريخ الدخول للسعودية', 'Saudi Entry Date')}
+                          </label>
+                          <input
+                            type="date"
+                            required
+                            value={b2cDraftEntryDate}
+                            onChange={(e) => setB2cDraftEntryDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438] tabular-nums"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('مدة الإقامة المحددة (بالأيام)', 'Authorized Stay Duration (Days)')}
+                          </label>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {[15, 30, 80, 90].map((d) => (
+                              <button
+                                key={d}
+                                type="button"
+                                onClick={() => setB2cDraftStayDays(d)}
+                                className={`px-3 py-1.5 rounded-lg border font-black tabular-nums cursor-pointer transition ${
+                                  b2cDraftStayDays === d
+                                    ? 'bg-[#C6A052] text-[#0A1926] border-[#C6A052]'
+                                    : 'bg-slate-50 text-slate-700 border-slate-300 hover:bg-slate-100'
+                                }`}
+                              >
+                                {d} {t('يوم', 'd')}
+                              </button>
+                            ))}
+                            <input
+                              type="number"
+                              min={1}
+                              max={365}
+                              value={b2cDraftStayDays}
+                              onChange={(e) =>
+                                setB2cDraftStayDays(Math.max(1, Math.min(365, Number(e.target.value) || 1)))
+                              }
+                              className="w-24 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-[#0F2438] font-bold tabular-nums"
+                            />
+                            <span className="text-[11px] font-bold text-slate-500 tabular-nums ms-auto">
+                              {t('تاريخ الخروج المتوقع:', 'Expected Exit:')}{' '}
+                              <strong className="text-[#0F2438]">
+                                {calculateExpectedExitDate(b2cDraftEntryDate, b2cDraftStayDays) || '—'}
+                              </strong>
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <label className="block font-bold text-slate-600 mb-1">
+                            {t('ملاحظات تأشيرة B2C (اختياري)', 'B2C Notes (Optional)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={b2cDraftNotes}
+                            onChange={(e) => setB2cDraftNotes(e.target.value)}
+                            placeholder={t('رقم الرحلة / المنفذ / ملاحظات المتابعة...', 'Flight no. / border port / notes...')}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-[#0F2438]"
+                          />
+                        </div>
+                      </div>
+
+                      {b2cModalFeedback && (
+                        <div
+                          className={`p-2.5 rounded-xl border text-xs font-bold ${
+                            b2cModalFeedback.ok
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                              : 'bg-red-50 border-red-200 text-red-900'
+                          }`}
+                        >
+                          {b2cModalFeedback.text}
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={isSavingB2cModal}
+                        className="min-h-[40px] px-5 py-2 bg-[#0F2438] hover:bg-[#163B65] disabled:opacity-60 text-[#E5C887] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                      >
+                        {isSavingB2cModal ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Save className="w-4 h-4" />
+                        )}
+                        <span>{t('حفظ وتفعيل متابعة B2C', 'Save B2C Visa Record')}</span>
+                      </button>
+                    </form>
+                  </div>
+                )}
+
+                {/* TAB 5: PRIVATE ADMIN NOTES & RECORD SECURITY */}
+                {clientModalTab === 'private_notes' && (
+                  <div className="space-y-4 text-xs">
+                    <form
+                      onSubmit={handleSaveClientFolder}
+                      className="bg-white border border-amber-300 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="flex items-center gap-1.5 text-sm font-black text-amber-950">
+                          <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+                          <span>
+                            {t(
+                              'ملاحظات إدارية خاصة (لا يراها العميل إطلاقاً)',
+                              'Private Admin Notes (Strictly Hidden from Client)'
+                            )}
+                          </span>
+                        </label>
+                        <span className="px-2.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-[10px] font-black text-amber-900">
+                          {t('سري للإدارة فقط', 'Internal Only')}
+                        </span>
+                      </div>
+
+                      <textarea
+                        rows={5}
+                        value={editAdminPrivateNotes}
+                        onChange={(e) => setEditAdminPrivateNotes(e.target.value)}
+                        placeholder={t(
+                          'سجّل هنا أي ملاحظات داخلية أو مدفوعات مالية أو تنبيهات متابعة خاصة بفريق العمل فقط...',
+                          'Record internal team notes, payment balances, or reminders (never visible to the client)...'
+                        )}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-amber-300 bg-amber-50/40 text-[#0F2438] text-xs focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+
+                      {folderSavedMsg && (
+                        <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
+                          {folderSavedMsg}
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        className="min-h-[40px] px-5 py-2 bg-[#C6A052] hover:bg-[#d4b063] text-[#0A1926] rounded-xl text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                      >
+                        <Save className="w-4 h-4" />
+                        <span>{t('حفظ الملاحظات الخاصة', 'Save Private Notes')}</span>
+                      </button>
+                    </form>
+
+                    {/* Account Audit & Delete Client Danger Zone */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3 shadow-xs">
+                      <h5 className="text-xs font-black text-[#0F2438]">
+                        {t('ملخص سجل الحساب وإدارة السجل', 'Account Audit & Record Management')}
+                      </h5>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-[11px] bg-slate-50 border border-slate-200 rounded-xl p-3">
+                        <div>
+                          <span className="text-slate-500 block">{t('تاريخ الإنشاء', 'Created')}</span>
+                          <strong className="text-[#0F2438] tabular-nums">
+                            {selectedClient.createdAt?.slice(0, 10) || '—'}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">{t('آخر تحديث', 'Updated')}</span>
+                          <strong className="text-[#0F2438] tabular-nums">
+                            {selectedClient.updatedAt?.slice(0, 10) || '—'}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">{t('الخدمة المطلوبة', 'Service')}</span>
+                          <strong className="text-[#0F2438] truncate block">
+                            {selectedClient.preferredVisaType || t('لم تُحدد', 'Not specified')}
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block">{t('الجلسات النشطة', 'Active Sessions')}</span>
+                          <strong className="text-[#0F2438] tabular-nums">
+                            {selectedClient.activeSessions?.length || 0}
+                          </strong>
+                        </div>
+                      </div>
+
+                      {canDeleteRecords && (
+                        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-[11px] font-bold text-red-700">
+                            {t('حذف سجل هذا العميل نهائياً من النظام', 'Permanently delete this client record')}
+                          </span>
+                          {!isEditUnlocked ? (
+                            <span
+                              className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 text-slate-500 text-[11px] font-bold flex items-center gap-1"
+                              title={t('افتح وضع التعديل لحذف السجلات', 'Unlock Edit Mode to delete records')}
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>{t('الحذف مقفل', 'Delete Locked')}</span>
+                            </span>
+                          ) : confirmDeletePhone === selectedClient.phone ? (
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleConfirmDeleteClient(selectedClient.phone)}
+                                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer"
+                              >
+                                {t('تأكيد الحذف النهائي', 'Confirm Delete')}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeletePhone(null)}
+                                className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 text-xs font-bold cursor-pointer"
+                              >
+                                {t('إلغاء', 'Cancel')}
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeletePhone(selectedClient.phone)}
+                              className="px-3 py-2 rounded-xl border border-red-200 bg-white text-red-700 hover:bg-red-50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>{t('حذف العميل', 'Delete Client')}</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -8144,7 +8993,7 @@ export const AdminDashboardWorkspace: React.FC<AdminDashboardWorkspaceProps> = (
       {/* Full-Size Passport / Document Lightbox */}
       {previewDocImage && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+          className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
           onClick={() => setPreviewDocImage(null)}
         >
           <div

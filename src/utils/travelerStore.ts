@@ -1476,6 +1476,53 @@ export function subscribeAllClientsCloud(): () => void {
   );
 }
 
+export async function forceRefreshClientsFromServerCloud(): Promise<{
+  ok: boolean;
+  count: number;
+  syncedAt: string;
+  error?: string;
+}> {
+  const path = 'clients';
+  try {
+    const clientsQuery = query(
+      collection(db, 'clients'),
+      where('verified', 'in', [true, false])
+    );
+    const snapshot = await getDocsFromServer(clientsQuery);
+    const currentLocal = getAllTravelers();
+    const nextMap: Record<string, TravelerProfile> = {};
+
+    snapshot.forEach((docSnap) => {
+      const data = docSnap.data() as TravelerProfile;
+      const key = normalizePhone(data.phoneNormalized || data.phone || docSnap.id);
+      if (key) {
+        nextMap[key] = mergeCloudClientWithLocal(
+          { ...data, phone: key, phoneNormalized: key },
+          currentLocal[key]
+        );
+      }
+    });
+
+    saveAllTravelersLocalOnly(nextMap);
+    return {
+      ok: true,
+      count: Object.keys(nextMap).length,
+      syncedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+    return {
+      ok: false,
+      count: Object.keys(getAllTravelers()).length,
+      syncedAt: new Date().toISOString(),
+      error: msg,
+    };
+  }
+}
+
 export function hashClientPin(rawPhone: string, rawPin: string): string {
   const phone = normalizePhone(rawPhone);
   const cleanPin = normalizeArabicDigits(rawPin).replace(/\D/g, '');

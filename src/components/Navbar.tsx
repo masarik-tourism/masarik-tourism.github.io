@@ -40,6 +40,7 @@ import {
   TRAVELERS_UPDATED_EVENT,
 } from '../utils/travelerStore';
 import { playChatNotificationChime } from '../utils/chatStore';
+import { PWAInstallButton } from './PWAInstallButton';
 import {
   getBrowserNotificationPermission,
   requestAndGetFcmToken,
@@ -499,6 +500,9 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             {isAr ? <span>EN</span> : <span className="text-[10px]">عربي</span>}
           </button>
+
+          {/* Desktop/Windows Standalone PWA Install Button */}
+          <PWAInstallButton variant="desktop_navbar" />
 
           {isAdminActive ? (
             <button
@@ -1166,6 +1170,11 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <span>{t('سياسة الخصوصية', 'Privacy Policy')}</span>
           </a>
+
+          <PWAInstallButton
+            variant="desktop_drawer"
+            onActionDone={() => setMobileMenuOpen(false)}
+          />
 
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button
